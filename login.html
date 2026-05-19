@@ -12,6 +12,44 @@
 
     <link rel="stylesheet" href="./static/css/style.css?v=23">
     <script src="./static/js/utils.js?v=23"></script>
+    <style>
+        .login-mode-switch {
+            display: flex;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #e0e0e0;
+        }
+        .mode-btn {
+            flex: 1;
+            padding: 10px 0;
+            text-align: center;
+            cursor: pointer;
+            background: #f5f5f5;
+            color: #666;
+            font-size: 14px;
+            transition: all 0.3s;
+            user-select: none;
+        }
+        .mode-btn.active {
+            background: #2196f3;
+            color: white;
+            font-weight: bold;
+        }
+        .login-input {
+            width: 100%;
+            height: 40px;
+            padding: 0 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+            outline: none;
+        }
+        .login-input:focus {
+            border-color: #2196f3;
+        }
+    </style>
 </head>
 <body class="login-page" data-theme="blue">
     <div class="login-container">
@@ -22,13 +60,18 @@
             </div>
             <h1 class="login-system">药品订购系统</h1>
 
+            <!-- 登录模式切换 -->
+            <div class="login-mode-switch">
+                <span class="mode-btn active" data-mode="employee">员工登录</span>
+                <span class="mode-btn" data-mode="admin">管理员登录</span>
+            </div>
+
             <form id="loginForm" onsubmit="return false;">
-                <!-- 门店下拉选择 -->
-                <div class="form-group">
+                <!-- 员工登录：门店下拉选择 -->
+                <div class="form-group" id="storeGroup">
                     <label>选择门店</label>
                     <select id="storeSelect" class="login-select">
                         <option value="">-- 请选择门店 --</option>
-                        <option value="admin">管理员</option>
                         <option value="wszhyy02">02第二药店</option>
                         <option value="wszhyy03">03第三药店</option>
                         <option value="wszhyy04">04第四药店</option>
@@ -42,12 +85,18 @@
                     </select>
                 </div>
 
-                <!-- 账号下拉选择 -->
-                <div class="form-group">
+                <!-- 员工登录：账号下拉选择 -->
+                <div class="form-group" id="accountGroup">
                     <label>选择账号</label>
                     <select id="accountSelect" class="login-select" disabled>
                         <option value="">-- 请先选择门店 --</option>
                     </select>
+                </div>
+
+                <!-- 管理员登录：用户名输入 -->
+                <div class="form-group" id="adminUsernameGroup" style="display:none;">
+                    <label>用户名</label>
+                    <input type="text" id="adminUsernameInput" class="login-input" placeholder="请输入用户名" autocomplete="username">
                 </div>
 
                 <!-- 密码框 -->
@@ -248,6 +297,29 @@
                     }, 100);
                 }
 
+                // 登录模式切换
+                var modeBtns = document.querySelectorAll('.mode-btn');
+                modeBtns.forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        modeBtns.forEach(function(b) { b.classList.remove('active'); });
+                        this.classList.add('active');
+                        var mode = this.dataset.mode;
+                        if (mode === 'admin') {
+                            document.getElementById('storeGroup').style.display = 'none';
+                            document.getElementById('accountGroup').style.display = 'none';
+                            document.getElementById('adminUsernameGroup').style.display = '';
+                            document.getElementById('adminUsernameInput').focus();
+                        } else {
+                            document.getElementById('storeGroup').style.display = '';
+                            document.getElementById('accountGroup').style.display = '';
+                            document.getElementById('adminUsernameGroup').style.display = 'none';
+                        }
+                        passwordEl.value = '';
+                        document.getElementById('rememberPassword').checked = false;
+                        hideError();
+                    });
+                });
+
                 // 登录按钮
                 document.getElementById('loginBtn').addEventListener('click', handleLogin);
 
@@ -255,20 +327,31 @@
                 passwordEl.addEventListener('keypress', function(e) {
                     if (e.key === 'Enter') handleLogin();
                 });
+                document.getElementById('adminUsernameInput').addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter') handleLogin();
+                });
             } catch (e) {
                 alert('初始化失败: ' + e.message);
             }
         };
 
-        // ========== 门店登录 ==========
+        // ========== 登录处理 ==========
         async function handleLogin() {
             if (isLoggingIn) return;
-            var store = document.getElementById('storeSelect').value;
-            var account = document.getElementById('accountSelect').value;
-            var password = document.getElementById('passwordInput').value;
+            var isAdminMode = document.querySelector('.mode-btn.active').dataset.mode === 'admin';
+            var account, password, store = null;
 
-            if (!store) { showError('请选择门店'); return; }
-            if (!account) { showError('请选择账号'); return; }
+            if (isAdminMode) {
+                account = document.getElementById('adminUsernameInput').value;
+                password = document.getElementById('passwordInput').value;
+                if (!account) { showError('请输入用户名'); return; }
+            } else {
+                store = document.getElementById('storeSelect').value;
+                account = document.getElementById('accountSelect').value;
+                password = document.getElementById('passwordInput').value;
+                if (!store) { showError('请选择门店'); return; }
+                if (!account) { showError('请选择账号'); return; }
+            }
             if (!password) { showError('请输入密码'); return; }
 
             isLoggingIn = true; showLoading(true); hideError();
@@ -298,17 +381,25 @@
                 var loginData = result.data;
                 localStorage.setItem('token', loginData.session.access_token);
                 localStorage.setItem('user', JSON.stringify(loginData.user));
-                
-                // 保存本次登录的门店和账号
-                localStorage.setItem('lastStore', store);
-                localStorage.setItem('lastAccount', account);
-                
-                // 保存或清除记住的密码（按账号存储）
+
+                // 保存本次登录信息
+                if (!isAdminMode) {
+                    localStorage.setItem('lastStore', store);
+                    localStorage.setItem('lastAccount', account);
+                }
+
+                // 保存或清除记住的密码
                 var rememberChecked = document.getElementById('rememberPassword').checked;
                 var currentPassword = document.getElementById('passwordInput').value;
-                var passwordKey = 'savedPassword_' + store + '_' + account;
-                var rememberKey = 'rememberPassword_' + store + '_' + account;
-                
+                var passwordKey, rememberKey;
+                if (isAdminMode) {
+                    passwordKey = 'savedPassword_admin_' + account;
+                    rememberKey = 'rememberPassword_admin_' + account;
+                } else {
+                    passwordKey = 'savedPassword_' + store + '_' + account;
+                    rememberKey = 'rememberPassword_' + store + '_' + account;
+                }
+
                 if (rememberChecked && currentPassword) {
                     localStorage.setItem(passwordKey, currentPassword);
                     localStorage.setItem(rememberKey, 'true');

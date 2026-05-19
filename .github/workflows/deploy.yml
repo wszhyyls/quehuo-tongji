@@ -8,26 +8,22 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          
+
       - name: Install dependencies
         run: npm install
-        
-      - name: Deploy Edge Function
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          WRANGLER_CF_API_TOKEN: ${{ secrets.WRANGLER_CF_API_TOKEN }}
-          BCRYPT_PASSWORD: ${{ secrets.BCRYPT_PASSWORD }}
-        run: npx wrangler deploy supabase/functions/query-shortage-data/index.ts --force
-        
+
+      # NOTE: Supabase Edge Functions 需要手动部署（缺少 SUPABASE_ACCESS_TOKEN）
+      # 部署方式：本地运行 "npx supabase functions deploy" 或 Supabase Dashboard
+      # 前端自动部署到 Cloudflare Pages
+
       - name: Deploy to Cloudflare Pages
         env:
           WRANGLER_CF_API_TOKEN: ${{ secrets.WRANGLER_CF_API_TOKEN }}
