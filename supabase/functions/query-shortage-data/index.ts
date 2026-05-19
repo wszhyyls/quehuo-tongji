@@ -1447,7 +1447,34 @@ serve(async (req) => {
                     }
                   }
                 } else {
-                  console.warn("[store_login] 未找到Auth用户，无法修复:", email);
+                  // Auth 中无此员工用户，自动创建
+                  console.warn("[store_login] Auth中无此用户，自动创建:", email);
+                  try {
+                    const { data: newUser, error: createErr } = await authClient.auth.admin.createUser({
+                      email: email,
+                      password: validPassword,
+                      email_confirm: true
+                    });
+                    if (createErr) {
+                      console.error("[store_login] 创建Auth用户失败:", createErr.message);
+                    } else if (newUser && newUser.user) {
+                      console.log("[store_login] Auth用户已创建:", newUser.user.id);
+                      // 重新登录
+                      const { data: retryData, error: retryErr } = await authClient.auth.signInWithPassword({
+                        email: validUsername + '@wszh.com',
+                        password: validPassword
+                      });
+                      if (!retryErr && retryData) {
+                        console.log("[store_login] 新用户登录成功");
+                        signInData = retryData;
+                        signInError = null;
+                      } else {
+                        console.error("[store_login] 新用户登录失败:", retryErr?.message);
+                      }
+                    }
+                  } catch (createErr) {
+                    console.error("[store_login] 创建Auth用户异常:", createErr);
+                  }
                 }
               } catch (fixErr) {
                 console.error("[store_login] Auth修复异常:", fixErr);
