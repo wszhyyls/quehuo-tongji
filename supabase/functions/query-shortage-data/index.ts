@@ -1397,18 +1397,72 @@ serve(async (req) => {
         const validPassword = validateInput(password, "密码", 100);
         
         const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-        const { data: signInData, error: signInError } = await authClient.auth.signInWithPassword({
+        let { data: signInData, error: signInError } = await authClient.auth.signInWithPassword({
           email: validUsername + '@wszh.com',
           password: validPassword
         });
         
         if (signInError) {
-          return new Response(JSON.stringify({
-            success: false, error: "账号或密码错误"
-          }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          console.log("[store_login] Auth密码验证失败, username:", validUsername, "error:", signInError.message);
+          
+          // 检查是否是员工账号（store_employees.password 可能已更新但 Auth 未同步）
+          const { data: empCheck } = await authClient
+            .from("store_employees")
+            .select("id, phone, password")
+            .eq("phone", validUsername)
+            .eq("is_active", true)
+            .limit(1);
+          
+          if (empCheck && empCheck.length > 0) {
+            const emp = empCheck[0];
+            const storedPwd = emp.password || DEFAULT_EMPLOYEE_PASSWORD;
+            console.log("[store_login] 找到员工记录, phone:", emp.phone, "输入密码匹配:", validPassword === storedPwd);
+            
+            if (validPassword === storedPwd) {
+              // 员工密码正确但 Auth 密码不匹配，自动修复 Auth 密码
+              console.log("[store_login] 员工密码正确，尝试修复Auth密码...");
+              try {
+                const email = validUsername + '@wszh.com';
+                const { data: userList } = await authClient.auth.admin.listUsers();
+                const authUser = userList?.users?.find((u: any) => u.email === email);
+                
+                if (authUser) {
+                  const { error: fixErr } = await authClient.auth.admin.updateUserById(
+                    authUser.id, { password: validPassword }
+                  );
+                  if (fixErr) {
+                    console.error("[store_login] Auth密码修复失败:", fixErr.message);
+                  } else {
+                    console.log("[store_login] Auth密码已修复，重新登录...");
+                    // 重新尝试登录
+                    const { data: retryData, error: retryErr } = await authClient.auth.signInWithPassword({
+                      email: validUsername + '@wszh.com',
+                      password: validPassword
+                    });
+                    if (!retryErr && retryData) {
+                      console.log("[store_login] 修复后登录成功");
+                      // 继续用修复后的数据
+                      signInData = retryData;
+                      signInError = null;
+                    }
+                  }
+                } else {
+                  console.warn("[store_login] 未找到Auth用户，无法修复:", email);
+                }
+              } catch (fixErr) {
+                console.error("[store_login] Auth修复异常:", fixErr);
+              }
+            }
+          }
+          
+          if (signInError) {
+            return new Response(JSON.stringify({
+              success: false, error: "账号或密码错误"
+            }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
         }
         
-        const userData = signInData.user;
+        const userData = signInData!.user;
         console.log("[store_login] 用户登录成功, id:", userData.id, "username:", validUsername);
         
         // 2. 检查是否是 admin 子账号（使用全新客户端，避免 signInWithPassword 的 session 缓存影响 RLS）
@@ -1945,17 +1999,85 @@ serve(async (req) => {
         if (empData && empData.phone) {
           try {
             const email = empData.phone + '@wszh.com';
-            const { data: userList } = await supabase.auth.admin.listUsers();
-            const authUser = userList?.users?.find((u: any) => u.email === email);
-            if (authUser) {
-              const { error: authUpdateErr } = await supabase.auth.admin.updateUserById(
-                authUser.id,
-                { password: validPassword }
-              );
-              if (authUpdateErr) {
-                console.error("[update_employee_password] Auth密码更新失败:", authUpdateErr);
+            console.log("[update_employee_password] 开始同步Auth密码, email:", email);
+            
+            // 方法1: 尝试用 supabase.auth.admin API
+            let authUserId = null;
+            try {
+              const { data: userList, error: listErr } = await supabase.auth.admin.listUsers();
+              if (listErr) {
+                console.error("[update_employee_password] listUsers失败:", listErr.message);
+              } else if (userList && userList.users) {
+                const authUser = userList.users.find((u: any) => u.email === email);
+                if (authUser) {
+                  authUserId = authUser.id;
+                  console.log("[update_employee_password] 通过listUsers找到Auth用户:", authUserId);
+                }
+              }
+            } catch (e) {
+              console.error("[update_employee_password] listUsers异常:", e);
+            }
+            
+            // 方法2: 备用 - 通过 REST API 直接调用 Auth Admin
+            if (!authUserId) {
+              console.log("[update_employee_password] 尝试通过REST API查找用户...");
+              const listRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
+                headers: {
+                  'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+                  'apikey': SUPABASE_SERVICE_KEY
+                }
+              });
+              if (listRes.ok) {
+                const listData = await listRes.json();
+                if (listData && Array.isArray(listData.users)) {
+                  const authUser = listData.users.find((u: any) => u.email === email);
+                  if (authUser) {
+                    authUserId = authUser.id;
+                    console.log("[update_employee_password] 通过REST API找到Auth用户:", authUserId);
+                  }
+                }
               } else {
-                console.log("[update_employee_password] Auth密码已同步更新:", email);
+                console.error("[update_employee_password] REST API listUsers失败:", listRes.status);
+              }
+            }
+            
+            // 更新 Auth 密码
+            if (authUserId) {
+              // 方法1: supabase.auth.admin.updateUserById
+              let updatedViaAdmin = false;
+              try {
+                const { error: authUpdateErr } = await supabase.auth.admin.updateUserById(
+                  authUserId,
+                  { password: validPassword }
+                );
+                if (authUpdateErr) {
+                  console.error("[update_employee_password] updateUserById失败:", authUpdateErr.message);
+                } else {
+                  console.log("[update_employee_password] Auth密码已通过admin API更新:", email);
+                  updatedViaAdmin = true;
+                }
+              } catch (e) {
+                console.error("[update_employee_password] updateUserById异常:", e);
+              }
+              
+              // 方法2: 备用 - REST API PUT
+              if (!updatedViaAdmin) {
+                console.log("[update_employee_password] 尝试通过REST API更新密码...");
+                const updateRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${authUserId}`, {
+                  method: 'PUT',
+                  headers: {
+                    'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+                    'apikey': SUPABASE_SERVICE_KEY,
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({ password: validPassword })
+                });
+                if (updateRes.ok) {
+                  console.log("[update_employee_password] Auth密码已通过REST API更新:", email);
+                } else {
+                  const errText = await updateRes.text();
+                  console.error("[update_employee_password] REST API更新密码失败:", updateRes.status, errText);
+                }
               }
             } else {
               console.warn("[update_employee_password] 未找到Auth用户:", email);
