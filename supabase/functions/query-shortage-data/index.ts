@@ -1593,7 +1593,19 @@ serve(async (req) => {
               }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
             }
             
-            console.log("[store_login] 待授权设备记录已创建:", insertedDevice);
+            console.log("[store_login] 待授权设备记录已创建:", JSON.stringify(insertedDevice));
+            
+            // 验证插入是否成功
+            if (!insertedDevice || insertedDevice.length === 0) {
+              console.warn("[store_login] 警告：插入成功但select返回空，尝试直接查询验证");
+              const { data: verifyData } = await adminClient
+                .from("store_authorized_devices")
+                .select("*")
+                .eq("device_id", validDeviceId)
+                .eq("username", validUsername)
+                .eq("is_active", true);
+              console.log("[store_login] 验证查询结果:", JSON.stringify(verifyData));
+            }
             
             return new Response(JSON.stringify({
               success: false, error: "该设备未授权，请联系管理员授权后使用",
@@ -1694,6 +1706,12 @@ serve(async (req) => {
         
         if (empErr) {
           console.error("[get_pending_devices] 员工设备查询失败:", empErr);
+          return new Response(JSON.stringify({ 
+            success: false, 
+            error: "查询失败：" + empErr.message,
+            employee_devices: [],
+            store_devices: []
+          }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
         
         // 单独查询员工信息并合并
@@ -1723,15 +1741,25 @@ serve(async (req) => {
         
         if (storeErr) {
           console.error("[get_pending_devices] 门店设备查询失败:", storeErr);
+          return new Response(JSON.stringify({ 
+            success: false, 
+            error: "查询失败：" + storeErr.message,
+            employee_devices: employeeDevices,
+            store_devices: []
+          }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
         
         console.log("[get_pending_devices] 员工待授权:", employeeDevices.length, "门店待授权:", storePending?.length || 0);
+        console.log("[get_pending_devices] 门店待授权详情:", JSON.stringify(storePending?.slice(0, 3)));
         
-        result = {
-          employee_devices: employeeDevices,
-          store_devices: storePending || []
-        };
-        break;
+        // 直接返回数据，不走 result
+        return new Response(JSON.stringify({ 
+          success: true, 
+          data: {
+            employee_devices: employeeDevices,
+            store_devices: storePending || []
+          }
+        }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
 
       case "get_authorized_devices": {
