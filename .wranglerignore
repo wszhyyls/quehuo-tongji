@@ -1,0 +1,11 @@
+dist/**
+node_modules/**
+backups/**
+sql/**
+supabase/**
+vba/**
+*.bat
+*.md
+package*.json
+electron-main.js
+preload.js

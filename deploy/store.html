@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="purple">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>微山县众和医药连锁有限公司 药品订购系统 - 门店</title>
+
+    <!-- ========== PWA 支持 ========== -->
+    <link rel="manifest" href="./manifest.json">
+    <link rel="apple-touch-icon" href="./static/icon-192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="缺货上报">
+    <meta name="theme-color" content="#667eea">
+    <!-- ============================ -->
+
+    <link rel="stylesheet" href="./static/css/style.css?v=22">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="./static/js/fuse.min.js?v=1"></script>
+    <script src="./static/js/utils.js?v=22"></script>
+</head>
+<body>
+    <!-- 预加载遮罩层 -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="loading-content">
+            <div class="loading-spinner">⏳</div>
+            <div class="loading-text" id="loadingText">正在加载商品数据...</div>
+            <div class="loading-progress" id="loadingProgress">0%</div>
+        </div>
+    </div>
+
+    <div id="versionBar" class="version-bar" style="display:none;">
+        <span id="versionMsg"></span>
+    </div>
+
+    <div class="app-header">
+        <div class="header-left">
+            <img src="./static/logo.jpg" class="company-logo" alt="LOGO">
+            <span class="company-name">微山县众和医药连锁有限公司</span>
+        </div>
+        <div class="header-right">
+            <button id="refreshCacheBtn" class="btn-refresh" title="刷新库存数据">刷新库存</button>
+            <button id="themeBtn" class="btn-theme" title="切换主题">切换主题</button>
+            <button id="logoutBtn" class="btn-logout">退出登录</button>
+        </div>
+    </div>
+
+    <div id="cacheTimeBar" class="cache-time-bar" style="display:none;">
+        <span id="cacheTimeText"></span>
+    </div>
+
+    <div class="app-container">
+        <div class="store-name-bar">
+            <h1 id="storeName" class="store-title">门店</h1>
+        </div>
+
+        <div class="order-tabs">
+            <button class="tab-btn active" data-tab="shortage">缺货订购</button>
+            <button class="tab-btn" data-tab="new">新品订购</button>
+        </div>
+
+        <div id="shortageContent" class="tab-content active">
+            <div class="search-card">
+                <div class="search-header">
+                    <label>商品搜索</label>
+                </div>
+                <div class="search-row">
+                    <input type="text" id="productCode" placeholder="可输入编码/品名/拼音首字母查询" class="search-input">
+                    <button id="queryBtn" class="btn-search">查询</button>
+                </div>
+            </div>
+
+            <div id="searchResults" class="search-results" style="display: none;">
+                <p class="search-title">搜索结果（点击选择）：</p>
+                <div id="searchList" class="search-list"></div>
+            </div>
+
+            <div id="productInfo" class="product-card" style="display: none;">
+                <button id="cancelProductBtn" class="btn-cancel-product" title="取消选择">✕</button>
+                <p class="new-label" id="newLabel" style="display: none;">※ SPFXB暂无此商品，按新品处理</p>
+
+                <div class="product-row">
+                    <div class="product-name-section">
+                        <span class="product-name-badge">商品</span>
+                        <span class="product-name-text" id="pName"></span>
+                    </div>
+                    <span class="product-meta-inline" style="margin:0;padding:0;background:none;border:none;flex-shrink:0;">
+                        <span class="label">规格：</span><span class="value" id="pSpec"></span>
+                        <span class="meta-divider">|</span>
+                        <span class="label">厂家：</span><span class="value" id="pMfg"></span>
+                    </span>
+                </div>
+
+                <div class="stock-row compact">
+                    <div class="stock-item small">
+                        <span class="stock-label">本店库存</span>
+                        <span class="stock-value small" id="pStock">0</span>
+                    </div>
+                    <div class="stock-item small">
+                        <span class="stock-label">配送在途</span>
+                        <span class="stock-value small" id="pTransit">0</span>
+                    </div>
+                    <div class="stock-item small">
+                        <span class="stock-label">仓库库存</span>
+                        <span class="stock-value small" id="pDcStock">0</span>
+                    </div>
+                    <div class="stock-item small">
+                        <span class="stock-label">前30天销量</span>
+                        <span class="stock-value small" id="pSales30" style="color: #e74c3c;">0</span>
+                    </div>
+                    <div class="stock-item small">
+                        <span class="stock-label">标准库存</span>
+                        <span class="stock-value small" id="pStdStock" style="color: #3498db;">0</span>
+                    </div>
+                    <button id="viewStockBtn" class="btn-view-stock" style="display:none;">各店库存</button>
+                </div>
+
+                <div class="action-row">
+                    <div class="action-section-inline">
+                        <div class="input-group-sm">
+                            <label>需求数量</label>
+                            <input type="number" id="demandQty" placeholder="数量" class="demand-input-sm">
+                        </div>
+                        <div class="input-group-sm">
+                            <label>紧急程度</label>
+                            <select id="urgencyLevel" class="urgency-select-sm">
+                                <option value="普通">普通</option>
+                                <option value="加急">加急</option>
+                                <option value="紧急">紧急</option>
+                            </select>
+                        </div>
+                        <div class="input-group-sm">
+                            <label>备注</label>
+                            <input type="text" id="remark" placeholder="选填" class="remark-input-sm">
+                        </div>
+                        <button id="addBtn" class="btn-add btn-add-sm">上报</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="newProductContent" class="tab-content">
+            <div class="new-product-card">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>商品名称</label>
+                        <input type="text" id="npName" placeholder="输入商品名称">
+                    </div>
+                    <div class="form-group">
+                        <label>规格</label>
+                        <input type="text" id="npSpec" placeholder="输入规格">
+                    </div>
+                    <div class="form-group">
+                        <label>生产厂家</label>
+                        <input type="text" id="npMfg" placeholder="输入生产厂家">
+                    </div>
+                    <div class="form-group">
+                        <label>预售价</label>
+                        <input type="number" id="priceEstimate" placeholder="预售价">
+                    </div>
+                    <div class="form-group">
+                        <label>需求数量</label>
+                        <input type="number" id="npQty" placeholder="输入需求数量">
+                    </div>
+                    <div class="form-group">
+                        <label>备注</label>
+                        <input type="text" id="npRemark" placeholder="选填">
+                    </div>
+                </div>
+                <button id="addNewBtn" class="btn-add btn-full">上报</button>
+            </div>
+        </div>
+
+        <div class="list-card">
+            <div class="history-header-row">
+                <h2>历史上报记录</h2>
+                <div class="history-filter-inline">
+                    <select id="historyTypeFilter" class="filter-select-sm">
+                        <option value="">全部类型</option>
+                        <option value="缺货订购">缺货订购</option>
+                        <option value="新品订购">新品订购</option>
+                    </select>
+                    <select id="historyStatusFilter" class="filter-select-sm">
+                        <option value="">全部状态</option>
+                        <option value="待处理">待处理</option>
+                        <option value="已订购">已订购</option>
+                        <option value="已到货">已到货</option>
+                    </select>
+                    <select id="historyTimeFilter" class="filter-select-sm">
+                        <option value="7">最近7天</option>
+                        <option value="30" selected>最近30天</option>
+                        <option value="90">最近90天</option>
+                        <option value="all">全部</option>
+                    </select>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table id="historyList" class="data-table">
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>类型</th>
+                            <th>名称</th>
+                            <th>紧急</th>
+                            <th>需求</th>
+                            <th>补货</th>
+                            <th id="reporterHeader">上报人</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyTbody"></tbody>
+                </table>
+                <div id="historyLoadMore" class="load-more-container" style="display:none;">
+                    <button id="loadMoreBtn" class="btn-search btn-load-more">加载更多</button>
+                </div>
+                <div id="historyEmpty" class="search-empty" style="display:none;">暂无符合条件的记录</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="confirmModal" class="modal">
+        <div class="modal-content">
+            <h3 id="confirmTitle">提示</h3>
+            <p id="confirmMsg"></p>
+            <div class="modal-buttons">
+                <button id="confirmYesBtn" class="btn-primary">继续上报</button>
+                <button id="confirmNoBtn" class="btn-secondary">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="alertModal" class="modal">
+        <div class="modal-content">
+            <h3>提示</h3>
+            <p id="alertMsg"></p>
+            <button id="alertOkBtn" class="btn-primary">确定</button>
+        </div>
+    </div>
+
+    <div id="stockModal" class="modal">
+        <div class="modal-content stock-modal-content">
+            <div class="stock-modal-header">
+                <h3>各门店库存</h3>
+                <button id="stockModalClose" class="btn-modal-close">×</button>
+            </div>
+            <div class="stock-modal-body">
+                <table class="stock-table stock-compact-table">
+                    <thead>
+                        <tr>
+                            <th>门店/仓库</th>
+                            <th>库存</th>
+                            <th>可调拨</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stockTbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="./static/js/store.js?v=25"></script>
+
+    <!-- ========== PWA Service Worker ========== -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./static/sw.js')
+            .then((registration) => {
+              console.log('✅ Service Worker registered:', registration.scope);
+            })
+            .catch((error) => {
+              console.log('❌ Service Worker registration failed:', error);
+            });
+        });
+      }
+    </script>
+    <style>
+        /* 预加载遮罩层样式 */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 99999;
+            transition: opacity 0.5s ease;
+        }
+        .loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        .loading-content {
+            text-align: center;
+            color: white;
+        }
+        .loading-spinner {
+            font-size: 48px;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.7; }
+        }
+        .loading-text {
+            font-size: 16px;
+            margin-top: 20px;
+            opacity: 0.9;
+        }
+        .loading-progress {
+            font-size: 24px;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+    </style>
+</body>
+</html>

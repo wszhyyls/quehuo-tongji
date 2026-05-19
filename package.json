@@ -1,0 +1,58 @@
+{
+  "name": "wszh-shortage-store",
+  "version": "3.17.0",
+  "description": "微山县众和医药连锁有限公司 - 门店缺货上报客户端",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.wszh.shortage-store",
+    "productName": "WSZH-ShortageStore",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "static/icon-512.png"
+    },
+    "files": [
+      "electron-main.js",
+      "preload.js",
+      "store.html",
+      "login.html",
+      "static/**/*",
+      "!static/**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "static/",
+        "to": "static/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "publish": {
+      "provider": "generic",
+      "url": "https://your-cdn.com/updates/"
+    }
+  },
+  "dependencies": {
+    "pptxgenjs": "^4.0.1",
+    "electron-updater": "^6.1.7"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}

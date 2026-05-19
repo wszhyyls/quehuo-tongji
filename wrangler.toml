@@ -1,0 +1,26 @@
+name = "wszhyy"
+compatibility_date = "2024-01-01"
+pages_build_output_dir = "."
+
+# 排除不需要的文件夹（ Electron 桌面端等）
+exclude = [
+  "dist/**",
+  "node_modules/**",
+  "backups/**",
+  "sql/**",
+  "supabase/**",
+  "vba/**",
+  "*.bat",
+  "*.md",
+  "package*.json",
+  "package-lock.json",
+  "electron-main.js",
+  "preload.js",
+  "build.err",
+  "create_ppt.js",
+  "sync_data.py",
+  "*.spec"
+]
+
+[env.production]
+name = "wszhyy"
