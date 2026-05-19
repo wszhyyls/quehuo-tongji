@@ -20,9 +20,13 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # NOTE: Supabase Edge Functions 需要手动部署（缺少 SUPABASE_ACCESS_TOKEN）
-      # 部署方式：本地运行 "npx supabase functions deploy" 或 Supabase Dashboard
-      # 前端自动部署到 Cloudflare Pages
+      - name: Install Supabase CLI
+        run: npm install -g supabase
+
+      - name: Deploy Edge Functions
+        run: npx supabase functions deploy query-shortage-data --project-ref qswpgnnedqvuegwfbprd
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
       - name: Deploy to Cloudflare Pages
         env:
