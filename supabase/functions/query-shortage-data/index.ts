@@ -1876,13 +1876,9 @@ serve(async (req) => {
           });
         }
         
-        // 密码加密存储
-        const bcrypt = Deno.env.get("BCRYPT_PASSWORD") || "default_bcrypt_secret_change_in_production";
-        const hashedPassword = await hashPassword(validPassword, bcrypt);
-        
         const { data: updated, error: updateErr } = await supabase
           .from("store_employees")
-          .update({ password: hashedPassword })
+          .update({ password: validPassword })
           .eq("id", validId)
           .select();
         

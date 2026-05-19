@@ -128,7 +128,7 @@
                 <span style="display:inline-block;animation:spin 1s linear infinite;">&#8987;</span> 正在验证...
             </div>
             
-            <div class="version-info">V3.18.1</div>
+            <div class="version-info">V3.18.2</div>
         </div>
     </div>
 
@@ -243,18 +243,14 @@
                 function focusPasswordInput() {
                     // 先移除可能阻碍焦点的属性
                     passwordEl.removeAttribute('disabled');
+                    passwordEl.removeAttribute('readonly');
                     passwordEl.style.display = '';
+                    passwordEl.style.pointerEvents = 'auto';
                     
-                    // 多次尝试聚焦，确保成功
-                    var focusAttempts = 0;
-                    var focusInterval = setInterval(function() {
+                    // 延迟聚焦，避免与select的blur冲突导致无法输入
+                    setTimeout(function() {
                         passwordEl.focus();
-                        focusAttempts++;
-                        // 如果成功聚焦或尝试次数超过10次则停止
-                        if (document.activeElement === passwordEl || focusAttempts >= 10) {
-                            clearInterval(focusInterval);
-                        }
-                    }, 30);
+                    }, 150);
                 }
                 
                 // 密码显示/隐藏切换
