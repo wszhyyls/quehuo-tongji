@@ -1079,7 +1079,7 @@ var defaultStoreList = [
 async function loadStores() {
     try {
         var tbody = document.getElementById('usersTbody');
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#999;">加载中...</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#999;">加载中...</td></tr>';
         
         var stores = [];
         
@@ -1107,7 +1107,7 @@ async function loadStores() {
         tbody.innerHTML = '';
         
         if (stores.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#999;">暂无门店数据</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#999;">暂无门店数据</td></tr>';
             return;
         }
         
@@ -1120,15 +1120,13 @@ async function loadStores() {
             
             tr.innerHTML = '<td>' + store.username + '</td>' +
                 '<td style="white-space:nowrap;">' + displayName + '</td>' +
-                '<td style="text-align:center;color:#999;">-</td>' +
-                '<td style="text-align:center;">' + statusBadge + '</td>' +
-                '<td style="text-align:center;color:#999;">-</td>';
+                '<td style="text-align:center;">' + statusBadge + '</td>';
             tbody.appendChild(tr);
         });
     } catch(err) {
         console.error('门店列表加载失败:', err);
         document.getElementById('usersTbody').innerHTML =
-            '<tr><td colspan="5" style="text-align:center;color:red;">加载失败：' + err.message + '</td></tr>';
+            '<tr><td colspan="3" style="text-align:center;color:red;">加载失败：' + err.message + '</td></tr>';
     }
 }
 

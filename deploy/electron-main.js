@@ -2,29 +2,24 @@ const { app, BrowserWindow, Menu, dialog, ipcMain } = require('electron');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
 
-// 禁用硬件加速
-app.disableHardwareAcceleration();
-
-// 配置
+// 配置（优化：延迟加载 icon）
 const CONFIG = {
-  title: 'WSZH-ShortageStore v3.17',
+  title: 'WSZH-ShortageStore v3.18.5',
   width: 1400,
   height: 900,
   minWidth: 800,
   minHeight: 600,
   autoHideMenuBar: true,
-  icon: path.join(__dirname, 'static', 'icon-512.png'),
   webPreferences: {
     nodeIntegration: false,
     contextIsolation: true,
     webSecurity: true,
-    preload: path.join(__dirname, 'preload.js')  // 预加载脚本
+    preload: path.join(__dirname, 'preload.js')
   }
 };
 
 // 更新服务器地址（Supabase Edge Function）
-const UPDATE_CHECK_URL = process.env.UPDATE_CHECK_URL || 
-  'https://your-project.supabase.co/functions/v1/check-update';
+const UPDATE_CHECK_URL = 'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/check-update';
 
 let mainWindow = null;
 
@@ -34,7 +29,7 @@ function log(message) {
   console.log(`[${timestamp}] ${message}`);
 }
 
-// 创建启动画面窗口
+// 创建启动画面窗口（优化：更快显示）
 function createSplashWindow() {
   const splashWindow = new BrowserWindow({
     width: 500,
@@ -42,44 +37,47 @@ function createSplashWindow() {
     frame: false,
     transparent: true,
     resizable: false,
-    center: true,  // 居中显示
+    center: true,
+    show: true,  // 立即显示，不等待内容加载
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true
     }
   });
 
-  var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
-  splashWindow.loadURL(path.join(BASE_URL, '/static/splash.html'));
+  // 使用本地文件加载（更快）
+  var splashPath = path.join(__dirname, 'static', 'splash.html');
+  splashWindow.loadFile(splashPath);
 
   return splashWindow;
 }
 
 // 创建主窗口
 function createWindow() {
-  // 先创建启动画面
+  // 立即创建启动画面（不等待任何资源）
   const splashWindow = createSplashWindow();
 
-  // 创建主窗口（隐藏状态，不最大化）
+  // 立即创建主窗口（隐藏状态）
   mainWindow = new BrowserWindow({
     ...CONFIG,
-    show: false  // 初始隐藏
+    show: false
   });
 
-  // 加载登录页面（从服务器加载，支持热更新）
+  // 异步加载登录页面
   var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
-  var cacheBuster = '?v=' + new Date().getTime();
-  mainWindow.loadURL(BASE_URL + '/login.html' + cacheBuster);
+  mainWindow.loadURL(BASE_URL + '/login.html?v=' + new Date().getTime());
 
-  // 页面加载完成后关闭启动画面并最大化主窗口
+  // 页面加载完成后显示主窗口
   mainWindow.webContents.on('did-finish-load', () => {
-    // 先关闭启动画面
-    if (splashWindow && !splashWindow.isDestroyed()) {
-      splashWindow.close();
-    }
-    // 然后显示并最大化主窗口
     mainWindow.maximize();
     mainWindow.show();
+    
+    // 延迟关闭启动画面
+    setTimeout(() => {
+      if (splashWindow && !splashWindow.isDestroyed()) {
+        splashWindow.close();
+      }
+    }, 200);
   });
 
   // 窗口关闭时退出应用

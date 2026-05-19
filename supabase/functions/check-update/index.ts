@@ -7,8 +7,8 @@ const corsHeaders = {
 };
 
 // 最新版本配置（每次发布新版本时更新）
-const LATEST_VERSION = '3.17.0';
-const UPDATE_URL = 'https://your-cdn.com/updates/';  // 替换为实际更新文件地址
+const LATEST_VERSION = '3.18.5';
+const UPDATE_URL = 'https://wszhyy.pages.dev/releases/';  // 放在 Cloudflare Pages
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -27,15 +27,14 @@ serve(async (req) => {
       data: {
         version: LATEST_VERSION,
         updateAvailable: isUpdateAvailable,
-        releaseDate: '2026-05-18',
+        releaseDate: '2026-05-19',
         releaseNotes: `
-v3.17.0 更新内容：
-- 设备授权机制升级
-- 所有账号需总部授权才能登录
-- 单设备登录限制
-- 例外账号：admin 和 15305479520
+v3.18.5 更新内容：
+- 修复设备授权记录无法保存的问题
+- 优化启动动画过渡效果
+- 统一版本号显示
         `.trim(),
-        downloadUrl: `${UPDATE_URL}WSZH-ShortageStore-${LATEST_VERSION}.exe`,
+        downloadUrl: `${UPDATE_URL}WSZH-ShortageStore-3.18.5.exe`,
         forceUpdate: false
       }
     };

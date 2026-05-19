@@ -1608,12 +1608,15 @@ serve(async (req) => {
         }
         
         // 3.2 查当前设备是否已有记录
+        console.log("[store_login] 检查设备记录, device_id:", validDeviceId, "username:", validUsername);
         const { data: existingDevice } = await adminClient
           .from("store_authorized_devices")
           .select("id, is_authorized, username, is_active")
           .eq("device_id", validDeviceId)
           .eq("is_active", true)
           .limit(1);
+        
+        console.log("[store_login] 当前设备记录:", JSON.stringify(existingDevice));
 
         if (existingDevice && existingDevice.length > 0) {
           // 已有记录
@@ -1640,8 +1643,10 @@ serve(async (req) => {
             .eq("id", device.id);
         } else {
           // 新设备
+          console.log("[store_login] 新设备, isExempt:", isExempt);
           if (isExempt) {
             // 例外账号：自动授权
+            console.log("[store_login] 例外账号自动授权");
             await adminClient
               .from("store_authorized_devices")
               .insert([{
@@ -1649,7 +1654,7 @@ serve(async (req) => {
                 username: validUsername,
                 is_authorized: true,
                 is_active: true,
-                first_login_at: new Date().toISOString(),
+                authorized_at: new Date().toISOString(),
                 last_login_at: new Date().toISOString()
               }]);
           } else {
@@ -1661,7 +1666,7 @@ serve(async (req) => {
                 username: validUsername,
                 is_authorized: false,
                 is_active: true,
-                first_login_at: new Date().toISOString()
+                last_login_at: new Date().toISOString()
               }])
               .select();
             
@@ -1731,10 +1736,19 @@ serve(async (req) => {
             .limit(1);
           
           if (existing && existing.length > 0) {
-            await supabase
-              .from("device_bindings")
-              .update({ is_authorized: authorize })
-              .eq("id", existing[0].id);
+            if (authorize) {
+              // 授权
+              await supabase
+                .from("device_bindings")
+                .update({ is_authorized: true, authorized_at: new Date().toISOString() })
+                .eq("id", existing[0].id);
+            } else {
+              // 拒绝：删除记录（或标记为不活跃）
+              await supabase
+                .from("device_bindings")
+                .delete()
+                .eq("id", existing[0].id);
+            }
           } else if (authorize) {
             // 授权时如果记录不存在，创建一条
             await supabase.from("device_bindings").insert([{
@@ -1756,10 +1770,19 @@ serve(async (req) => {
             .limit(1);
           
           if (existing && existing.length > 0) {
-            await supabase
-              .from("store_authorized_devices")
-              .update({ is_authorized: authorize })
-              .eq("id", existing[0].id);
+            if (authorize) {
+              // 授权
+              await supabase
+                .from("store_authorized_devices")
+                .update({ is_authorized: true, authorized_at: new Date().toISOString() })
+                .eq("id", existing[0].id);
+            } else {
+              // 拒绝：删除记录
+              await supabase
+                .from("store_authorized_devices")
+                .delete()
+                .eq("id", existing[0].id);
+            }
           } else if (authorize) {
             await supabase.from("store_authorized_devices").insert([{
               device_id: validDeviceId,
@@ -1812,6 +1835,14 @@ serve(async (req) => {
             store_employees: empMap[d.employee_id] || null
           }));
         }
+        
+        // 调试：先查所有记录（不限条件）
+        const { data: allStoreDevices } = await supabase
+          .from("store_authorized_devices")
+          .select("*")
+          .limit(50);
+        console.log("[get_pending_devices] store_authorized_devices 全部记录:", allStoreDevices?.length || 0);
+        console.log("[get_pending_devices] 全部记录详情:", JSON.stringify(allStoreDevices));
         
         // 门店账号待授权设备（查询所有门店）
         const { data: storePending, error: storeErr } = await supabase
