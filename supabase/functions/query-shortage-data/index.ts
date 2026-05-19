@@ -1700,7 +1700,7 @@ serve(async (req) => {
         // 员工待授权设备（先查设备，再单独查员工信息，避免外键关联查询失败）
         const { data: empPending, error: empErr } = await supabase
           .from("device_bindings")
-          .select("id, device_id, employee_id, first_login_at, created_at")
+          .select("id, device_id, employee_id, first_login_at")
           .eq("is_active", true)
           .eq("is_authorized", false);
         
