@@ -24,19 +24,11 @@ jobs:
       # 部署方式：本地运行 "npx supabase functions deploy" 或 Supabase Dashboard
       # 前端自动部署到 Cloudflare Pages
 
-      - name: Verify Cloudflare Token
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.WRANGLER_CF_API_TOKEN }}
-        run: |
-          echo "Testing API Token..."
-          curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | head -c 500
-          echo ""
-          echo "Testing accounts API..."
-          curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | head -c 500
-
       - name: Deploy to Cloudflare Pages
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.WRANGLER_CF_API_TOKEN }}
-        run: npx wrangler pages deploy deploy/ --project-name=缺货统计系统 --account-id=4826d39607b18e6550ec349d1bd3f7f1
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.WRANGLER_CF_API_TOKEN }}
+          accountId: 4826d39607b18e6550ec349d1bd3f7f1
+          projectName: 缺货统计系统
+          directory: deploy
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
