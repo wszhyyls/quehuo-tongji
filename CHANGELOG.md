@@ -1,6 +1,44 @@
 # 版本升级记录 (CHANGELOG)
 
-> 适用版本：v3.18.0 | 更新日期：2026-05-19
+> 适用版本：v3.18.1 | 更新日期：2026-05-19
+
+---
+
+## v3.18.1 — 登录模式切换 + 修复自动部署
+
+**部署日期：2026-05-19**
+
+### 功能增强
+
+#### 1. 登录页面增加员工/管理员切换模式
+
+**新增功能**：
+- 登录页面顶部新增模式切换按钮（员工登录 / 管理员登录）
+- 员工登录：选择门店 + 账号 + 密码
+- 管理员登录：输入用户名 + 密码
+- 所有 `admin_users` 表中的子账号都可以登录管理后台
+- 不再只限于 `admin` 账号
+
+**交互优化**：
+- 切换模式时自动清空输入框
+- 记住密码按模式独立存储
+- 密码显示/隐藏按钮联动
+
+### 问题修复
+
+#### 2. GitHub Actions 部署工作流修复
+
+**问题描述**：
+GitHub Actions 中的 `wrangler deploy supabase/functions/...` 命令无法正确部署 Supabase Edge Functions。Wrangler 是 Cloudflare Workers 的部署工具，不能用于 Supabase。
+
+**修复方案**：
+- 移除错误的 Edge Function 部署命令
+- 只保留前端 Cloudflare Pages 部署
+- 添加注释说明 Edge Functions 需要手动部署
+
+**注意**：Supabase Edge Functions 需要通过以下方式手动部署：
+- 方式一：Supabase Dashboard → Edge Functions → 手动部署
+- 方式二：本地运行 `npx supabase functions deploy query-shortage-data --project-ref qswpgnnedqvuegwfbprd`
 
 ---
 
