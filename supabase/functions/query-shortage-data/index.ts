@@ -1685,15 +1685,33 @@ serve(async (req) => {
       case "get_pending_devices": {
         // 获取所有待授权的设备列表（管理员查看，不限制门店）
         
-        // 员工待授权设备（查询所有门店）
+        // 员工待授权设备（先查设备，再单独查员工信息，避免外键关联查询失败）
         const { data: empPending, error: empErr } = await supabase
           .from("device_bindings")
-          .select("*, store_employees(name, phone, store_id)")
+          .select("id, device_id, employee_id, first_login_at, created_at")
           .eq("is_active", true)
           .eq("is_authorized", false);
         
         if (empErr) {
           console.error("[get_pending_devices] 员工设备查询失败:", empErr);
+        }
+        
+        // 单独查询员工信息并合并
+        let employeeDevices = [];
+        if (empPending && empPending.length > 0) {
+          const empIds = [...new Set(empPending.map((d: any) => d.employee_id).filter(Boolean))];
+          const empMap: Record<string, any> = {};
+          if (empIds.length > 0) {
+            const { data: emps } = await supabase
+              .from("store_employees")
+              .select("id, name, phone, store_id")
+              .in("id", empIds);
+            emps?.forEach((e: any) => { empMap[e.id] = e; });
+          }
+          employeeDevices = empPending.map((d: any) => ({
+            ...d,
+            store_employees: empMap[d.employee_id] || null
+          }));
         }
         
         // 门店账号待授权设备（查询所有门店）
@@ -1707,10 +1725,10 @@ serve(async (req) => {
           console.error("[get_pending_devices] 门店设备查询失败:", storeErr);
         }
         
-        console.log("[get_pending_devices] 员工待授权:", empPending?.length || 0, "门店待授权:", storePending?.length || 0);
+        console.log("[get_pending_devices] 员工待授权:", employeeDevices.length, "门店待授权:", storePending?.length || 0);
         
         result = {
-          employee_devices: empPending || [],
+          employee_devices: employeeDevices,
           store_devices: storePending || []
         };
         break;
@@ -1876,6 +1894,13 @@ serve(async (req) => {
           });
         }
         
+        // 先查员工手机号（用于同步更新 Auth 密码）
+        const { data: empData } = await supabase
+          .from("store_employees")
+          .select("phone")
+          .eq("id", validId)
+          .single();
+        
         const { data: updated, error: updateErr } = await supabase
           .from("store_employees")
           .update({ password: validPassword })
@@ -1888,6 +1913,30 @@ serve(async (req) => {
           });
         }
         
+        // 同步更新 Supabase Auth 密码（员工登录走 store_login，密码验证在 Auth 中）
+        if (empData && empData.phone) {
+          try {
+            const email = empData.phone + '@wszh.com';
+            const { data: userList } = await supabase.auth.admin.listUsers();
+            const authUser = userList?.users?.find((u: any) => u.email === email);
+            if (authUser) {
+              const { error: authUpdateErr } = await supabase.auth.admin.updateUserById(
+                authUser.id,
+                { password: validPassword }
+              );
+              if (authUpdateErr) {
+                console.error("[update_employee_password] Auth密码更新失败:", authUpdateErr);
+              } else {
+                console.log("[update_employee_password] Auth密码已同步更新:", email);
+              }
+            } else {
+              console.warn("[update_employee_password] 未找到Auth用户:", email);
+            }
+          } catch (authErr) {
+            console.error("[update_employee_password] Auth同步异常:", authErr);
+          }
+        }
+        
         result = { success: true, updated: updated };
         break;
       }
@@ -1896,6 +1945,13 @@ serve(async (req) => {
         // 重置员工密码为默认密码
         const { id } = params;
         const validId = validateInput(id, "员工ID", 100);
+        
+        // 先查员工手机号
+        const { data: empData } = await supabase
+          .from("store_employees")
+          .select("phone")
+          .eq("id", validId)
+          .single();
         
         const { data: updated, error: updateErr } = await supabase
           .from("store_employees")
@@ -1907,6 +1963,21 @@ serve(async (req) => {
           return new Response(JSON.stringify({ success: false, error: "重置失败：" + updateErr.message }), {
             status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
           });
+        }
+        
+        // 同步更新 Supabase Auth 密码
+        if (empData && empData.phone) {
+          try {
+            const email = empData.phone + '@wszh.com';
+            const { data: userList } = await supabase.auth.admin.listUsers();
+            const authUser = userList?.users?.find((u: any) => u.email === email);
+            if (authUser) {
+              await supabase.auth.admin.updateUserById(authUser.id, { password: DEFAULT_EMPLOYEE_PASSWORD });
+              console.log("[reset_employee_password] Auth密码已同步重置:", email);
+            }
+          } catch (authErr) {
+            console.error("[reset_employee_password] Auth同步异常:", authErr);
+          }
         }
         
         result = { success: true, default_password: DEFAULT_EMPLOYEE_PASSWORD, updated: updated };
