@@ -29,6 +29,6 @@ jobs:
         with:
           apiToken: ${{ secrets.WRANGLER_CF_API_TOKEN }}
           accountId: 4826d39607b18e6550ec349d1bd3f7f1
-          projectName: 缺货统计系统
+          projectName: wszhhyy
           directory: deploy
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
