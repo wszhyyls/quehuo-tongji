@@ -7,8 +7,8 @@ const corsHeaders = {
 };
 
 // 最新版本配置（每次发布新版本时更新）
-const LATEST_VERSION = '3.18.5';
-const UPDATE_URL = 'https://wszhyy.pages.dev/releases/';  // 放在 Cloudflare Pages
+const LATEST_VERSION = '3.18.6';
+const UPDATE_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.6/';  // GitHub Releases
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -27,14 +27,17 @@ serve(async (req) => {
       data: {
         version: LATEST_VERSION,
         updateAvailable: isUpdateAvailable,
-        releaseDate: '2026-05-19',
+        releaseDate: '2026-05-20',
         releaseNotes: `
-v3.18.5 更新内容：
-- 修复设备授权记录无法保存的问题
-- 优化启动动画过渡效果
-- 统一版本号显示
+v3.18.6 更新内容：
+- 库存同步机制重构，数据与Excel一致
+- 设备码v2：不同电脑生成不同设备码
+- 批量授权：一键授权所有待授权设备
+- 各店库存弹窗优化（可调拨计算）
+- 启动动画过渡优化
+- 并行加载+按钮防抖+错误通俗化
         `.trim(),
-        downloadUrl: `${UPDATE_URL}WSZH-ShortageStore-3.18.5.exe`,
+        downloadUrl: `${UPDATE_URL}WSZH-ShortageStore-3.18.6.exe`,
         forceUpdate: false
       }
     };

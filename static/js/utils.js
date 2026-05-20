@@ -1,19 +1,27 @@
 // ========================================
-// 缺货统计系统 - 公共工具模块 (v19)
-// 统一设备ID生成、XSS防护等公共函数
+// 缺货统计系统 - 公共工具模块 (v20)
+// 统一设备ID生成、XSS防护、公共配置等
 // ========================================
+
+// ========== 公共配置（统一入口，其他文件不再重复定义）==========
+var SUPABASE_URL = "https://qswpgnnedqvuegwfbprd.supabase.co";
+var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzd3Bnbm5lZHF2dWVnd2ZicHJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3Mjc0NjEsImV4cCI6MjA5NDMwMzQ2MX0.mY_nlWoHc5UYDHB9jOif0zkYJ2OVx79KTgejcSGkhBI";
+var EDGE_FUNCTION_URL = SUPABASE_URL + "/functions/v1/query-shortage-data";
 
 // ========== 设备指纹（统一实现）==========
 function getDeviceId() {
-    var key = 'wszh_device_id';
+    var key = 'wszh_device_id_v2';  // v2: 修正同配置设备指纹相同的问题
     var did = localStorage.getItem(key);
     if (!did) {
+        // 硬件特征 + 随机数 + 时间戳，确保每台设备生成唯一ID
         var fp = [navigator.userAgent, screen.width+'x'+screen.height,
             screen.colorDepth, navigator.language, (new Date()).getTimezoneOffset(),
-            navigator.hardwareConcurrency||''].join('|');
+            navigator.hardwareConcurrency||'',
+            Math.random().toString(36),
+            Date.now().toString(36)].join('|');
         var h = 0;
         for (var i = 0; i < fp.length; i++) { h = ((h<<5)-h)+fp.charCodeAt(i); }
-        did = 'DEV_' + Math.abs(h).toString(36).toUpperCase();
+        did = 'DEV_v2_' + Math.abs(h).toString(36).substring(0, 8).toUpperCase();
         localStorage.setItem(key, did);
     }
     return did;
@@ -95,6 +103,17 @@ function logInfo(msg, data) {
     }
 }
 
+// ========== 按钮防抖（防止重复点击）==========
+function debounceBtn(fn, delay) {
+    delay = delay || 500;
+    var timer = 0;
+    return function() {
+        if (timer) return;
+        timer = setTimeout(function() { timer = 0; }, delay);
+        return fn.apply(this, arguments);
+    };
+}
+
 // 导出给全局使用
 window.getDeviceId = getDeviceId;
 window.escapeHtml = escapeHtml;
@@ -104,3 +123,4 @@ window.formatNumber = formatNumber;
 window.formatDate = formatDate;
 window.logError = logError;
 window.logInfo = logInfo;
+window.debounceBtn = debounceBtn;

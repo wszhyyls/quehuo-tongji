@@ -24,10 +24,7 @@ var autoRefreshInterval = 60000;  // 默认1分钟
 var themes = ['purple', 'blue', 'green', 'dark', 'orange'];
 var themeLabels = { purple: '💜 紫韵', blue: '🌊 海蓝', green: '🌿 翠绿', dark: '🌙 暗夜', orange: '🌅 暖橙' };
 
-var SUPABASE_URL = "https://qswpgnnedqvuegwfbprd.supabase.co";
-var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzd3Bnbm5lZHF2dWVnd2ZicHJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3Mjc0NjEsImV4cCI6MjA5NDMwMzQ2MX0.mY_nlWoHc5UYDHB9jOif0zkYJ2OVx79KTgejcSGkhBI";
-var EDGE_FUNCTION_URL = SUPABASE_URL + "/functions/v1/query-shortage-data";
-
+// SUPABASE_URL / SUPABASE_ANON_KEY / EDGE_FUNCTION_URL 已在 utils.js 统一定义
 var supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 if (!token || !user || (user.role !== 'admin' && user.role !== 'super_admin')) { window.location.href = './'; }
@@ -941,28 +938,43 @@ async function loadPendingDevices() {
             return;
         }
 
-        var devices = [...(result.data.employee_devices || []), ...(result.data.store_devices || [])];
+        var devices = result.data.store_devices || []; // 只显示门店设备
         
         if (devices.length === 0) {
             tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#999;">暂无待授权设备</td></tr>';
             return;
         }
 
+        // 门店名称友好显示映射
+        var STORE_NAME_DISPLAY = {
+            'wszhyy02': '02第二药店', 'wszhyy03': '03第三药店', 'wszhyy04': '04第四药店',
+            'wszhyy06': '06常口店', 'wszhyy08': '08第八药店', 'wszhyy09': '09第九药店',
+            'wszhyy14': '14第十四药店', 'wszhyy16': '16凤凰山药店', 'wszhyy17': '17益丰店',
+            'wszhyy21': '21富源店', '15305479520': '02第二药店'
+        };
+        
         devices.forEach(function(dev) {
             var tr = document.createElement('tr');
-            var deviceType = dev.employee_id ? '员工' : '门店账号';
-            var deviceName = dev.store_employees ? (dev.store_employees.name || dev.store_employees.phone) : dev.username;
+            var deviceType = '门店账号';
+            var deviceName = STORE_NAME_DISPLAY[dev.username] || dev.username;
             var deviceId = dev.device_id;
-            var timeStr = dev.created_at || dev.first_login_at ? new Date(dev.created_at || dev.first_login_at).toLocaleString('zh-CN') : '-';
+            var timeStr = dev.last_login_at ? new Date(dev.last_login_at).toLocaleString('zh-CN') : '-';
             
-            var actionHtml = '<button class="btn-primary" onclick="authorizeDevice(\'' + escapeHtml(deviceId) + '\', \'' + deviceType + '\', \'' + escapeHtml(dev.employee_id || dev.username) + '\', true)">授权</button> ';
-            actionHtml += '<button class="btn-detail" style="color:red;" onclick="authorizeDevice(\'' + escapeHtml(deviceId) + '\', \'' + deviceType + '\', \'' + escapeHtml(dev.employee_id || dev.username) + '\', false)">拒绝</button>';
+            // 冲突提示：该设备被其他账号绑定
+            var conflictHtml = '';
+            if (dev.conflict) {
+                var boundName = STORE_NAME_DISPLAY[dev.conflict.bound_to] || dev.conflict.bound_to;
+                conflictHtml = ' <span style="color:#e74c3c;font-size:11px;" title="该设备当前被以下门店绑定">⚠ 被「' + safeText(boundName) + '」绑定，授权后自动解除</span>';
+            }
+            
+            var actionHtml = '<button class="btn-primary" onclick="authorizeDevice(\'' + escapeHtml(deviceId) + '\', \'store\', \'' + escapeHtml(dev.username) + '\', true)">授权</button> ';
+            actionHtml += '<button class="btn-detail" style="color:red;" onclick="authorizeDevice(\'' + escapeHtml(deviceId) + '\', \'store\', \'' + escapeHtml(dev.username) + '\', false)">拒绝</button>';
 
             tr.innerHTML = '<td>' + deviceType + '</td>' +
                 '<td>' + safeText(deviceName) + '</td>' +
                 '<td style="font-size:11px;word-break:break-all;">' + safeText(deviceId) + '</td>' +
                 '<td>' + safeText(timeStr) + '</td>' +
-                '<td><span class="replenish-badge replenish-text">待授权</span></td>' +
+                '<td><span class="replenish-badge replenish-text">待授权</span>' + conflictHtml + '</td>' +
                 '<td>' + actionHtml + '</td>';
             tbody.appendChild(tr);
         });
@@ -991,8 +1003,47 @@ window.authorizeDevice = async function(deviceId, targetType, targetId, authoriz
     if (result.success) {
         alert(authorize ? '授权成功' : '已拒绝');
         loadPendingDevices();
+        loadAuthorizedDevices();
     } else {
         alert('操作失败：' + (result.error || '未知错误'));
+    }
+};
+
+// ========== 一键批量授权所有待授权设备 ==========
+window.batchAuthorizeAll = async function() {
+    if (!checkPermission('manage_devices', '您没有管理设备授权的权限')) return;
+    
+    // 先获取当前待授权列表
+    var result = await callEdgeFunction('get_pending_devices', {});
+    if (!result.success || !result.data) {
+        alert('获取待授权列表失败');
+        return;
+    }
+    
+    var devices = result.data.store_devices || [];
+    if (devices.length === 0) {
+        alert('没有待授权的设备');
+        return;
+    }
+    
+    if (!confirm('确定一键授权全部 ' + devices.length + ' 个设备？')) return;
+    
+    var deviceList = devices.map(function(d) {
+        return { device_id: d.device_id, target_id: d.username, target_type: 'store' };
+    });
+    
+    var batchResult = await callEdgeFunction('batch_authorize', {
+        device_list: deviceList,
+        authorize: true
+    });
+    
+    if (batchResult.success) {
+        alert('批量授权完成！成功 ' + batchResult.data.success_count + ' 个' + 
+              (batchResult.data.fail_count > 0 ? '，失败 ' + batchResult.data.fail_count + ' 个' : ''));
+        loadPendingDevices();
+        loadAuthorizedDevices();
+    } else {
+        alert('批量授权失败：' + (batchResult.error || '未知错误'));
     }
 };
 
@@ -1002,26 +1053,15 @@ async function loadAuthorizedDevices() {
         var tbody = document.getElementById('authorizedDeviceTbody');
         tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#999;">加载中...</td></tr>';
         
-        // 获取所有员工的授权设备
-        var empResult = await callEdgeFunction('list_employees', {});
+        // 直接查询所有已授权设备（简化方式，使用调试接口）
+        var result = await callEdgeFunction('debug_get_all_authorized', {});
         
-        var allDevices = [];
-        if (empResult.success && empResult.data) {
-            for (var emp of empResult.data) {
-                var devResult = await callEdgeFunction('get_authorized_devices', {
-                    target_type: 'employee',
-                    target_id: emp.id
-                });
-                if (devResult.success && devResult.data) {
-                    devResult.data.forEach(function(d) {
-                        d.employee_name = emp.name || emp.phone;
-                        d.employee_phone = emp.phone;
-                        d.target_type = '员工';
-                        allDevices.push(d);
-                    });
-                }
-            }
+        if (!result.success || !result.data) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#999;">暂无已授权设备</td></tr>';
+            return;
         }
+        
+        var allDevices = result.data;
         
         tbody.innerHTML = '';
         if (allDevices.length === 0) {
@@ -1029,23 +1069,71 @@ async function loadAuthorizedDevices() {
             return;
         }
 
-        allDevices.forEach(function(dev) {
+        // 去重：按 username + device_id 组合去重
+        var seen = {};
+        var uniqueDevices = allDevices.filter(function(dev) {
+            var key = dev.username + '|' + dev.device_id;
+            if (seen[key]) return false;
+            seen[key] = true;
+            return true;
+        });
+        
+        console.log('[loadAuthorizedDevices] 原始数量:', allDevices.length, '去重后:', uniqueDevices.length);
+
+        // 获取员工和门店信息用于显示
+        var empResult = await callEdgeFunction('list_employees', {});
+        var storeResult = await callEdgeFunction('list_stores', {});
+        
+        var empMap = {};
+        if (empResult.success && empResult.data) {
+            empResult.data.forEach(function(emp) {
+                empMap[emp.phone] = emp;
+            });
+        }
+        
+        var storeMap = {};
+        if (storeResult.success && storeResult.data) {
+            storeResult.data.forEach(function(store) {
+                storeMap[store.username] = store;
+            });
+        }
+
+        // 门店名称映射（用于友好显示）
+        var STORE_NAME_DISPLAY = {
+            'wszhyy02': '02第二药店', 'wszhyy03': '03第三药店', 'wszhyy04': '04第四药店',
+            'wszhyy06': '06常口店', 'wszhyy08': '08第八药店', 'wszhyy09': '09第九药店',
+            'wszhyy14': '14第十四药店', 'wszhyy16': '16凤凰山药店', 'wszhyy17': '17益丰店',
+            'wszhyy21': '21富源店', '15305479520': '02第二药店'
+        };
+        
+        uniqueDevices.forEach(function(dev) {
             var tr = document.createElement('tr');
             var timeStr = dev.authorized_at || dev.last_login_at ? new Date(dev.authorized_at || dev.last_login_at).toLocaleString('zh-CN') : '-';
             var statusBadge = dev.is_authorized 
                 ? '<span class="replenish-badge replenish-ordered">已授权</span>'
                 : '<span class="replenish-badge replenish-text">未授权</span>';
+            
+            // 判断是员工还是门店，显示友好名称
+            var targetType = '门店';
+            var displayName = STORE_NAME_DISPLAY[dev.username] || dev.username;
+            var accountShow = dev.username;
+            if (empMap[dev.username]) {
+                targetType = '员工';
+                displayName = empMap[dev.username].name || dev.username;
+            }
 
-            tr.innerHTML = '<td>' + safeText(dev.target_type) + '</td>' +
-                '<td>' + safeText(dev.employee_name) + '</td>' +
-                '<td>' + safeText(dev.employee_phone) + '</td>' +
+            tr.innerHTML = '<td>' + safeText(targetType) + '</td>' +
+                '<td>' + safeText(displayName) + '</td>' +
+                '<td>' + safeText(dev.username) + '</td>' +
                 '<td style="font-size:11px;word-break:break-all;">' + safeText(dev.device_id) + '</td>' +
                 '<td>' + statusBadge + '</td>' +
-                '<td><button class="btn-detail" style="color:red;" onclick="revokeDevice(\'' + escapeHtml(dev.device_id) + '\', \'employee\', \'' + escapeHtml(dev.employee_id) + '\')">撤销</button></td>';
+                '<td><button class="btn-detail" style="color:red;" onclick="revokeDevice(\'' + escapeHtml(dev.device_id) + '\', \'' + safeText(targetType === '员工' ? 'employee' : 'store') + '\', \'' + escapeHtml(dev.username) + '\')">撤销</button></td>';
             tbody.appendChild(tr);
         });
     } catch(err) {
         logError('已授权设备加载失败', err);
+        var tbody = document.getElementById('authorizedDeviceTbody');
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:red;">加载失败: ' + safeText(err.message) + '</td></tr>';
     }
 }
 
@@ -1063,6 +1151,21 @@ window.revokeDevice = async function(deviceId, targetType, targetId) {
         alert('已撤销授权');
         loadAuthorizedDevices();
         loadPendingDevices();
+    }
+};
+
+window.clearAllDeviceAuth = async function() {
+    if (!checkPermission('manage_devices', '您没有管理设备授权的权限')) return;
+    if (!confirm('警告：此操作将清除所有设备授权，所有门店必须重新申请授权才能登录！\n\n确定要继续吗？')) return;
+    
+    var result = await callEdgeFunction('clear_all_device_auth', {});
+
+    if (result.success) {
+        alert('已清除所有设备授权，共 ' + (result.data.device_count || 0) + ' 个设备');
+        loadAuthorizedDevices();
+        loadPendingDevices();
+    } else {
+        alert('清除失败：' + (result.error || '未知错误'));
     }
 };
 

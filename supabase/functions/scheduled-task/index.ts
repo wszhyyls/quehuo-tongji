@@ -70,14 +70,23 @@ async function getPool(dbName: string = SQL_SERVER_DB): Promise<sql.ConnectionPo
   }
   
   const config = dbName === SQL_SERVER_DB ? sqlConfig : { ...sqlConfig, database: dbName };
-  try {
-    const pool = await sql.connect(config);
-    poolCache.set(cacheKey, { pool, lastUsed: now, inUse: true });
-    return pool;
-  } catch (err) {
-    console.error(`连接SQL Server失败 (${dbName}):`, err);
-    throw err;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const pool = await sql.connect(config);
+      poolCache.set(cacheKey, { pool, lastUsed: now, inUse: true });
+      if (attempt > 1) console.log(`[定时任务] 第${attempt}次重试连接成功`);
+      return pool;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, attempt * 1000));
+        console.warn(`[定时任务] 连接失败(尝试${attempt}/3)，重试中...`);
+      }
+    }
   }
+  console.error(`[定时任务] 3次连接全部失败:`, lastErr);
+  throw lastErr;
 }
 
 function releasePool(pool: sql.ConnectionPool, dbName: string = SQL_SERVER_DB) {
@@ -150,21 +159,61 @@ async function syncProductCache(): Promise<{ success: boolean; message: string; 
   }
 }
 
-// 同步采购计划（执行存储过程）
-async function syncPurchasePlan(): Promise<{ success: boolean; message: string; error?: string }> {
+// 同步采购计划（执行存储过程 + 更新Supabase缓存）
+async function syncPurchasePlan(): Promise<{ success: boolean; message: string; supabase_synced?: number; error?: string }> {
   console.log('[定时任务] 开始同步采购计划...');
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
   const pool = await getPool();
   
   try {
     // 执行同步存储过程
-    const syncResult = await pool.request().execute('usp_Sync_AllShortageCache');
-    console.log('[定时任务] 采购计划同步存储过程执行完成');
+    await pool.request().execute('usp_Sync_AllShortageCache');
+    console.log('[定时任务] SPFXB_Result 同步完成');
     
     // 自动检测订货状态
-    const detectResult = await pool.request().execute('usp_AutoDetectOrderStatus_Feedback');
-    console.log('[定时任务] 订货状态自动检测完成');
+    await pool.request().execute('usp_AutoDetectOrderStatus_Feedback');
+    console.log('[定时任务] 订货状态检测完成');
     
-    return { success: true, message: '采购计划同步完成' };
+    // ========== 同步到 Supabase 缓存 ==========
+    let supabaseSynced = 0;
+    try {
+      const resultSet = await pool.request().query(`
+        SELECT 
+          LTRIM(RTRIM(ISNULL(商品编码, ''))) as product_code,
+          LTRIM(RTRIM(ISNULL(门店名称, ''))) as store_name,
+          ISNULL(库存数量, 0) as store_stock,
+          ISNULL(在途数量, 0) as in_transit,
+          ISNULL(门店库存汇总, 0) as store_total,
+          ISNULL(配送中心库存数量, 0) as dc_stock,
+          ISNULL(前30天销售数量, 0) as sales_30days,
+          ISNULL(ISNULL(标准库存数量确认, 标准库存数量), 0) as standard_stock,
+          ISNULL(门店计划, 0) as store_plan
+        FROM dbo.SPFXB_Result WITH (NOLOCK)
+        WHERE 商品编码 IS NOT NULL AND LTRIM(RTRIM(商品编码)) <> ''
+      `);
+      
+      const records = resultSet.recordset || [];
+      if (records.length > 0) {
+        await supabase.from("shortage_storestock_cache").delete().neq('product_code', '');
+        const batchSize = 300;
+        for (let i = 0; i < records.length; i += batchSize) {
+          const batch = records.slice(i, i + batchSize).map((r: any) => ({
+            product_code: r.product_code, store_name: r.store_name,
+            store_stock: r.store_stock, in_transit: r.in_transit,
+            store_total: r.store_total, dc_stock: r.dc_stock,
+            sales_30days: r.sales_30days, standard_stock: r.standard_stock,
+            store_plan: r.store_plan, last_updated: new Date().toISOString()
+          }));
+          const { error: insertErr } = await supabase.from("shortage_storestock_cache").insert(batch);
+          if (!insertErr) supabaseSynced += batch.length;
+        }
+      }
+      console.log(`[定时任务] Supabase缓存已更新 ${supabaseSynced} 条`);
+    } catch (e) {
+      console.error('[定时任务] Supabase缓存更新失败:', e);
+    }
+    
+    return { success: true, message: '采购计划同步完成', supabase_synced: supabaseSynced };
     
   } catch (err) {
     console.error('[定时任务] 采购计划同步失败:', err);

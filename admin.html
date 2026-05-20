@@ -132,6 +132,7 @@
             <div class="list-card" style="margin-bottom:15px;">
                 <div class="list-header">
                     <h2 style="color:#e74c3c;">待授权设备</h2>
+                    <button class="btn-search" style="margin-right:6px;background:#4CAF50;" onclick="batchAuthorizeAll()">一键授权全部</button>
                     <button id="refreshDeviceBtn" class="btn-search">刷新</button>
                 </div>
                 <div class="table-wrapper">
@@ -155,6 +156,7 @@
             <div class="list-card">
                 <div class="list-header">
                     <h2>已授权设备</h2>
+                    <button class="btn-search" style="margin-right:6px;background:#e74c3c;" onclick="clearAllDeviceAuth()">清除所有设备授权</button>
                     <button class="btn-search" onclick="loadAuthorizedDevices()">刷新</button>
                 </div>
                 <div class="table-wrapper">

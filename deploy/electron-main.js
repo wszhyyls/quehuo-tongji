@@ -4,7 +4,7 @@ const { autoUpdater } = require('electron-updater');
 
 // 配置（优化：延迟加载 icon）
 const CONFIG = {
-  title: 'WSZH-ShortageStore v3.18.5',
+  title: 'WSZH-ShortageStore v3.18.6',
   width: 1400,
   height: 900,
   minWidth: 800,

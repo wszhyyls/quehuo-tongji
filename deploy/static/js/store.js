@@ -38,14 +38,15 @@ var storeInventoryLoaded = false;
 var STORE_INVENTORY_CACHE_TTL = 10 * 60 * 1000; // 10分钟缓存有效期
 
 // 预加载本店库存数据
-async function preloadStoreInventory(forceRefresh) {
+async function preloadStoreInventory(forceRefresh, syncFirst) {
     if (storeInventoryLoaded && !forceRefresh) return true;
     try {
         updateLoadingProgress('正在加载本店库存...', '50%');
         logInfo('[预加载] 正在加载本店库存数据...', null);
         var result = await callEdgeFunction('get_store_inventory', { 
             store_name: user?.store_name || '',
-            force_refresh: !!forceRefresh
+            force_refresh: !!forceRefresh,
+            sync_first: !!syncFirst  // 先同步SPFXB_Result再查询，确保数据最新
         });
         if (result.data && Array.isArray(result.data)) {
             // 构建 Map 加速查询
@@ -219,11 +220,7 @@ var historyTotalLoaded = 0;     // 已加载条数
 var isLoadingMore = false;    // 是否正在加载更多
 
 // ========== Supabase 客户端初始化 ==========
-var SUPABASE_URL = "https://qswpgnnedqvuegwfbprd.supabase.co";
-var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzd3Bnbm5lZHF2dWVnd2ZicHJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3Mjc0NjEsImV4cCI6MjA5NDMwMzQ2MX0.mY_nlWoHc5UYDHB9jOif0zkYJ2OVx79KTgejcSGkhBI";
-var EDGE_FUNCTION_URL = SUPABASE_URL + "/functions/v1/query-shortage-data";
-
-// 创建全局 supabase 实例
+// SUPABASE_URL / SUPABASE_ANON_KEY / EDGE_FUNCTION_URL 已在 utils.js 统一定义
 var supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ========== 全量商品内存缓存（方案2）==========
@@ -308,35 +305,35 @@ async function checkProductsUpdate() {
     return false;
 }
 
-// ========== 主初始化函数：同步等待预加载完成后显示页面 ==========
+// ========== 主初始化函数：并行预加载商品+库存，减少等待时间 ==========
 async function initializeApp() {
-    updateLoadingProgress('正在加载商品数据...', '10%');
+    updateLoadingProgress('正在加载数据...', '20%');
     
-    // 1. 尝试从缓存恢复商品列表
-    var cacheRestored = restoreProductCache();
-    if (cacheRestored) {
-        updateLoadingProgress('正在检查商品更新...', '30%');
-        // 检查是否有新品
-        await checkProductsUpdate();
-        initFuseSearch();
-    }
+    // 1~2. 商品加载与库存加载并行执行
+    var productTask = (async function() {
+        var cacheRestored = restoreProductCache();
+        if (cacheRestored) {
+            await checkProductsUpdate();
+            initFuseSearch();
+        }
+        if (!productsLoaded) {
+            await loadAllProducts();
+        }
+    })();
     
-    // 2. 如果没有缓存，加载全量商品
-    if (!productsLoaded) {
-        await loadAllProducts();
-    }
-    updateLoadingProgress('正在加载本店库存...', '70%');
+    // 3~4. 库存加载
+    var inventoryTask = (async function() {
+        var invCacheRestored = restoreStoreInventoryCache();
+        if (invCacheRestored) {
+            storeInventoryLoaded = false;  // 强制从服务器覆盖
+        }
+        if (!storeInventoryLoaded) {
+            await preloadStoreInventory();
+        }
+    })();
     
-    // 3. 尝试从缓存恢复本店库存
-    var invCacheRestored = restoreStoreInventoryCache();
-    if (invCacheRestored) {
-        updateLoadingProgress('正在加载本店库存...', '90%');
-    }
-    
-    // 4. 如果没有库存缓存，加载本店库存
-    if (!storeInventoryLoaded) {
-        await preloadStoreInventory();
-    }
+    // 并行等待两个任务完成
+    await Promise.all([productTask, inventoryTask]);
     
     // 5. 预加载完成，显示主界面
     updateLoadingProgress('加载完成！', '100%');
@@ -369,8 +366,11 @@ document.getElementById('themeBtn').addEventListener('click', function() {
 });
 document.getElementById('themeBtn').textContent = themeLabels[savedTheme];
 
-// 刷新库存按钮
+// 刷新库存按钮（含500ms防抖，防止重复点击）
+var isRefreshing = false;
 document.getElementById('refreshCacheBtn').addEventListener('click', async function() {
+    if (isRefreshing) return;
+    isRefreshing = true;
     var btn = this;
     var oldText = btn.textContent;
     btn.disabled = true;
@@ -388,12 +388,12 @@ document.getElementById('refreshCacheBtn').addEventListener('click', async funct
         storeInventoryLoaded = false;
         storeInventoryMap = {};
         
-        // 重新从服务器加载本店库存（强制从 SQL Server 获取最新数据）
-        await preloadStoreInventory(true);
+        // 重新从服务器加载本店库存（强制从 SQL Server 获取最新数据，并先同步SPFXB_Result）
+        await preloadStoreInventory(true, true);
         
-        // 如果当前有选中商品，重新显示商品详情（用新数据）
+        // 如果当前有选中商品，重新显示商品详情（强制从 SQL Server 获取）
         if (currentProduct && currentProduct.data && currentProduct.data.product_code && currentProduct.found) {
-            queryProductByCode(currentProduct.data.product_code);
+            queryProductByCode(currentProduct.data.product_code, true);
         }
         
         showToast('库存已刷新', 'success');
@@ -401,11 +401,13 @@ document.getElementById('refreshCacheBtn').addEventListener('click', async funct
         logError('[刷新库存] 刷新失败', e);
         showToast('刷新失败', 'error');
     } finally {
+        isRefreshing = false;
         btn.disabled = false;
         btn.textContent = oldText;
     }
 });
 
+// ========== 退出登录 ==========
 document.getElementById('logoutBtn').addEventListener('click', async function() {
     if (!confirm('确定退出登录？')) return;
     
@@ -758,57 +760,23 @@ document.getElementById('cancelProductBtn').addEventListener('click', function()
      clearProductInfo();
 });
 
-async function queryProductByCode(code) {
-    // 优先从预加载的内存数据中读取（秒响应）
-    var inventoryData = storeInventoryMap[code];
-    if (inventoryData) {
-        console.log('[预加载] 从内存读取商品详情: ' + code);
-        // 从商品列表缓存补充商品名称/规格/厂家（库存缓存可能没有这些字段）
-        var productInfo = allProducts.find(function(p) { return p.product_code === code; }) || {};
-        currentProduct = {
-            found: true,
-            is_new: false,
-            data: {
-                product_code: code,
-                product_name: productInfo.product_name || inventoryData.商品名称 || '',
-                specification: productInfo.product_spec || inventoryData.规格 || '',
-                manufacturer: productInfo.manufacturer || inventoryData.生产企业 || '',
-                current_stock: inventoryData.库存数量 || 0,
-                in_transit: inventoryData.在途数量 || 0,
-                dc_stock: inventoryData.配送中心库存数量 || 0,
-                standard_stock: inventoryData.标准库存数量 || 0,
-                sales_30days: inventoryData.前30天销售数量 || 0,
-                suggested_order: inventoryData.建议订货数量 || 0,
-                all_stores: {}
-            }
-        };
-        renderProductInfo(currentProduct.data);
-        return;
-    }
-    
-    // 内存中没有数据，检查预加载是否还在进行中
-    if (!storeInventoryLoaded) {
-        console.log('[预加载] 等待预加载完成...');
-        // 等待预加载完成（最多等10秒）
-        var waitCount = 0;
-        while (!storeInventoryLoaded && waitCount < 100) {
-            await new Promise(function(r) { setTimeout(r, 100); });
-            waitCount++;
-        }
-        
-        // 预加载完成后，再次检查内存
-        inventoryData = storeInventoryMap[code];
+async function queryProductByCode(code, forceRefresh) {
+    // 强制刷新时跳过内存缓存
+    if (!forceRefresh) {
+        // 优先从预加载的内存数据中读取（秒响应）
+        var inventoryData = storeInventoryMap[code];
         if (inventoryData) {
-            console.log('[预加载] 预加载完成后从内存读取: ' + code);
-            var productInfo2 = allProducts.find(function(p) { return p.product_code === code; }) || {};
+            console.log('[预加载] 从内存读取商品详情: ' + code);
+            // 从商品列表缓存补充商品名称/规格/厂家（库存缓存可能没有这些字段）
+            var productInfo = allProducts.find(function(p) { return p.product_code === code; }) || {};
             currentProduct = {
                 found: true,
                 is_new: false,
                 data: {
                     product_code: code,
-                    product_name: productInfo2.product_name || inventoryData.商品名称 || '',
-                    specification: productInfo2.product_spec || inventoryData.规格 || '',
-                    manufacturer: productInfo2.manufacturer || inventoryData.生产企业 || '',
+                    product_name: productInfo.product_name || inventoryData.商品名称 || '',
+                    specification: productInfo.product_spec || inventoryData.规格 || '',
+                    manufacturer: productInfo.manufacturer || inventoryData.生产企业 || '',
                     current_stock: inventoryData.库存数量 || 0,
                     in_transit: inventoryData.在途数量 || 0,
                     dc_stock: inventoryData.配送中心库存数量 || 0,
@@ -822,15 +790,53 @@ async function queryProductByCode(code) {
             return;
         }
         
-        console.log('[预加载] 预加载完成但仍未找到商品: ' + code);
+        // 内存中没有数据，检查预加载是否还在进行中
+        if (!storeInventoryLoaded) {
+            console.log('[预加载] 等待预加载完成...');
+            // 等待预加载完成（最多等10秒）
+            var waitCount = 0;
+            while (!storeInventoryLoaded && waitCount < 100) {
+                await new Promise(function(r) { setTimeout(r, 100); });
+                waitCount++;
+            }
+            
+            // 预加载完成后，再次检查内存
+            inventoryData = storeInventoryMap[code];
+            if (inventoryData) {
+                console.log('[预加载] 预加载完成后从内存读取: ' + code);
+                var productInfo2 = allProducts.find(function(p) { return p.product_code === code; }) || {};
+                currentProduct = {
+                    found: true,
+                    is_new: false,
+                    data: {
+                        product_code: code,
+                        product_name: productInfo2.product_name || inventoryData.商品名称 || '',
+                        specification: productInfo2.product_spec || inventoryData.规格 || '',
+                        manufacturer: productInfo2.manufacturer || inventoryData.生产企业 || '',
+                        current_stock: inventoryData.库存数量 || 0,
+                        in_transit: inventoryData.在途数量 || 0,
+                        dc_stock: inventoryData.配送中心库存数量 || 0,
+                        standard_stock: inventoryData.标准库存数量 || 0,
+                        sales_30days: inventoryData.前30天销售数量 || 0,
+                        suggested_order: inventoryData.建议订货数量 || 0,
+                        all_stores: {}
+                    }
+                };
+                renderProductInfo(currentProduct.data);
+                return;
+            }
+            
+            console.log('[预加载] 预加载完成但仍未找到商品: ' + code);
+        }
     }
     
-    // 预加载已完成但仍未命中，调用后端API
-    console.log('[预加载] 调用后端API查询: ' + code);
+    // 预加载已完成但仍未命中，或强制刷新，调用后端API
+    console.log('[预加载] 调用后端API查询' + (forceRefresh ? '(强制刷新)' : '') + ': ' + code);
     try {
         var data = await callEdgeFunction('get_product_detail', { 
             product_code: code,
-            store_name: user?.store_name || ''
+            store_name: user?.store_name || '',
+            force_refresh: !!forceRefresh
         });
         if (data.success && data.data && data.data.length > 0) {
             var records = data.data[0];
@@ -844,7 +850,8 @@ async function queryProductByCode(code) {
                     allStores[storeName] = {
                         name: storeName,
                         stock: r.库存数量 || 0,
-                        transit: r.在途数量 || 0
+                        transit: r.在途数量 || 0,
+                        standard_stock: r.标准库存数量 || 0  // 用于计算可调拨
                     };
                 });
                 
@@ -957,7 +964,8 @@ document.getElementById('viewStockBtn').addEventListener('click', async function
                     allStores[storeName] = {
                         name: storeName,
                         stock: r.库存数量 || 0,
-                        transit: r.在途数量 || 0
+                        transit: r.在途数量 || 0,
+                        standard_stock: r.标准库存数量 || 0  // 用于计算可调拨
                     };
                 });
                 currentProduct.data.all_stores = allStores;
@@ -980,19 +988,38 @@ function renderStockModal(productData) {
     var stockTbody = document.getElementById('stockTbody');
     if (!stockTbody) return;
     stockTbody.innerHTML = '';
+    
+    var currentStoreName = user?.store_name || '';
+    
     var stores = [];
     for (var id in productData.all_stores) {
         var s = productData.all_stores[id];
-        if (s.stock !== 0 || s.transit !== 0) {
-            stores.push(s);
-        }
+        // 排除本店（无需显示自己的库存）
+        if (s.name === currentStoreName) continue;
+        stores.push(s);
     }
     stores.sort(function(a, b) { return a.name.localeCompare(b.name, 'zh-CN'); });
-    stores.forEach(function(s) {
+    
+    if (stores.length === 0) {
         var tr = document.createElement('tr');
-        tr.innerHTML = '<td>' + safeText(s.name) + '</td><td>' + safeText(s.stock) + '</td><td>' + safeText(s.transit) + '</td>';
+        tr.innerHTML = '<td colspan="3" style="text-align:center;color:#999;">暂无其他门店库存数据</td>';
         stockTbody.appendChild(tr);
-    });
+    } else {
+        stores.forEach(function(s) {
+            var stock = Number(s.stock) || 0;
+            var standardStock = Number(s.standard_stock) || 0;
+            // 可调拨数量 = 库存 - 标准库存，只取正数（优先满足本店标准需求）
+            var transferable = Math.max(0, stock - standardStock);
+            
+            var tr = document.createElement('tr');
+            // 可调拨>0 红色高亮
+            var transferStyle = transferable > 0 ? 'color:#e74c3c;font-weight:bold;' : '';
+            tr.innerHTML = '<td>' + safeText(s.name) + '</td>' +
+                '<td>' + safeText(stock) + '</td>' +
+                '<td style="' + transferStyle + '">' + safeText(transferable) + '</td>';
+            stockTbody.appendChild(tr);
+        });
+    }
     document.getElementById('stockModal').classList.add('show');
 }
 

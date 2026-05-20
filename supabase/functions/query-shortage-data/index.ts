@@ -11,9 +11,66 @@ const DEFAULT_EMPLOYEE_PASSWORD = Deno.env.get("DEFAULT_EMPLOYEE_PASSWORD") || "
 // 这些账号不受设备授权和单设备登录限制
 const EXEMPT_ACCOUNTS = ['admin', '15305479520'];
 
+// ========== 门店设备数量限制 ==========
+// 每个门店允许登录的设备数量上限，默认1台，02店允许2台
+const STORE_DEVICE_LIMITS: Record<string, number> = {
+  'wszhyy02': 2,  // 02第二药店允许2台设备
+};
+// 未在此列表中的门店，默认限制1台设备
+
 // ========== 辅助函数：检查是否是例外账号 ==========
 function isExemptAccount(identifier: string): boolean {
   return EXEMPT_ACCOUNTS.includes(identifier);
+}
+
+// ========== 登录防刷（同IP/设备5分钟内失败5次锁定）==========
+const loginAttempts = new Map<string, { count: number; firstAttempt: number }>();
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_LOCK_MINUTES = 5;
+
+function checkLoginRateLimit(identifier: string): { allowed: boolean; message?: string } {
+  const now = Date.now();
+  const record = loginAttempts.get(identifier);
+  
+  // 清理过期记录（超过锁定时间）
+  if (record && (now - record.firstAttempt) > LOGIN_LOCK_MINUTES * 60 * 1000) {
+    loginAttempts.delete(identifier);
+  }
+  
+  const current = loginAttempts.get(identifier);
+  if (current && current.count >= LOGIN_MAX_ATTEMPTS) {
+    const remaining = Math.ceil((LOGIN_LOCK_MINUTES * 60 * 1000 - (now - current.firstAttempt)) / 60000);
+    return { allowed: false, message: `登录失败次数过多，请${remaining}分钟后再试` };
+  }
+  return { allowed: true };
+}
+
+function recordLoginAttempt(identifier: string, success: boolean) {
+  if (success) {
+    loginAttempts.delete(identifier); // 成功则清除记录
+    return;
+  }
+  const now = Date.now();
+  const record = loginAttempts.get(identifier);
+  if (!record || (now - record.firstAttempt) > LOGIN_LOCK_MINUTES * 60 * 1000) {
+    loginAttempts.set(identifier, { count: 1, firstAttempt: now });
+  } else {
+    record.count++;
+  }
+}
+
+// ========== 错误信息通俗化映射（将技术错误转为中文提示）==========
+function friendlyError(err: unknown): string {
+  const msg = String(err);
+  if (msg.includes("Invalid object name") || msg.includes("找不到对象")) return "数据源连接异常，请刷新页面重试";
+  if (msg.includes("timeout") || msg.includes("Timeout") || msg.includes("超时")) return "数据查询超时，请稍后重试";
+  if (msg.includes("ECONNREFUSED") || msg.includes("connect ETIMEDOUT") || msg.includes("connection")) return "服务器繁忙，请稍后重试";
+  if (msg.includes("ECONNRESET") || msg.includes("socket hang up")) return "网络连接中断，请检查网络后重试";
+  if (msg.includes("401") || msg.includes("Unauthorized")) return "登录已过期，请重新登录";
+  if (msg.includes("403") || msg.includes("Forbidden")) return "没有操作权限，请联系管理员";
+  if (msg.includes("404") || msg.includes("Not Found")) return "请求的数据不存在";
+  if (msg.includes("500") || msg.includes("Internal")) return "系统繁忙，请稍后重试";
+  return msg.substring(0, 200); // 兜底：截断技术错误信息
 }
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -48,7 +105,7 @@ interface PoolCache {
 }
 
 const MAX_POOL_SIZE = 5;  // 最多缓存5个连接
-const POOL_TTL = 300000;   // 5分钟后未使用则关闭连接
+const POOL_TTL = 1800000;  // 30分钟后未使用则关闭连接（配合 Keep-Warm 保持活跃）
 const poolCache: Map<string, PoolCache> = new Map();
 
 // 获取连接池（带缓存）
@@ -92,20 +149,26 @@ async function getPool(dbName: string = SQL_SERVER_DB): Promise<sql.ConnectionPo
     }
   }
   
-  // 创建新连接
+  // 创建新连接（含重试机制，最多3次，间隔递增）
   const config = dbName === SQL_SERVER_DB ? sqlConfig : { ...sqlConfig, database: dbName };
-  try {
-    const pool = await sql.connect(config);
-    poolCache.set(cacheKey, {
-      pool,
-      lastUsed: now,
-      inUse: true,
-    });
-    return pool;
-  } catch (err) {
-    console.error(`连接SQL Server失败 (${dbName}):`, err);
-    throw err;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const pool = await sql.connect(config);
+      poolCache.set(cacheKey, { pool, lastUsed: now, inUse: true });
+      if (attempt > 1) console.log(`[getPool] 第${attempt}次重试连接成功 (${dbName})`);
+      return pool;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 3) {
+        const delay = attempt * 1000; // 1s, 2s
+        console.warn(`[getPool] 连接失败(尝试${attempt}/3)，${delay}ms后重试:`, err);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
   }
+  console.error(`[getPool] 3次连接全部失败 (${dbName}):`, lastErr);
+  throw lastErr;
 }
 
 // 释放连接回缓存池
@@ -115,6 +178,31 @@ function releasePool(pool: sql.ConnectionPool, dbName: string = SQL_SERVER_DB) {
   if (cache && cache.pool === pool) {
     cache.inUse = false;
     cache.lastUsed = Date.now();
+  }
+}
+
+// ========== L2 内存缓存（减少 SQL Server 重复查询）==========
+interface MemCacheEntry<T> {
+  data: T;
+  ts: number;
+}
+const memCache = new Map<string, MemCacheEntry<any>>();
+const MEM_CACHE_TTL_PRODUCTS = 600000;   // 商品列表缓存10分钟
+const MEM_CACHE_TTL_INVENTORY = 120000;  // 库存快照缓存2分钟
+
+function memCacheGet<T>(key: string, ttl: number): T | null {
+  const entry = memCache.get(key);
+  if (entry && (Date.now() - entry.ts) < ttl) return entry.data;
+  memCache.delete(key);
+  return null;
+}
+
+function memCacheSet(key: string, data: any) {
+  memCache.set(key, { data, ts: Date.now() });
+  // 最多保留50个缓存条目
+  if (memCache.size > 50) {
+    const first = memCache.keys().next().value;
+    if (first) memCache.delete(first);
   }
 }
 
@@ -222,6 +310,7 @@ const STORE_NAME_MAP: Record<string, string> = {
   'wszhyy16': '16凤凰山药店',
   'wszhyy17': '17益丰店',
   'wszhyy21': '21富源店',
+  '15305479520': '02第二药店',  // 02第二药店管理员账号
 };
 
 function getCorsHeaders(req: Request): Record<string, string> {
@@ -319,7 +408,15 @@ serve(async (req) => {
       }
 
       case "get_all_products": {
-        // 获取全量商品数据（用于前端内存缓存）
+        // 获取全量商品数据（L2内存缓存10分钟，商品信息基本不变）
+        const productCacheKey = 'all_products';
+        const cached = memCacheGet<any[]>(productCacheKey, MEM_CACHE_TTL_PRODUCTS);
+        if (cached) {
+          console.log(`✅ get_all_products 命中L2缓存，返回 ${cached.length} 条`);
+          result = cached;
+          break;
+        }
+        
         // 直接从 SQL Server 获取，绕过 Supabase 1000条限制
         const poolZHYYLS = await getPool();
         try {
@@ -365,7 +462,8 @@ serve(async (req) => {
           });
           
           result = Array.from(productMap.values());
-          console.log(`✅ get_all_products 返回 ${result.length} 个商品`);
+          memCacheSet(productCacheKey, result); // 存入L2缓存
+          console.log(`✅ get_all_products 返回 ${result.length} 个商品（已缓存）`);
         } finally {
           releasePool(poolZHYYLS);
         }
@@ -414,6 +512,29 @@ serve(async (req) => {
         // 这样可以大幅提升响应速度（Supabase ~50ms vs SQL Server ~3000ms）
         const store_name = validateInput(params?.store_name, "门店名称", 100);
         const force_refresh = params?.force_refresh === true;
+        const sync_first = params?.sync_first === true;  // 是否先同步SPFXB_Result再查询
+        
+        // 强制刷新+先同步：先刷新 SQL Server 的 SPFXB_Result 表（确保数据最新）
+        if (force_refresh && sync_first) {
+          console.log(`[get_store_inventory] 门店「${store_name}」触发先同步SPFXB_Result再查询...`);
+          try {
+            const syncPool = await getPool();
+            try {
+              const syncResult = await syncPool.request().execute("usp_Sync_AllShortageCache");
+              // 记录存储过程返回的同步结果（如果有返回值则记录行数）
+              if (syncResult.recordsets && syncResult.recordsets[0]) {
+                console.log(`[get_store_inventory] SPFXB_Result同步完成，返回 ${syncResult.recordsets[0].length} 行`);
+              } else {
+                console.log(`[get_store_inventory] SPFXB_Result同步完成（无返回数据）`);
+              }
+            } finally {
+              releasePool(syncPool);
+            }
+          } catch (syncErr) {
+            console.error(`[get_store_inventory] 同步SPFXB_Result失败:`, syncErr);
+            // 同步失败不影响后续查询，继续从SQL Server获取现有数据
+          }
+        }
         
         // 尝试从 Supabase 缓存查询（强制刷新时跳过缓存，直接查 SQL Server 最新数据）
         if (!force_refresh) {
@@ -540,7 +661,22 @@ serve(async (req) => {
           }
 
           result = records;
-          console.log(`✅ get_store_inventory 从SQL Server返回 ${records.length} 条记录（降级模式）`);
+          console.log(`✅ get_store_inventory 从SQL Server返回 ${records.length} 条记录（门店:${store_name}, 强制刷新${force_refresh ? '是' : '否'}）`);
+          // 采样输出前3条记录的关键字段，方便调试
+          if (records.length > 0) {
+            const sample = records.slice(0, 3).map((r: any) => ({
+              商品编码: r.商品编码,
+              门店名称: r.门店名称,
+              库存数量: r.库存数量,
+              在途数量: r.在途数量,
+              前30天销售数量: r.前30天销售数量,
+              标准库存数量: r.标准库存数量,
+              来源: r._source
+            }));
+            console.log(`[采样数据] 前3条:`, JSON.stringify(sample));
+          } else {
+            console.warn(`[警告] SPFXB_Result 中门店「${store_name}」无数据！可能门店名称不匹配`);
+          }
         } finally {
           releasePool(pool);
         }
@@ -551,61 +687,65 @@ serve(async (req) => {
         // 商品详情 - 返回该商品在所有门店的数据（用于弹窗显示各门店库存）
         const product_code = validateInput(params?.product_code, "商品编码", 50);
         const store_name = validateInput(params?.store_name, "门店名称", 100);
+        const force_refresh = params?.force_refresh === true;
         
         // P0优化：先尝试从 Supabase 查询（查所有门店的该商品）
-        try {
-          const { data: supabaseData, error: supabaseError } = await supabase
-            .from("shortage_storestock_cache")
-            .select("*")
-            .eq("product_code", product_code)
-            .limit(200);
-          
-          if (!supabaseError && supabaseData && supabaseData.length > 0) {
-            // 过滤脏数据（store_name 为空/null/通配符，store_stock 非数字）
-            const cleanData = supabaseData.filter((r: any) => {
-              const name = r.store_name;
-              if (!name || name === '*' || name === 'null' || name === 'undefined') return false;
-              const stock = r.store_stock;
-              if (typeof stock === 'string' && isNaN(Number(stock))) return false;
-              return true;
-            });
+        // 强制刷新时跳过缓存，直接查 SQL Server
+        if (!force_refresh) {
+          try {
+            const { data: supabaseData, error: supabaseError } = await supabase
+              .from("shortage_storestock_cache")
+              .select("*")
+              .eq("product_code", product_code)
+              .limit(200);
             
-            if (cleanData.length > 0) {
-              // 构建所有门店记录，当前门店排第一
-              const records = cleanData
-                .sort((a: any, b: any) => {
-                  const aMatch = store_name && a.store_name && a.store_name.includes(store_name) ? 0 : 1;
-                  const bMatch = store_name && b.store_name && b.store_name.includes(store_name) ? 0 : 1;
-                  return aMatch - bMatch || (a.store_name || '').localeCompare(b.store_name || '', 'zh-CN');
-                })
-                .map((r: any) => ({
-                  门店名称: r.store_name || "",
-                  商品编码: r.product_code || "",
-                  商品名称: r.product_name || "",
-                  规格: r.product_spec || "",
-                  生产企业: r.manufacturer || "",
-                  库存数量: Number(r.store_stock) || 0,
-                  在途数量: Number(r.in_transit) || 0,
-                  门店库存汇总: Number(r.store_total) || 0,
-                  配送中心库存数量: Number(r.dc_stock) || 0,
-                  前30天销售数量: Number(r.sales_30days) || 0,
-                  前90天销售数量: Number(r.sales_90days) || 0,
-                  月均销售数量: Number(r.monthly_sales) || 0,
-                  标准库存数量: Number(r.standard_stock) || 0,
-                  门店计划: Number(r.store_plan) || 0,
-                  建议订货数量: Math.max(0, (Number(r.standard_stock) || 0) - (Number(r.store_total) || 0)),
-                  _source: 'supabase'
-                }));
+            if (!supabaseError && supabaseData && supabaseData.length > 0) {
+              // 过滤脏数据（store_name 为空/null/通配符，store_stock 非数字）
+              const cleanData = supabaseData.filter((r: any) => {
+                const name = r.store_name;
+                if (!name || name === '*' || name === 'null' || name === 'undefined') return false;
+                const stock = r.store_stock;
+                if (typeof stock === 'string' && isNaN(Number(stock))) return false;
+                return true;
+              });
               
-              result = [records];
-              console.log(`✅ get_product_detail 从Supabase返回商品 ${product_code}，共 ${records.length} 条门店记录`);
-              break;
-            } else {
-              console.log(`⚠️ Supabase缓存数据全部脏数据，降级到SQL Server`);
+              if (cleanData.length > 0) {
+                // 构建所有门店记录，当前门店排第一
+                const records = cleanData
+                  .sort((a: any, b: any) => {
+                    const aMatch = store_name && a.store_name && a.store_name.includes(store_name) ? 0 : 1;
+                    const bMatch = store_name && b.store_name && b.store_name.includes(store_name) ? 0 : 1;
+                    return aMatch - bMatch || (a.store_name || '').localeCompare(b.store_name || '', 'zh-CN');
+                  })
+                  .map((r: any) => ({
+                    门店名称: r.store_name || "",
+                    商品编码: r.product_code || "",
+                    商品名称: r.product_name || "",
+                    规格: r.product_spec || "",
+                    生产企业: r.manufacturer || "",
+                    库存数量: Number(r.store_stock) || 0,
+                    在途数量: Number(r.in_transit) || 0,
+                    门店库存汇总: Number(r.store_total) || 0,
+                    配送中心库存数量: Number(r.dc_stock) || 0,
+                    前30天销售数量: Number(r.sales_30days) || 0,
+                    前90天销售数量: Number(r.sales_90days) || 0,
+                    月均销售数量: Number(r.monthly_sales) || 0,
+                    标准库存数量: Number(r.standard_stock) || 0,
+                    门店计划: Number(r.store_plan) || 0,
+                    建议订货数量: Math.max(0, (Number(r.standard_stock) || 0) - (Number(r.store_total) || 0)),
+                    _source: 'supabase'
+                  }));
+                
+                result = [records];
+                console.log(`✅ get_product_detail 从Supabase返回商品 ${product_code}，共 ${records.length} 条门店记录`);
+                break;
+              } else {
+                console.log(`⚠️ Supabase缓存数据全部脏数据，降级到SQL Server`);
+              }
             }
+          } catch (supabaseErr) {
+            console.error(`Supabase查询商品详情失败，降级到SQL Server:`, supabaseErr);
           }
-        } catch (supabaseErr) {
-          console.error(`Supabase查询商品详情失败，降级到SQL Server:`, supabaseErr);
         }
         
         // 降级：从 SQL Server 获取（查询该商品所有门店数据）
@@ -813,19 +953,80 @@ serve(async (req) => {
       }
 
       case "sync_with_auto_status": {
-        // 一键：同步数据 + 自动检测状态
+        // 一键：同步数据 + 自动检测状态 + 更新Supabase缓存
         const pool = await getPool();
         try {
           // 先执行标准同步（使用存在的存储过程）
           await pool.request().execute("usp_Sync_AllShortageCache");
           // 再执行自动状态检测（RQZT 端）
           const detectRes = await pool.request().execute("usp_AutoDetectOrderStatus_Feedback");
-          result = { success: true, message: '同步和状态检测完成', detectResult: detectRes.recordsets[0] };
+          
+          // ========== 关键修复：同步库存数据到 Supabase 缓存 ==========
+          // 之前 SPFXB_Result 更新了但 shortage_storestock_cache 没有更新
+          // 导致门店端首次加载时读取到旧缓存数据
+          let supabaseSyncCount = 0;
+          try {
+            const resultSet = await pool.request().query(`
+              SELECT 
+                LTRIM(RTRIM(ISNULL(商品编码, ''))) as product_code,
+                LTRIM(RTRIM(ISNULL(门店名称, ''))) as store_name,
+                ISNULL(库存数量, 0) as store_stock,
+                ISNULL(在途数量, 0) as in_transit,
+                ISNULL(门店库存汇总, 0) as store_total,
+                ISNULL(配送中心库存数量, 0) as dc_stock,
+                ISNULL(前30天销售数量, 0) as sales_30days,
+                ISNULL(前90天销售数量, 0) as sales_90days,
+                ISNULL(月均销售数量, 0) as monthly_sales,
+                ISNULL(ISNULL(标准库存数量确认, 标准库存数量), 0) as standard_stock,
+                ISNULL(门店计划, 0) as store_plan
+              FROM dbo.SPFXB_Result WITH (NOLOCK)
+              WHERE 商品编码 IS NOT NULL AND LTRIM(RTRIM(商品编码)) <> ''
+            `);
+            
+            const records = resultSet.recordset || [];
+            if (records.length > 0) {
+              // 清空旧缓存再全量插入
+              await supabase
+                .from("shortage_storestock_cache")
+                .delete()
+                .neq('product_code', '');
+              
+              // 分批插入
+              const batchSize = 200;
+              for (let i = 0; i < records.length; i += batchSize) {
+                const batch = records.slice(i, i + batchSize).map((r: any) => ({
+                  product_code: r.product_code,
+                  store_name: r.store_name,
+                  store_stock: r.store_stock,
+                  in_transit: r.in_transit,
+                  store_total: r.store_total,
+                  dc_stock: r.dc_stock,
+                  sales_30days: r.sales_30days,
+                  sales_90days: r.sales_90days,
+                  monthly_sales: r.monthly_sales,
+                  standard_stock: r.standard_stock,
+                  store_plan: r.store_plan,
+                  last_updated: new Date().toISOString()
+                }));
+                
+                const { error: insertErr } = await supabase
+                  .from("shortage_storestock_cache")
+                  .insert(batch);
+                
+                if (!insertErr) supabaseSyncCount += batch.length;
+              }
+            }
+            console.log(`[sync_with_auto_status] Supabase缓存已更新，共 ${supabaseSyncCount} 条`);
+          } catch (supabaseSyncErr) {
+            console.error(`[sync_with_auto_status] Supabase缓存更新失败:`, supabaseSyncErr);
+          }
+          
+          result = { success: true, message: '同步和状态检测完成', detectResult: detectRes.recordsets[0], supabase_synced: supabaseSyncCount };
           try { await supabase.from("sync_log_table").insert([{ 
             sync_time: new Date().toISOString(), 
             sync_type: "full_auto", 
             status: "success", 
-            detail: "同步+状态检测完成" 
+            detail: `同步+状态检测完成，Supabase缓存 ${supabaseSyncCount} 条` 
           }]); } catch(e) {}
         } catch (e1) {
           throw e1;
@@ -876,8 +1077,8 @@ serve(async (req) => {
                     LTRIM(RTRIM(ISNULL(a.Standard, ''))) as 规格,
                     LTRIM(RTRIM(ISNULL(b.FullName, ''))) as 生产企业,
                     LTRIM(RTRIM(ISNULL(a.PYZJM, ''))) as 拼音助记码
-                    FROM Vptype a WITH (NOLOCK)
-                    LEFT JOIN cstype b WITH (NOLOCK) ON a.area = b.rec
+                    FROM ZHYYLS.dbo.Vptype a WITH (NOLOCK)
+                    LEFT JOIN ZHYYLS.dbo.cstype b WITH (NOLOCK) ON a.area = b.rec
                     WHERE a.leveal = '3'
                       AND (
                         -- 近2年有销售记录的商品
@@ -1020,7 +1221,7 @@ serve(async (req) => {
               ISNULL(前30天销售数量, 0) as sales_30days,
               ISNULL(前90天销售数量, 0) as sales_90days,
               ISNULL(月均销售数量, 0) as monthly_sales,
-              ISNULL(标准库存数量, 0) as standard_stock,
+              ISNULL(标准库存数量确认, 0) as standard_stock,
               ISNULL(门店计划, 0) as store_plan,
               LTRIM(RTRIM(ISNULL(标记, ''))) as flag,
               LTRIM(RTRIM(ISNULL(分类组, ''))) as category,
@@ -1043,7 +1244,7 @@ serve(async (req) => {
                 ISNULL(前30天销售数量, 0) as sales_30days,
                 ISNULL(前90天销售数量, 0) as sales_90days,
                 ISNULL(月均销售数量, 0) as monthly_sales,
-                ISNULL(标准库存数量, 0) as standard_stock,
+                ISNULL(标准库存数量确认, 0) as standard_stock,
                 ISNULL(门店计划, 0) as store_plan,
                 LTRIM(RTRIM(ISNULL(标记, ''))) as flag,
                 LTRIM(RTRIM(ISNULL(分类组, ''))) as category,
@@ -1183,7 +1384,7 @@ serve(async (req) => {
               ISNULL(前30天销售数量, 0) as sales_30days,
               ISNULL(前90天销售数量, 0) as sales_90days,
               ISNULL(月均销售数量, 0) as monthly_sales,
-              ISNULL(标准库存数量, 0) as standard_stock,
+              ISNULL(标准库存数量确认, 0) as standard_stock,
               ISNULL(门店计划, 0) as store_plan,
               LTRIM(RTRIM(ISNULL(标记, ''))) as flag,
               LTRIM(RTRIM(ISNULL(分类组, ''))) as category,
@@ -1392,9 +1593,19 @@ serve(async (req) => {
       case "store_login": {
         const { username, password, device_id } = params;
         
-        // 1. 验证账号密码（使用独立客户端，避免污染数据库查询客户端的认证状态）
+        // 2. 验证账号密码（使用独立客户端，避免污染数据库查询客户端的认证状态）
         const validUsername = validateInput(username, "用户名", 50);
         const validPassword = validateInput(password, "密码", 100);
+
+        // 限流检查（防止暴力破解）
+        const deviceIdForRate = validateInput(device_id, "设备ID", 100) || 'unknown';
+        const rateKey = validUsername + '_' + (deviceIdForRate.substring(0, 20));
+        const rateCheck = checkLoginRateLimit(rateKey);
+        if (!rateCheck.allowed) {
+          return new Response(JSON.stringify({
+            success: false, error: rateCheck.message
+          }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
         
         const authClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
         let { data: signInData, error: signInError } = await authClient.auth.signInWithPassword({
@@ -1483,11 +1694,13 @@ serve(async (req) => {
           }
           
           if (signInError) {
+            recordLoginAttempt(rateKey, false);
             return new Response(JSON.stringify({
               success: false, error: "账号或密码错误"
             }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
         }
+        recordLoginAttempt(rateKey, true); // 登录成功，清除失败记录
         
         const userData = signInData!.user;
         console.log("[store_login] 用户登录成功, id:", userData.id, "username:", validUsername);
@@ -1581,53 +1794,108 @@ serve(async (req) => {
           break;
         }
         
-        // 3. 非管理员账号：设备授权 + 单设备登录限制
+        // 3. 非管理员账号：设备授权 + 设备数量限制
         const validDeviceId = validateInput(device_id, "设备ID", 100);
         
-        // 检查是否是例外账号
+        // 检查是否是例外账号（不受设备限制）
         const isExempt = isExemptAccount(validUsername);
         
-        // 3.1 单设备登录检查（踢出旧设备）
+        // 3.1 设备数量限制检查（每个门店限制设备台数）
         if (!isExempt) {
-          const { data: otherDevices } = await adminClient
-            .from("store_authorized_devices")
-            .select("id, device_id, is_authorized")
-            .eq("username", validUsername)
-            .eq("is_active", true)
-            .neq("device_id", validDeviceId);
+          const deviceLimit = STORE_DEVICE_LIMITS[validUsername] || 1;
           
-          if (otherDevices && otherDevices.length > 0) {
-            // 检查是否有其他已授权设备
-            const hasOtherAuthorized = otherDevices.some(d => d.is_authorized);
-            if (hasOtherAuthorized) {
-              return new Response(JSON.stringify({
-                success: false, error: "该账号已在其他设备登录，请先退出原设备后再试"
-              }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-            }
+          // 查询该门店目前已授权的活跃设备
+          const { data: currentDeviceCheck } = await adminClient
+            .from("store_authorized_devices")
+            .select("device_id")
+            .eq("username", validUsername)
+            .eq("is_authorized", true)
+            .eq("is_active", true);
+          
+          const authorizedDevices = currentDeviceCheck || [];
+          const isCurrentDeviceAuthorized = authorizedDevices.some(d => d.device_id === validDeviceId);
+          
+          if (!isCurrentDeviceAuthorized && authorizedDevices.length >= deviceLimit) {
+            console.log(`[store_login] 门店 ${validUsername} 已达到设备数量上限: ${authorizedDevices.length}/${deviceLimit}`);
+            return new Response(JSON.stringify({
+              success: false, 
+              error: `该门店最多允许 ${deviceLimit} 台设备登录，当前已有 ${authorizedDevices.length} 台设备在线。请联系管理员处理。`
+            }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
         }
         
         // 3.2 查当前设备是否已有记录
         console.log("[store_login] 检查设备记录, device_id:", validDeviceId, "username:", validUsername);
-        const { data: existingDevice } = await adminClient
+        const { data: existingDevices } = await adminClient
           .from("store_authorized_devices")
           .select("id, is_authorized, username, is_active")
           .eq("device_id", validDeviceId)
-          .eq("is_active", true)
+          .order("id", { ascending: false })
           .limit(1);
         
-        console.log("[store_login] 当前设备记录:", JSON.stringify(existingDevice));
+        console.log("[store_login] 当前设备记录:", JSON.stringify(existingDevices));
 
-        if (existingDevice && existingDevice.length > 0) {
+        if (existingDevices && existingDevices.length > 0) {
           // 已有记录
-          const device = existingDevice[0];
+          const device = existingDevices[0];
           
           // 检查授权状态（非例外账号）
           if (!isExempt && !device.is_authorized) {
+            // 设备未授权，允许任意账号申请授权
+            console.log("[store_login] 设备未授权，允许任意账号申请授权:", validUsername, validDeviceId);
+            // 更新username为当前登录账号（重新绑定）
+            await adminClient
+              .from("store_authorized_devices")
+              .update({ 
+                is_active: true,
+                last_login_at: new Date().toISOString(),
+                username: validUsername
+              })
+              .eq("id", device.id);
             return new Response(JSON.stringify({
               success: false, error: "该设备未授权，请联系管理员授权后使用",
               pending_device_id: validDeviceId,
               pending_username: validUsername
+            }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
+          
+          // 额外安全检查：确保设备的username与当前登录账号一致
+          if (device.username !== validUsername && device.is_authorized) {
+            console.log("[store_login] 设备绑定账号不匹配:", device.username, "vs", validUsername);
+            
+            // 为当前账号创建一条待授权记录，以便管理员能看到并处理
+            try {
+              const { data: existingPending } = await adminClient
+                .from("store_authorized_devices")
+                .select("id")
+                .eq("device_id", validDeviceId)
+                .eq("username", validUsername)
+                .eq("is_active", true)
+                .limit(1);
+              
+              if (!existingPending || existingPending.length === 0) {
+                await adminClient
+                  .from("store_authorized_devices")
+                  .insert([{
+                    device_id: validDeviceId,
+                    username: validUsername,
+                    is_authorized: false,
+                    is_active: true,
+                    last_login_at: new Date().toISOString(),
+                    authorized_at: null
+                  }]);
+                console.log(`[store_login] 已为账号 ${validUsername} 创建待授权记录（设备被 ${device.username} 绑定）`);
+              }
+            } catch (e) {
+              console.warn("[store_login] 创建待授权记录失败:", e);
+            }
+            
+            return new Response(JSON.stringify({
+              success: false, 
+              error: "该设备已绑定账号「" + device.username + "」，已自动提交重新授权申请，请等待管理员处理",
+              pending_device_id: validDeviceId,
+              pending_username: validUsername,
+              bound_to: device.username
             }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
           
@@ -1637,8 +1905,7 @@ serve(async (req) => {
             .update({ 
               is_authorized: isExempt ? true : device.is_authorized,
               is_active: true,
-              last_login_at: new Date().toISOString(),
-              username: validUsername
+              last_login_at: new Date().toISOString()
             })
             .eq("id", device.id);
         } else {
@@ -1658,7 +1925,32 @@ serve(async (req) => {
                 last_login_at: new Date().toISOString()
               }]);
           } else {
-            // 普通账号：创建待授权记录
+            // 普通账号：创建待授权记录（先去重，防止重复点击产生多条记录）
+            console.log("[store_login] 新设备，检查是否已有待授权记录:", validDeviceId, validUsername);
+            
+            const { data: existingPending } = await adminClient
+              .from("store_authorized_devices")
+              .select("id")
+              .eq("device_id", validDeviceId)
+              .eq("username", validUsername)
+              .eq("is_active", true)
+              .limit(1);
+            
+            if (existingPending && existingPending.length > 0) {
+              // 已有待授权记录，更新一下时间即可，不重复创建
+              console.log("[store_login] 已存在待授权记录，更新登录时间");
+              await adminClient
+                .from("store_authorized_devices")
+                .update({ last_login_at: new Date().toISOString() })
+                .eq("id", existingPending[0].id);
+              
+              return new Response(JSON.stringify({
+                success: false, error: "该设备未授权，请联系管理员授权后使用",
+                pending_device_id: validDeviceId,
+                pending_username: validUsername
+              }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+            }
+            
             const { data: insertedDevice, error: insertErr } = await adminClient
               .from("store_authorized_devices")
               .insert([{
@@ -1725,131 +2017,148 @@ serve(async (req) => {
         const validTargetType = validateInput(target_type, "类型", 20);
         const validTargetId = validateInput(target_id, "目标ID", 100);
         
-        if (validTargetType === 'employee') {
-          // 员工设备授权
-          const { data: existing } = await supabase
-            .from("device_bindings")
-            .select("id")
-            .eq("device_id", validDeviceId)
-            .eq("employee_id", validTargetId)
-            .eq("is_active", true)
-            .limit(1);
-          
-          if (existing && existing.length > 0) {
-            if (authorize) {
-              // 授权
-              await supabase
-                .from("device_bindings")
-                .update({ is_authorized: true, authorized_at: new Date().toISOString() })
-                .eq("id", existing[0].id);
-            } else {
-              // 拒绝：删除记录（或标记为不活跃）
-              await supabase
-                .from("device_bindings")
-                .delete()
-                .eq("id", existing[0].id);
-            }
-          } else if (authorize) {
-            // 授权时如果记录不存在，创建一条
-            await supabase.from("device_bindings").insert([{
-              device_id: validDeviceId,
-              employee_id: validTargetId,
-              is_authorized: true,
-              is_active: true,
-              authorized_at: new Date().toISOString()
-            }]);
-          }
-        } else if (validTargetType === 'store') {
-          // 门店账号设备授权
-          const { data: existing } = await supabase
+        // 修复：统一使用 store_authorized_devices 表（所有设备记录都在此表）
+        console.log("[authorize_device] 目标类型:", validTargetType, "目标ID:", validTargetId, "设备ID:", validDeviceId);
+        
+        // 授权前先清理该设备的所有其他账号的已授权记录（防止设备被多账号绑定）
+        if (authorize) {
+          console.log("[authorize_device] 清理设备 " + validDeviceId + " 的其他绑定记录");
+          const { error: clearErr } = await supabase
             .from("store_authorized_devices")
-            .select("id")
+            .update({ is_authorized: false, is_active: false })
             .eq("device_id", validDeviceId)
-            .eq("username", validTargetId)
-            .eq("is_active", true)
-            .limit(1);
+            .neq("username", validTargetId);
           
-          if (existing && existing.length > 0) {
-            if (authorize) {
-              // 授权
-              await supabase
-                .from("store_authorized_devices")
-                .update({ is_authorized: true, authorized_at: new Date().toISOString() })
-                .eq("id", existing[0].id);
-            } else {
-              // 拒绝：删除记录
-              await supabase
-                .from("store_authorized_devices")
-                .delete()
-                .eq("id", existing[0].id);
-            }
-          } else if (authorize) {
-            await supabase.from("store_authorized_devices").insert([{
-              device_id: validDeviceId,
-              username: validTargetId,
-              is_authorized: true,
-              is_active: true,
-              authorized_at: new Date().toISOString()
-            }]);
+          if (clearErr) {
+            console.warn("[authorize_device] 清理其他绑定失败:", clearErr);
+          } else {
+            console.log("[authorize_device] 已清理该设备的其他绑定记录");
           }
+        }
+        
+        const { data: existing } = await supabase
+          .from("store_authorized_devices")
+          .select("id, is_authorized, username")
+          .eq("device_id", validDeviceId)
+          .eq("username", validTargetId)
+          .eq("is_active", true)
+          .limit(1);
+        
+        console.log("[authorize_device] 现有记录:", existing?.length ? "找到" : "未找到");
+        
+        if (existing && existing.length > 0) {
+          if (authorize) {
+            // 授权
+            console.log("[authorize_device] 执行授权操作");
+            await supabase
+              .from("store_authorized_devices")
+              .update({ is_authorized: true, authorized_at: new Date().toISOString() })
+              .eq("id", existing[0].id);
+          } else {
+            // 拒绝：删除记录
+            console.log("[authorize_device] 执行拒绝操作");
+            await supabase
+              .from("store_authorized_devices")
+              .delete()
+              .eq("id", existing[0].id);
+          }
+        } else if (authorize) {
+          // 授权时如果记录不存在，创建一条
+          console.log("[authorize_device] 记录不存在，创建新授权记录");
+          await supabase.from("store_authorized_devices").insert([{
+            device_id: validDeviceId,
+            username: validTargetId,
+            is_authorized: true,
+            is_active: true,
+            authorized_at: new Date().toISOString()
+          }]);
         }
         
         result = { success: true, authorized: authorize };
         break;
       }
 
-      case "get_pending_devices": {
-        // 获取所有待授权的设备列表（管理员查看，不限制门店）
-        
-        // 员工待授权设备（先查设备，再单独查员工信息，避免外键关联查询失败）
-        const { data: empPending, error: empErr } = await supabase
-          .from("device_bindings")
-          .select("id, device_id, employee_id, first_login_at")
-          .eq("is_active", true)
-          .eq("is_authorized", false);
-        
-        if (empErr) {
-          console.error("[get_pending_devices] 员工设备查询失败:", empErr);
-          return new Response(JSON.stringify({ 
-            success: false, 
-            error: "查询失败：" + empErr.message,
-            employee_devices: [],
-            store_devices: []
-          }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      // ========== 批量授权设备 ==========
+      case "batch_authorize": {
+        const { device_list, authorize } = params;
+        // device_list: [{device_id, target_type, target_id}, ...]
+        if (!Array.isArray(device_list) || device_list.length === 0) {
+          return new Response(JSON.stringify({ success: false, error: "设备列表不能为空" }), {
+            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
         }
         
-        // 单独查询员工信息并合并
-        let employeeDevices = [];
-        if (empPending && empPending.length > 0) {
-          const empIds = [...new Set(empPending.map((d: any) => d.employee_id).filter(Boolean))];
-          const empMap: Record<string, any> = {};
-          if (empIds.length > 0) {
-            const { data: emps } = await supabase
-              .from("store_employees")
-              .select("id, name, phone, store_id")
-              .in("id", empIds);
-            emps?.forEach((e: any) => { empMap[e.id] = e; });
+        let successCount = 0;
+        let failCount = 0;
+        
+        for (const item of device_list) {
+          try {
+            const validDeviceId = validateInput(item.device_id, "设备ID", 100);
+            const validTargetId = validateInput(item.target_id || item.username, "目标ID", 100);
+            
+            if (authorize) {
+              // 清理同一设备的其他绑定
+              await supabase
+                .from("store_authorized_devices")
+                .update({ is_authorized: false, is_active: false })
+                .eq("device_id", validDeviceId)
+                .neq("username", validTargetId);
+              
+              // 授权
+              const { data: existing } = await supabase
+                .from("store_authorized_devices")
+                .select("id")
+                .eq("device_id", validDeviceId)
+                .eq("username", validTargetId)
+                .eq("is_active", true)
+                .limit(1);
+              
+              if (existing && existing.length > 0) {
+                await supabase
+                  .from("store_authorized_devices")
+                  .update({ is_authorized: true, authorized_at: new Date().toISOString() })
+                  .eq("id", existing[0].id);
+              } else {
+                await supabase.from("store_authorized_devices").insert([{
+                  device_id: validDeviceId, username: validTargetId,
+                  is_authorized: true, is_active: true,
+                  authorized_at: new Date().toISOString()
+                }]);
+              }
+            } else {
+              // 批量拒绝：删除记录
+              await supabase
+                .from("store_authorized_devices")
+                .delete()
+                .eq("device_id", validDeviceId)
+                .eq("username", validTargetId);
+            }
+            successCount++;
+          } catch (e) {
+            failCount++;
+            console.error(`[batch_authorize] 处理失败:`, item, e);
           }
-          employeeDevices = empPending.map((d: any) => ({
-            ...d,
-            store_employees: empMap[d.employee_id] || null
-          }));
         }
         
-        // 调试：先查所有记录（不限条件）
-        const { data: allStoreDevices } = await supabase
-          .from("store_authorized_devices")
-          .select("*")
-          .limit(50);
-        console.log("[get_pending_devices] store_authorized_devices 全部记录:", allStoreDevices?.length || 0);
-        console.log("[get_pending_devices] 全部记录详情:", JSON.stringify(allStoreDevices));
+        result = { success: true, authorized: authorize, success_count: successCount, fail_count: failCount };
+        break;
+      }
+
+      case "get_pending_devices": {
+        // 获取所有待授权的设备列表（管理员查看，只显示门店账号，员工不需要授权）
+        
+        // 员工设备不显示在待授权列表中（员工登录没有设备授权限制）
+        let employeeDevices = [];
         
         // 门店账号待授权设备（查询所有门店）
+        // 排除例外账号（admin 和 15305479520），这些账号不需要授权
+        // 注意：不限制 is_active，因为清除授权后设备需要重新申请授权
         const { data: storePending, error: storeErr } = await supabase
           .from("store_authorized_devices")
           .select("*")
-          .eq("is_active", true)
-          .eq("is_authorized", false);
+          .eq("is_authorized", false)
+          .neq("username", "admin")
+          .neq("username", "15305479520");
         
         if (storeErr) {
           console.error("[get_pending_devices] 门店设备查询失败:", storeErr);
@@ -1861,15 +2170,43 @@ serve(async (req) => {
           }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
         
-        console.log("[get_pending_devices] 员工待授权:", employeeDevices.length, "门店待授权:", storePending?.length || 0);
-        console.log("[get_pending_devices] 门店待授权详情:", JSON.stringify(storePending?.slice(0, 3)));
+        // 为每个待授权设备查询冲突信息（同一设备是否被其他账号绑定）
+        const pendingWithConflicts = [];
+        if (storePending && storePending.length > 0) {
+          for (const pending of storePending) {
+            let conflictInfo = null;
+            // 查询该设备是否有其他账号已授权
+            const { data: conflicts } = await supabase
+              .from("store_authorized_devices")
+              .select("username, authorized_at")
+              .eq("device_id", pending.device_id)
+              .eq("is_authorized", true)
+              .neq("username", pending.username)
+              .limit(1);
+            
+            if (conflicts && conflicts.length > 0) {
+              conflictInfo = {
+                bound_to: conflicts[0].username,
+                authorized_at: conflicts[0].authorized_at
+              };
+            }
+            
+            pendingWithConflicts.push({
+              ...pending,
+              conflict: conflictInfo
+            });
+          }
+        }
+        
+        console.log("[get_pending_devices] 员工待授权:", employeeDevices.length, "门店待授权:", pendingWithConflicts.length);
+        console.log("[get_pending_devices] 门店待授权详情:", JSON.stringify(pendingWithConflicts.slice(0, 3)));
         
         // 直接返回数据，不走 result
         return new Response(JSON.stringify({ 
           success: true, 
           data: {
             employee_devices: employeeDevices,
-            store_devices: storePending || []
+            store_devices: pendingWithConflicts
           }
         }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
@@ -1880,46 +2217,147 @@ serve(async (req) => {
         const validTargetType = validateInput(target_type, "类型", 20);
         const validTargetId = validateInput(target_id, "目标ID", 100);
         
+        console.log("[get_authorized_devices] 查询参数:", target_type, target_id);
+        
         let devices = [];
         if (validTargetType === 'employee') {
-          const { data } = await supabase
-            .from("device_bindings")
-            .select("*, store_employees(name, phone)")
-            .eq("employee_id", validTargetId)
-            .eq("is_active", true);
-          devices = data || [];
-        } else if (validTargetType === 'store') {
-          const { data } = await supabase
+          // 修复：从 store_authorized_devices 表查询（与登录时写入的表一致）
+          // 关键修复：必须同时满足 is_authorized = true 和 is_active = true
+          const { data, error } = await supabase
             .from("store_authorized_devices")
             .select("*")
             .eq("username", validTargetId)
+            .eq("is_authorized", true)
             .eq("is_active", true);
+          
+          console.log("[get_authorized_devices] 员工查询结果:", validTargetId, "数据:", JSON.stringify(data), "错误:", error);
+          devices = data || [];
+        } else if (validTargetType === 'store') {
+          const { data, error } = await supabase
+            .from("store_authorized_devices")
+            .select("*")
+            .eq("username", validTargetId)
+            .eq("is_authorized", true)
+            .eq("is_active", true);
+          
+          console.log("[get_authorized_devices] 门店查询结果:", validTargetId, "数据:", JSON.stringify(data), "错误:", error);
           devices = data || [];
         }
         
+        // 调试：查询所有已授权设备（不限制账号）
+        const { data: allAuthorized } = await supabase
+          .from("store_authorized_devices")
+          .select("username, device_id, is_authorized, is_active")
+          .eq("is_authorized", true)
+          .eq("is_active", true);
+        console.log("[get_authorized_devices] 所有已授权设备总数:", allAuthorized?.length || 0);
+        console.log("[get_authorized_devices] 所有已授权设备:", JSON.stringify(allAuthorized));
+        
         result = devices;
+        break;
+      }
+      
+      case "debug_get_all_authorized": {
+        // 调试：查询所有已授权设备，不限制账号
+        const { data, error } = await supabase
+          .from("store_authorized_devices")
+          .select("username, device_id, is_authorized, is_active, created_at, authorized_at")
+          .eq("is_authorized", true)
+          .eq("is_active", true);
+        
+        console.log("[debug_get_all_authorized] 查询结果:", data, "错误:", error);
+        result = data || [];
+        break;
+      }
+      
+      case "check_device_stores": {
+        // 查询当前设备已绑定的门店列表（用于登录页锁死门店选择）
+        const { device_id } = params;
+        const validDeviceId = validateInput(device_id, "设备ID", 100);
+        
+        if (!validDeviceId) {
+          result = { stores: [] };
+          break;
+        }
+        
+        // 查询该设备上所有已授权的门店
+        const { data: boundStores, error: boundErr } = await supabase
+          .from("store_authorized_devices")
+          .select("username, is_authorized, is_active")
+          .eq("device_id", validDeviceId)
+          .eq("is_authorized", true);
+        
+        if (boundErr) {
+          console.error("[check_device_stores] 查询失败:", boundErr);
+          result = { stores: [] };
+          break;
+        }
+        
+        // 返回已绑定的门店列表（不管 is_active，授权过的都算）
+        const stores = (boundStores || []).map(d => ({
+          username: d.username,
+          is_active: d.is_active
+        }));
+        
+        console.log(`[check_device_stores] 设备 ${validDeviceId} 已绑定门店:`, JSON.stringify(stores));
+        result = { stores };
+        break;
+      }
+
+      case "clear_all_device_auth": {
+        // 清除所有设备授权（强制所有设备重新申请授权）
+        // 注意：仅管理员可调用此功能
+        // 创建服务端客户端（使用 SERVICE KEY，绕过 RLS）
+        const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+          auth: { autoRefreshToken: false, persistSession: false }
+        });
+        
+        // 获取所有设备记录（除了例外账号）
+        const { data: allDevices } = await adminClient
+          .from("store_authorized_devices")
+          .select("id, username, device_id, is_authorized")
+          .neq("username", "admin")
+          .neq("username", "15305479520");
+        
+        console.log("[clear_all_device_auth] 开始清除授权，现有设备数量:", allDevices?.length || 0);
+        
+        // 真正删除这些设备记录
+        const { error: deleteError } = await adminClient
+          .from("store_authorized_devices")
+          .delete()
+          .neq("username", "admin")  // 保留 admin 的授权
+          .neq("username", "15305479520");  // 保留例外账号的授权
+        
+        if (deleteError) {
+          console.error("[clear_all_device_auth] 删除失败:", deleteError);
+        } else {
+          console.log("[clear_all_device_auth] 已删除所有设备授权记录");
+        }
+        
+        result = { cleared: true, device_count: allDevices?.length || 0 };
         break;
       }
 
       // ========== 用户主动退出登录 ==========
       case "logout_device": {
-        // 用户退出当前设备登录
+        // 用户退出当前设备登录（不取消授权，只清除活跃状态）
         const { target_type, target_id, device_id } = params;
         const validDeviceId = validateInput(device_id, "设备ID", 100);
         const validTargetType = validateInput(target_type, "类型", 20);
         const validTargetId = validateInput(target_id, "目标ID", 100);
         
-        if (validTargetType === 'employee') {
-          await supabase
-            .from("device_bindings")
-            .update({ is_authorized: false })
-            .eq("employee_id", validTargetId)
-            .eq("device_id", validDeviceId);
-        } else if (validTargetType === 'store') {
+        if (validTargetType === 'store') {
+          // 仅标记为不活跃，保留 is_authorized 状态
           await supabase
             .from("store_authorized_devices")
-            .update({ is_authorized: false })
+            .update({ is_active: false, last_logout_at: new Date().toISOString() })
             .eq("username", validTargetId)
+            .eq("device_id", validDeviceId);
+        } else if (validTargetType === 'employee') {
+          await supabase
+            .from("device_bindings")
+            .update({ is_active: false })
+            .eq("employee_id", validTargetId)
             .eq("device_id", validDeviceId);
         }
         
@@ -1934,16 +2372,11 @@ serve(async (req) => {
         const validTargetType = validateInput(target_type, "类型", 20);
         const validTargetId = validateInput(target_id, "目标ID", 100);
         
-        if (validTargetType === 'employee') {
-          await supabase
-            .from("device_bindings")
-            .update({ is_active: false })
-            .eq("device_id", validDeviceId)
-            .eq("employee_id", validTargetId);
-        } else if (validTargetType === 'store') {
+        // 修复：统一使用 store_authorized_devices 表
+        if (validTargetType === 'employee' || validTargetType === 'store') {
           await supabase
             .from("store_authorized_devices")
-            .update({ is_active: false })
+            .update({ is_active: false, is_authorized: false })
             .eq("device_id", validDeviceId)
             .eq("username", validTargetId);
         }
@@ -2288,27 +2721,58 @@ serve(async (req) => {
 
       case "list_stores": {
         // 获取所有门店列表（用于管理后台-门店管理）
-        // 从 store_authorized_devices 表提取去重的门店账号
+        // 先查询所有门店账号（从 admin_users 表）
+        const { data: adminUsers } = await supabase
+          .from("admin_users")
+          .select("username, is_active, role")
+          .eq("role", "store")
+          .order("username");
+        
+        // 再查询设备记录（用于获取登录时间）
         const { data: devices } = await supabase
           .from("store_authorized_devices")
           .select("username, is_active, last_login_at");
         
-        if (!devices) {
-          result = [];
-          break;
-        }
-
-        // 按用户名分组，取最新登录时间
+        console.log("[list_stores] admin_users 门店账号数量:", adminUsers?.length || 0);
+        console.log("[list_stores] store_authorized_devices 设备记录数量:", devices?.length || 0);
+        
+        // 合并数据
         const storeMap: Record<string, { username: string; last_login_at: string | null; is_active: boolean }> = {};
-        for (const d of devices) {
-          const name = d.username;
-          if (!name) continue;
-          if (!storeMap[name] || (d.last_login_at && (!storeMap[name].last_login_at || d.last_login_at > storeMap[name].last_login_at!))) {
-            storeMap[name] = { username: name, last_login_at: d.last_login_at, is_active: d.is_active };
+        
+        // 1. 添加所有门店账号（无论是否有设备记录）
+        if (adminUsers) {
+          for (const u of adminUsers) {
+            storeMap[u.username] = { 
+              username: u.username, 
+              last_login_at: null, 
+              is_active: u.is_active 
+            };
           }
         }
         
-        result = Object.values(storeMap).sort((a, b) => a.username.localeCompare(b.username));
+        // 2. 更新登录时间（如果有设备记录）
+        if (devices) {
+          for (const d of devices) {
+            const name = d.username;
+            if (!name) continue;
+            if (storeMap[name]) {
+              // 如果有更晚的登录时间，更新
+              if (d.last_login_at && (!storeMap[name].last_login_at || d.last_login_at > storeMap[name].last_login_at!)) {
+                storeMap[name].last_login_at = d.last_login_at;
+              }
+              // 更新 is_active 为设备的状态（如果设备是 active）
+              if (d.is_active) {
+                storeMap[name].is_active = true;
+              }
+            }
+          }
+        }
+        
+        const resultArray = Object.values(storeMap).sort((a, b) => a.username.localeCompare(b.username));
+        console.log("[list_stores] 最终返回门店数量:", resultArray.length);
+        console.log("[list_stores] 最终返回门店列表:", JSON.stringify(resultArray));
+        
+        result = resultArray;
         break;
       }
 
@@ -2481,7 +2945,7 @@ serve(async (req) => {
     });
   } catch (err) {
     console.error("Edge Function 错误:", err);
-    return new Response(JSON.stringify({ error: String(err) }), {
+    return new Response(JSON.stringify({ error: friendlyError(err) }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

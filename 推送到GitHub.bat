@@ -1,38 +1,53 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo   推送到 GitHub
+echo   缺货统计系统 - 推送到 GitHub
 echo ========================================
 echo.
 
 cd /d "%~dp0"
 
-echo [1/4] 初始化 Git 仓库...
-git init
-git config user.name "众和医药"
-git config user.email "admin@zhongheyiyao.com"
+REM 检查是否已初始化 Git 仓库
+if not exist ".git" (
+    echo [准备] 首次使用，正在初始化 Git 仓库...
+    git init
+    git config user.name "众和医药"
+    git config user.email "admin@zhongheyiyao.com"
+    echo 请在下方输入你的仓库地址
+    echo 例如：https://github.com/wszhyyls/quehuo-tongji.git
+    echo.
+    set /p REPO_URL="请输入仓库地址: "
+    git remote add origin %REPO_URL%
+    git branch -M main
+) else (
+    echo [检测] Git 仓库已初始化
+)
 
-echo [2/4] 添加所有文件...
+REM 检查远程仓库是否配置
+git remote -v | findstr "origin" >nul
+if %errorlevel% neq 0 (
+    echo.
+    echo [警告] 未配置远程仓库，请输入仓库地址
+    set /p REPO_URL="仓库地址: "
+    git remote add origin %REPO_URL%
+    git branch -M main
+)
+
+echo.
+echo [1/3] 暂存所有文件...
 git add .
 git status
 
 echo.
-echo 请确认以上文件列表，按任意键继续...
-pause
-
-echo [3/4] 创建初始提交...
-git commit -m "Initial commit - 缺货统计系统 v3.17.1"
+echo [2/3] 提交更改...
+for /f "tokens=2 delims=: " %%a in ('findstr /C:"version" package.json') do set VERSION=%%a
+set VERSION=%VERSION:"=%
+echo 当前版本: v%VERSION%
+git commit -m "Update - 缺货统计系统 v%VERSION%"
 
 echo.
-echo [4/4] 推送到 GitHub
-echo 请在下方输入你创建的仓库地址
-echo 例如：https://github.com/你的用户名/quehuo-tool.git
-echo.
-set /p REPO_URL="请输入仓库地址: "
-
-git remote add origin %REPO_URL%
-git branch -M main
-git push -u origin main
+echo [3/3] 推送到 GitHub...
+git push -u origin main --force
 
 echo.
 echo ========================================

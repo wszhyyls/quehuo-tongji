@@ -2,9 +2,9 @@ const { app, BrowserWindow, Menu, dialog, ipcMain } = require('electron');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
 
-// 配置（优化：延迟加载 icon）
+// 配置
 const CONFIG = {
-  title: 'WSZH-ShortageStore v3.18.5',
+  title: 'WSZH-ShortageStore v3.18.6',
   width: 1400,
   height: 900,
   minWidth: 800,
@@ -18,8 +18,9 @@ const CONFIG = {
   }
 };
 
-// 更新服务器地址（Supabase Edge Function）
+// 更新服务器地址
 const UPDATE_CHECK_URL = 'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/check-update';
+const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.6/';  // GitHub Releases
 
 let mainWindow = null;
 
@@ -29,8 +30,7 @@ function log(message) {
   console.log(`[${timestamp}] ${message}`);
 }
 
-// 创建启动画面窗口（优化：更快显示）
-function createSplashWindow() {
+// 创建启动画面窗口（最先执行，秒开）
   const splashWindow = new BrowserWindow({
     width: 500,
     height: 600,
@@ -72,12 +72,12 @@ function createWindow() {
     mainWindow.maximize();
     mainWindow.show();
     
-    // 延迟关闭启动画面
+    // 延长过渡时间，确保动画完整播放后平滑过渡
     setTimeout(() => {
       if (splashWindow && !splashWindow.isDestroyed()) {
         splashWindow.close();
       }
-    }, 200);
+    }, 800);  // 从200ms延长到800ms，给动画充足时间
   });
 
   // 窗口关闭时退出应用
@@ -87,71 +87,74 @@ function createWindow() {
   });
 }
 
-// 检查更新
+// 检查更新（自己实现版本检测，不依赖 electron-updater 的 generic provider）
 async function checkForUpdates() {
   try {
     log('开始检查更新...');
+    const currentVersion = app.getVersion();
     
-    // 配置 autoUpdater
-    autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = true;
+    // 调用 check-update Edge Function 获取最新版本信息
+    const response = await fetch(UPDATE_CHECK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: currentVersion })
+    });
     
-    // 设置更新源（使用 JSON 文件）
-    autoUpdater.setFeedURL({
-      provider: 'generic',
-      url: UPDATE_CHECK_URL
-    });
-
-    // 监听更新事件
-    autoUpdater.on('checking-for-update', () => {
-      log('正在检查更新...');
-    });
-
-    autoUpdater.on('update-available', async (info) => {
-      log(`发现新版本: ${info.version}`);
+    if (!response.ok) {
+      log(`更新检查失败: HTTP ${response.status}`);
+      return;
+    }
+    
+    const result = await response.json();
+    log(`服务器版本: ${result.data?.version}, 当前版本: ${currentVersion}`);
+    
+    if (result.success && result.data?.updateAvailable) {
+      log(`发现新版本: ${result.data.version}`);
       
       // 向渲染进程发送更新通知
       if (mainWindow) {
         mainWindow.webContents.send('update-available', {
-          version: info.version,
-          releaseNotes: info.releaseNotes
+          version: result.data.version,
+          releaseNotes: result.data.releaseNotes,
+          downloadUrl: result.data.downloadUrl
         });
       }
       
-      // 自动下载
-      autoUpdater.downloadUpdate();
-    });
-
-    autoUpdater.on('update-not-available', () => {
+      // 使用 electron-updater 通用提供者下载
+      autoUpdater.setFeedURL({
+        provider: 'generic',
+        url: UPDATE_FILES_URL
+      });
+      
+      autoUpdater.on('download-progress', (progress) => {
+        if (mainWindow) {
+          mainWindow.webContents.send('update-progress', { percent: progress.percent });
+        }
+      });
+      
+      autoUpdater.on('update-downloaded', (info) => {
+        log('更新下载完成');
+        if (mainWindow) {
+          mainWindow.webContents.send('update-downloaded', { version: info.version });
+        }
+      });
+      
+      autoUpdater.on('error', (error) => {
+        log(`下载错误: ${error.message}`);
+        // 下载失败时仍通知用户手动下载
+        if (mainWindow) {
+          mainWindow.webContents.send('update-available', {
+            version: result.data.version,
+            releaseNotes: result.data.releaseNotes + '\n\n(自动下载失败，请手动下载)',
+            downloadUrl: result.data.downloadUrl
+          });
+        }
+      });
+      
+      await autoUpdater.downloadUpdate();
+    } else {
       log('已是最新版本');
-    });
-
-    autoUpdater.on('download-progress', (progress) => {
-      log(`下载进度: ${progress.percent.toFixed(1)}%`);
-      if (mainWindow) {
-        mainWindow.webContents.send('update-progress', {
-          percent: progress.percent
-        });
-      }
-    });
-
-    autoUpdater.on('update-downloaded', (info) => {
-      log('更新下载完成，准备安装');
-      
-      // 询问用户是否立即安装
-      if (mainWindow) {
-        mainWindow.webContents.send('update-downloaded', {
-          version: info.version
-        });
-      }
-    });
-
-    autoUpdater.on('error', (error) => {
-      log(`更新错误: ${error.message}`);
-    });
-
-    // 执行检查
-    await autoUpdater.checkForUpdates();
+    }
     
   } catch (error) {
     log(`检查更新失败: ${error.message}`);
