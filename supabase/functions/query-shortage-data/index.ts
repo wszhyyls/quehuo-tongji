@@ -1824,26 +1824,41 @@ serve(async (req) => {
           }
         }
         
-        // 3.2 查当前设备是否已有记录
-        console.log("[store_login] 检查设备记录, device_id:", validDeviceId, "username:", validUsername);
-        const { data: existingDevices } = await adminClient
+        // 3.2 查当前设备的记录（优先匹配当前用户自己的记录）
+        let { data: existingDevices } = await adminClient
           .from("store_authorized_devices")
           .select("id, is_authorized, username, is_active")
           .eq("device_id", validDeviceId)
+          .eq("username", validUsername)
           .order("id", { ascending: false })
           .limit(1);
         
-        console.log("[store_login] 当前设备记录:", JSON.stringify(existingDevices));
+        // 如果没找到当前用户的记录，再查该设备的通用记录
+        if (!existingDevices || existingDevices.length === 0) {
+          const { data: anyDevices } = await adminClient
+            .from("store_authorized_devices")
+            .select("id, is_authorized, username, is_active")
+            .eq("device_id", validDeviceId)
+            .order("id", { ascending: false })
+            .limit(1);
+          existingDevices = anyDevices;
+        }
+        
+        console.log("[store_login] 设备记录:", JSON.stringify(existingDevices));
 
         if (existingDevices && existingDevices.length > 0) {
-          // 已有记录
           const device = existingDevices[0];
           
-          // 检查授权状态（非例外账号）
-          if (!isExempt && !device.is_authorized) {
-            // 设备未授权，允许任意账号申请授权
-            console.log("[store_login] 设备未授权，允许任意账号申请授权:", validUsername, validDeviceId);
-            // 更新username为当前登录账号（重新绑定）
+          // 如果是当前用户自己的记录（username匹配）
+          if (device.username === validUsername) {
+            // 自己退出再登录：直接激活
+            await adminClient
+              .from("store_authorized_devices")
+              .update({ is_active: true, last_login_at: new Date().toISOString() })
+              .eq("id", device.id);
+            // 跳过授权检查，直接返回成功
+          } else if (!isExempt && !device.is_authorized) {
+            // 设备未授权（别人的记录），允许申请
             await adminClient
               .from("store_authorized_devices")
               .update({ 
@@ -1857,10 +1872,7 @@ serve(async (req) => {
               pending_device_id: validDeviceId,
               pending_username: validUsername
             }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-          }
-          
-          // 额外安全检查：确保设备的username与当前登录账号一致
-          if (device.username !== validUsername && device.is_authorized) {
+          } else if (device.username !== validUsername && device.is_authorized) {
             console.log("[store_login] 设备绑定账号不匹配:", device.username, "vs", validUsername);
             
             // 为当前账号创建一条待授权记录，以便管理员能看到并处理
@@ -2041,37 +2053,22 @@ serve(async (req) => {
           .select("id, is_authorized, username")
           .eq("device_id", validDeviceId)
           .eq("username", validTargetId)
-          .eq("is_active", true)
           .limit(1);
-        
-        console.log("[authorize_device] 现有记录:", existing?.length ? "找到" : "未找到");
         
         if (existing && existing.length > 0) {
           if (authorize) {
-            // 授权
-            console.log("[authorize_device] 执行授权操作");
             await supabase
               .from("store_authorized_devices")
-              .update({ is_authorized: true, authorized_at: new Date().toISOString() })
+              .update({ is_authorized: true, is_active: true, authorized_at: new Date().toISOString() })
               .eq("id", existing[0].id);
           } else {
-            // 拒绝：删除记录
-            console.log("[authorize_device] 执行拒绝操作");
+            // 拒绝：彻底删除该设备+账号的所有记录
             await supabase
               .from("store_authorized_devices")
               .delete()
-              .eq("id", existing[0].id);
+              .eq("device_id", validDeviceId)
+              .eq("username", validTargetId);
           }
-        } else if (authorize) {
-          // 授权时如果记录不存在，创建一条
-          console.log("[authorize_device] 记录不存在，创建新授权记录");
-          await supabase.from("store_authorized_devices").insert([{
-            device_id: validDeviceId,
-            username: validTargetId,
-            is_authorized: true,
-            is_active: true,
-            authorized_at: new Date().toISOString()
-          }]);
         }
         
         result = { success: true, authorized: authorize };
@@ -2221,16 +2218,14 @@ serve(async (req) => {
         
         let devices = [];
         if (validTargetType === 'employee') {
-          // 修复：从 store_authorized_devices 表查询（与登录时写入的表一致）
-          // 关键修复：必须同时满足 is_authorized = true 和 is_active = true
           const { data, error } = await supabase
             .from("store_authorized_devices")
             .select("*")
             .eq("username", validTargetId)
             .eq("is_authorized", true)
-            .eq("is_active", true);
+            .eq("is_active", true)
+            .neq("username", "15305479520");  // 豁免账号不显示
           
-          console.log("[get_authorized_devices] 员工查询结果:", validTargetId, "数据:", JSON.stringify(data), "错误:", error);
           devices = data || [];
         } else if (validTargetType === 'store') {
           const { data, error } = await supabase
@@ -2240,7 +2235,6 @@ serve(async (req) => {
             .eq("is_authorized", true)
             .eq("is_active", true);
           
-          console.log("[get_authorized_devices] 门店查询结果:", validTargetId, "数据:", JSON.stringify(data), "错误:", error);
           devices = data || [];
         }
         
@@ -2258,14 +2252,14 @@ serve(async (req) => {
       }
       
       case "debug_get_all_authorized": {
-        // 调试：查询所有已授权设备，不限制账号
         const { data, error } = await supabase
           .from("store_authorized_devices")
           .select("username, device_id, is_authorized, is_active, created_at, authorized_at")
           .eq("is_authorized", true)
-          .eq("is_active", true);
+          .eq("is_active", true)
+          .neq("username", "admin")
+          .neq("username", "15305479520");
         
-        console.log("[debug_get_all_authorized] 查询结果:", data, "错误:", error);
         result = data || [];
         break;
       }

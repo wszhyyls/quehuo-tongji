@@ -31,6 +31,7 @@ function log(message) {
 }
 
 // 创建启动画面窗口（最先执行，秒开）
+function createSplashWindow() {
   const splashWindow = new BrowserWindow({
     width: 500,
     height: 600,
@@ -57,15 +58,26 @@ function createWindow() {
   // 立即创建启动画面（不等待任何资源）
   const splashWindow = createSplashWindow();
 
+  // 清除 HTTP 缓存（页面内容，不含 localStorage）
+  var { session } = require('electron');
+  session.defaultSession.clearCache().then(function() {
+    log('浏览器缓存已清除（不含 localStorage）');
+  }).catch(function(err) {
+    log('清除缓存失败: ' + err.message);
+  });
+
   // 立即创建主窗口（隐藏状态）
   mainWindow = new BrowserWindow({
     ...CONFIG,
     show: false
   });
 
-  // 异步加载登录页面
+  // 从 Cloudflare 加载（带强制缓存绕过）
   var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
-  mainWindow.loadURL(BASE_URL + '/login.html?v=' + new Date().getTime());
+  var cacheBuster = 'v=3.18.7&t=' + Date.now();
+  mainWindow.loadURL(BASE_URL + '/login.html?' + cacheBuster, {
+    extraHeaders: 'Cache-Control: no-cache, no-store, must-revalidate\nPragma: no-cache'
+  });
 
   // 页面加载完成后显示主窗口
   mainWindow.webContents.on('did-finish-load', () => {

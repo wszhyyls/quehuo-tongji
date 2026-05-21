@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder",
-    "build:win": "electron-builder --win --c.directories.output=C:\\temp\\wszh-build"
+    "build:win": "electron-builder --win --c.directories.output=dist"
   },
   "build": {
     "appId": "com.wszh.shortage-store",
