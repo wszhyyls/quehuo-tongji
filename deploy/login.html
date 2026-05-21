@@ -88,7 +88,7 @@
                 <!-- 员工登录：账号下拉选择 -->
                 <div class="form-group" id="accountGroup">
                     <label>选择账号</label>
-                    <select id="accountSelect" class="login-select" disabled>
+                    <select id="accountSelect" class="login-select">
                         <option value="">-- 请先选择门店 --</option>
                     </select>
                 </div>
@@ -187,13 +187,15 @@
                 var accountSelect = document.getElementById('accountSelect');
                 var passwordEl = document.getElementById('passwordInput');
 
-                // ========== 先隐藏表单，等设备检测完成后再显示 ==========
-                storeSelect.disabled = true;
-                accountSelect.disabled = true;
-                document.getElementById('loginBtn').disabled = true;
+                // ========== 设备检测：后台静默运行，不阻塞用户操作 ==========
+                var deviceCheckDone = false;
+                var deviceCheckResult = null;
                 
-                // ========== 检查设备已绑定的门店（锁死门店选择）==========
                 async function checkDeviceStores() {
+                    // 超时保护：5秒后放弃等待
+                    var controller = new AbortController();
+                    var timeoutId = setTimeout(function() { controller.abort(); }, 5000);
+                    
                     try {
                         var deviceId = getDeviceId();
                         console.log('[设备检测] 当前设备ID:', deviceId);
@@ -207,8 +209,10 @@
                             body: JSON.stringify({
                                 action: 'check_device_stores',
                                 params: { device_id: deviceId }
-                            })
+                            }),
+                            signal: controller.signal
                         });
+                        clearTimeout(timeoutId);
                         var result = await resp.json();
                         
                         if (result.success && result.data && result.data.stores && result.data.stores.length > 0) {
@@ -227,6 +231,9 @@
                                 }
                             });
                             
+                            // 保存结果供登录恢复使用
+                            deviceCheckResult = boundStores;
+                            
                             // 添加上次登录匹配检查：如果lastStore也在绑定列表里，优先选它
                             var lastStore = localStorage.getItem('lastStore');
                             var matchedStore = null;
@@ -235,10 +242,28 @@
                                 if (isLastBound) matchedStore = lastStore;
                             }
                             
-                            // 默认选中匹配的门店或第一个绑定的门店
-                            var defaultStore = matchedStore || boundStores[0].username;
-                            storeSelect.value = defaultStore;
-                            storeSelect.dispatchEvent(new Event('change'));
+                            // 检查当前用户是否已经选了门店（可能通过恢复上次记录已选）
+                            var currentStore = storeSelect.value;
+                            var shouldChange = false;
+                            if (!currentStore) {
+                                shouldChange = true;
+                            } else {
+                                // 当前选的门店不在绑定列表中，需要切换
+                                var isCurrentBound = boundStores.some(function(s) { return s.username === currentStore; });
+                                if (!isCurrentBound) shouldChange = true;
+                            }
+                            
+                            if (shouldChange) {
+                                // 默认选中匹配的门店或第一个绑定的门店
+                                var defaultStore = matchedStore || boundStores[0].username;
+                                if (storeSelect.value !== defaultStore) {
+                                    storeSelect.value = defaultStore;
+                                    storeSelect.dispatchEvent(new Event('change'));
+                                } else {
+                                    // 值相同也要触发change确保账号列表刷新
+                                    storeSelect.dispatchEvent(new Event('change'));
+                                }
+                            }
                             
                             // 添加锁标志 + 提示
                             var storeLabel = storeSelect.parentElement.querySelector('label');
@@ -251,16 +276,13 @@
                             }
                         }
                     } catch(e) {
-                        console.log('[设备检测] 查询失败，使用完整门店列表:', e);
+                        console.log('[设备检测] 查询失败或超时，使用完整门店列表:', e.message || e);
                     } finally {
-                        // 恢复表单可用
-                        storeSelect.disabled = false;
-                        accountSelect.disabled = false;
-                        document.getElementById('loginBtn').disabled = false;
+                        deviceCheckDone = true;
                     }
                 }
                 
-                // 启动设备检测（等待完成后再恢复上次登录记录）
+                // 启动设备检测（后台静默运行，不阻塞页面）
                 checkDeviceStores();
 
                 // 门店选择变化时更新账号列表并清空密码
