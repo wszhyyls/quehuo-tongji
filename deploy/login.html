@@ -334,21 +334,36 @@
                         modeBtns.forEach(function(b) { b.classList.remove('active'); });
                         this.classList.add('active');
                         var mode = this.dataset.mode;
+                        passwordEl.value = '';
+                        document.getElementById('rememberPassword').checked = false;
+                        hideError();
                         if (mode === 'admin') {
                             document.getElementById('storeGroup').style.display = 'none';
                             document.getElementById('accountGroup').style.display = 'none';
                             document.getElementById('adminUsernameGroup').style.display = '';
+                            // 恢复上次管理员用户名和密码
+                            var sau = localStorage.getItem('lastAdminUser');
+                            if (sau) {
+                                document.getElementById('adminUsernameInput').value = sau;
+                                if (localStorage.getItem('rememberPassword_admin_' + sau) === 'true') {
+                                    var sp = localStorage.getItem('savedPassword_admin_' + sau);
+                                    if (sp) { passwordEl.value = sp; document.getElementById('rememberPassword').checked = true; }
+                                }
+                            }
                             document.getElementById('adminUsernameInput').focus();
                         } else {
                             document.getElementById('storeGroup').style.display = '';
                             document.getElementById('accountGroup').style.display = '';
                             document.getElementById('adminUsernameGroup').style.display = 'none';
                         }
-                        passwordEl.value = '';
-                        document.getElementById('rememberPassword').checked = false;
-                        hideError();
                     });
                 });
+
+                // ===== 自动恢复管理员模式 =====
+                if (localStorage.getItem('lastMode') === 'admin') {
+                    var adminBtn = document.querySelector('.mode-btn[data-mode="admin"]');
+                    if (adminBtn) adminBtn.click();
+                }
 
                 // 登录按钮
                 document.getElementById('loginBtn').addEventListener('click', handleLogin);
@@ -420,7 +435,10 @@
                 if (!isAdminMode) {
                     localStorage.setItem('lastStore', store);
                     localStorage.setItem('lastAccount', account);
+                } else {
+                    localStorage.setItem('lastAdminUser', account);
                 }
+                localStorage.setItem('lastMode', isAdminMode ? 'admin' : 'employee');
 
                 // 保存或清除记住的密码
                 var rememberChecked = document.getElementById('rememberPassword').checked;
