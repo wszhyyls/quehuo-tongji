@@ -75,9 +75,8 @@ function createWindow() {
     show: false
   });
 
-  // 异步加载登录页面，带时间戳防缓存
-  var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
-  mainWindow.loadURL(BASE_URL + '/login.html?v=' + new Date().getTime());
+  // 直接加载本地 login.html（不经过 CDN，永不缓存）
+  mainWindow.loadFile(path.join(__dirname, 'login.html'));
 
   // 页面加载完成后显示主窗口
   mainWindow.webContents.on('did-finish-load', () => {
