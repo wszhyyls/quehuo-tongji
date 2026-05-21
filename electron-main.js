@@ -4,7 +4,7 @@ const { autoUpdater } = require('electron-updater');
 
 // 配置
 const CONFIG = {
-  title: 'WSZH-ShortageStore v3.18.6',
+  title: 'WSZH-ShortageStore v3.18.7',
   width: 1400,
   height: 900,
   minWidth: 800,
@@ -20,7 +20,7 @@ const CONFIG = {
 
 // 更新服务器地址
 const UPDATE_CHECK_URL = 'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/check-update';
-const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.6/';  // GitHub Releases
+const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.7/';  // GitHub Releases
 
 let mainWindow = null;
 

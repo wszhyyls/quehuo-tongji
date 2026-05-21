@@ -4,6 +4,12 @@
   Access-Control-Allow-Methods: GET, POST, OPTIONS
   Access-Control-Allow-Headers: Content-Type, Authorization
 
+# HTML 页面禁止缓存（确保用户立即获得最新版本）
+/*.html
+  Cache-Control: no-cache, no-store, must-revalidate
+  Pragma: no-cache
+  Expires: 0
+
 # 静态资源强缓存（改版时升级版本号?v=X即可刷新）
 /static/js/*
   Cache-Control: public, max-age=86400, immutable

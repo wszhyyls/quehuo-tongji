@@ -7,8 +7,8 @@ const corsHeaders = {
 };
 
 // 最新版本配置（每次发布新版本时更新）
-const LATEST_VERSION = '3.18.6';
-const UPDATE_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.6/';  // GitHub Releases
+const LATEST_VERSION = '3.18.7';
+const UPDATE_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.7/';  // GitHub Releases
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -29,7 +29,7 @@ serve(async (req) => {
         updateAvailable: isUpdateAvailable,
         releaseDate: '2026-05-20',
         releaseNotes: `
-v3.18.6 更新内容：
+v3.18.7 更新内容：
 - 库存同步机制重构，数据与Excel一致
 - 设备码v2：不同电脑生成不同设备码
 - 批量授权：一键授权所有待授权设备
