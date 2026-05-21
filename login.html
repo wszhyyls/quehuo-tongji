@@ -258,7 +258,33 @@
                     }
                 };
 
-                // ===== 后台设备检测（静默，不阻塞）=====
+                // ===== 设备绑定锁定（优先缓存，秒速锁定）=====
+                function applyDeviceLock(bound) {
+                    storeSelect.querySelectorAll('option').forEach(function(o) {
+                        if (o.value && !bound.some(function(s) { return s.username === o.value; })) {
+                            o.disabled = true; o.style.display = 'none';
+                        }
+                    });
+                    var cur = storeSelect.value;
+                    if (!cur || !bound.some(function(s) { return s.username === cur; })) {
+                        storeSelect.value = bound[0].username;
+                        fillAccounts(bound[0].username);
+                    }
+                    var lbl = storeSelect.parentElement.querySelector('label');
+                    if (lbl) lbl.innerHTML = '选择门店 🔒<span style="font-size:10px;color:#4CAF50;margin-left:6px;">（已绑定）</span>';
+                    // 缓存到 localStorage，下次立即生效
+                    localStorage.setItem('device_bound_stores', JSON.stringify(bound));
+                }
+                
+                // 1. 先从缓存读取，立即锁定（无延迟）
+                try {
+                    var cached = JSON.parse(localStorage.getItem('device_bound_stores'));
+                    if (cached && cached.length > 0) {
+                        applyDeviceLock(cached);
+                    }
+                } catch(e) {}
+                
+                // 2. 后台静默刷新（无缓存或刷新时再更新）
                 (function() {
                     var ctrl = new AbortController();
                     setTimeout(function() { ctrl.abort(); }, 5000);
@@ -269,19 +295,7 @@
                         signal: ctrl.signal
                     }).then(function(r) { return r.json(); }).then(function(r) {
                         if (r.success && r.data && r.data.stores && r.data.stores.length > 0) {
-                            var bound = r.data.stores;
-                            storeSelect.querySelectorAll('option').forEach(function(o) {
-                                if (o.value && !bound.some(function(s) { return s.username === o.value; })) {
-                                    o.disabled = true; o.style.display = 'none';
-                                }
-                            });
-                            var cur = storeSelect.value;
-                            if (!cur || !bound.some(function(s) { return s.username === cur; })) {
-                                storeSelect.value = bound[0].username;
-                                fillAccounts(bound[0].username);
-                            }
-                            var lbl = storeSelect.parentElement.querySelector('label');
-                            if (lbl) lbl.innerHTML = '选择门店 🔒<span style="font-size:10px;color:#4CAF50;margin-left:6px;">（已绑定）</span>';
+                            applyDeviceLock(r.data.stores);
                         }
                     }).catch(function() {});
                 })();
