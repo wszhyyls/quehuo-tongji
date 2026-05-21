@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder",
-    "build:win": "electron-builder --win"
+    "build:win": "electron-builder --win --c.directories.output=C:\\temp\\wszh-build"
   },
   "build": {
     "appId": "com.wszh.shortage-store",
@@ -16,14 +16,13 @@
     },
     "win": {
       "target": [
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
+        "nsis"
       ],
       "icon": "static/icon-512.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     },
     "files": [
       "electron-main.js",
