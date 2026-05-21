@@ -31,6 +31,7 @@ function log(message) {
 }
 
 // 创建启动画面窗口（最先执行，秒开）
+function createSplashWindow() {
   const splashWindow = new BrowserWindow({
     width: 500,
     height: 600,
