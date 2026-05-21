@@ -1,11 +1,19 @@
-# 跨域支持
+# HTML 页面禁止缓存（强制！）
+/login*
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Methods: GET, POST, OPTIONS
+  Access-Control-Allow-Headers: Content-Type, Authorization
+  Cache-Control: no-cache, no-store, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+# 跨域支持（其他所有文件）
 /*
   Access-Control-Allow-Origin: *
   Access-Control-Allow-Methods: GET, POST, OPTIONS
   Access-Control-Allow-Headers: Content-Type, Authorization
 
-# HTML 页面禁止缓存（确保用户立即获得最新版本）
-# /*.html 不匹配带 ?v= 参数的 URL，需要用 * 通配
+# 其他 HTML
 /*.html*
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache

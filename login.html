@@ -134,8 +134,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
-        const SUPABASE_URL = "https://qswpgnnedqvuegwfbprd.supabase.co";
-        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzd3Bnbm5lZHF2dWVnd2ZicHJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3Mjc0NjEsImV4cCI6MjA5NDMwMzQ2MX0.mY_nlWoHc5UYDHB9jOif0zkYJ2OVx79KTgejcSGkhBI";
+        // SUPABASE_URL / SUPABASE_ANON_KEY 已在 utils.js 中定义，此处不再重复声明
 
         let supabaseClient = null;
         let isLoggingIn = false;
@@ -200,6 +199,23 @@
                     });
                     if (STORE_ACCOUNTS[sv].length === 1) {
                         accountSelect.value = STORE_ACCOUNTS[sv][0].value;
+                    }
+                }
+
+                // ===== 立即恢复上次登录 =====
+                var ls = localStorage.getItem('lastStore');
+                var la = localStorage.getItem('lastAccount');
+                if (ls && STORE_ACCOUNTS[ls]) {
+                    storeSelect.value = ls;
+                    fillAccounts(ls);
+                    if (la) {
+                        var ao = accountSelect.querySelector('option[value="' + la + '"]');
+                        if (ao) accountSelect.value = la;
+                        var sp = localStorage.getItem('savedPassword_' + ls + '_' + la);
+                        if (sp && localStorage.getItem('rememberPassword_' + ls + '_' + la) === 'true') {
+                            passwordEl.value = sp;
+                            document.getElementById('rememberPassword').checked = true;
+                        }
                     }
                 }
 
