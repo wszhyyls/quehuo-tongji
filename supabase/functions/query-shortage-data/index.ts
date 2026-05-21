@@ -1936,6 +1936,19 @@ serve(async (req) => {
                 authorized_at: new Date().toISOString(),
                 last_login_at: new Date().toISOString()
               }]);
+          } else if (authorizedDevices.length < deviceLimit) {
+            // 旧设备已退出（名额未满），新设备自动授权
+            console.log("[store_login] 名额未满（" + authorizedDevices.length + "/" + deviceLimit + "），自动授权");
+            await adminClient
+              .from("store_authorized_devices")
+              .insert([{
+                device_id: validDeviceId,
+                username: validUsername,
+                is_authorized: true,
+                is_active: true,
+                authorized_at: new Date().toISOString(),
+                last_login_at: new Date().toISOString()
+              }]);
           } else {
             // 普通账号：创建待授权记录（先去重，防止重复点击产生多条记录）
             console.log("[store_login] 新设备，检查是否已有待授权记录:", validDeviceId, validUsername);
