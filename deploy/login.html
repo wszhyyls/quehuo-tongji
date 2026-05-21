@@ -187,7 +187,6 @@
                 var accountSelect = document.getElementById('accountSelect');
                 var passwordEl = document.getElementById('passwordInput');
 
-                // ========== 填充账号下拉列表 ==========
                 function populateAccountList(storeValue) {
                     if (!storeValue || !STORE_ACCOUNTS[storeValue]) {
                         accountSelect.disabled = true;
@@ -207,7 +206,7 @@
                     }
                 }
 
-                // ========== 门店选择变化 ==========
+                // 门店变化 → 填充账号
                 storeSelect.addEventListener('change', function() {
                     accountSelect.value = '';
                     passwordEl.value = '';
@@ -215,7 +214,7 @@
                     populateAccountList(this.value);
                 });
 
-                // ========== 立即恢复上次登录（同步，不等任何异步操作）==========
+                // 立即恢复上次登录
                 var lastStore = localStorage.getItem('lastStore');
                 var lastAccount = localStorage.getItem('lastAccount');
                 if (lastStore && STORE_ACCOUNTS[lastStore]) {
@@ -223,66 +222,17 @@
                     populateAccountList(lastStore);
                     if (lastAccount) {
                         var accOpt = accountSelect.querySelector('option[value="' + lastAccount + '"]');
-                        if (accOpt) {
-                            accountSelect.value = lastAccount;
-                            var sp = localStorage.getItem('savedPassword_' + lastStore + '_' + lastAccount);
-                            var rp = localStorage.getItem('rememberPassword_' + lastStore + '_' + lastAccount) === 'true';
-                            if (rp && sp) {
-                                passwordEl.value = sp;
-                                document.getElementById('rememberPassword').checked = true;
-                            }
-                        }
+                        if (accOpt) accountSelect.value = lastAccount;
+                    }
+                    // 恢复记住的密码
+                    if (lastAccount) {
+                        var sp = localStorage.getItem('savedPassword_' + lastStore + '_' + lastAccount);
+                        var rp = localStorage.getItem('rememberPassword_' + lastStore + '_' + lastAccount) === 'true';
+                        if (rp && sp) { passwordEl.value = sp; document.getElementById('rememberPassword').checked = true; }
                     }
                 }
 
-                // ========== 兜底：500ms后若门店已选但账号仍空，补填 ==========
-                setTimeout(function() {
-                    if (storeSelect.value && accountSelect.options.length <= 1) {
-                        populateAccountList(storeSelect.value);
-                    }
-                }, 500);
-
-                // ========== 设备检测：后台静默运行，不阻塞任何操作 ==========
-                var deviceCheckDone = false;
-                (async function checkDeviceStores() {
-                    var controller = new AbortController();
-                    var tid = setTimeout(function() { controller.abort(); }, 5000);
-                    try {
-                        var deviceId = getDeviceId();
-                        var resp = await fetch(SUPABASE_URL + '/functions/v1/query-shortage-data', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY },
-                            body: JSON.stringify({ action: 'check_device_stores', params: { device_id: deviceId } }),
-                            signal: controller.signal
-                        });
-                        clearTimeout(tid);
-                        var result = await resp.json();
-                        if (result.success && result.data && result.data.stores && result.data.stores.length > 0) {
-                            var bound = result.data.stores;
-                            // 过滤未绑定门店
-                            storeSelect.querySelectorAll('option').forEach(function(opt) {
-                                if (opt.value && !bound.some(function(s) { return s.username === opt.value; })) {
-                                    opt.disabled = true;
-                                    opt.style.display = 'none';
-                                }
-                            });
-                            // 如果当前选的店不在绑定列表中，切换到绑定的店
-                            var cur = storeSelect.value;
-                            if (!cur || !bound.some(function(s) { return s.username === cur; })) {
-                                storeSelect.value = bound[0].username;
-                                populateAccountList(bound[0].username);
-                            }
-                            // 标签加锁
-                            var lbl = storeSelect.parentElement.querySelector('label');
-                            if (lbl) {
-                                lbl.innerHTML = '选择门店 🔒<span style="font-size:10px;color:#4CAF50;margin-left:6px;">（已绑定' + (bound.length > 1 ? ' ' + bound.length + ' 家' : '') + '）</span>';
-                            }
-                        }
-                    } catch(e) { console.log('[设备检测] 未完成:', e.message || e); }
-                    finally { deviceCheckDone = true; }
-                })();
-
-                // ========== 账号选择 ==========
+                // 账号变化
                 accountSelect.addEventListener('change', function() {
                     passwordEl.value = '';
                     document.getElementById('rememberPassword').checked = false;
@@ -293,7 +243,6 @@
                         if (rp && sp) {
                             passwordEl.value = sp;
                             document.getElementById('rememberPassword').checked = true;
-                            setTimeout(function() { document.getElementById('loginBtn').focus(); }, 50);
                         }
                     }
                 });
