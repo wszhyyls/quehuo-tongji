@@ -2635,6 +2635,34 @@ serve(async (req) => {
           .order("created_at", { ascending: false });
         
         if (error) throw error;
+        
+        // 补充缺失的商品名称（从 product_cache 查询）
+        if (reports && reports.length > 0) {
+          const emptyNameCodes = [...new Set(
+            reports.filter((r: any) => !r.product_name && r.product_code).map((r: any) => r.product_code)
+          )];
+          
+          if (emptyNameCodes.length > 0) {
+            const { data: products } = await supabase
+              .from("product_cache")
+              .select("product_code, product_name, product_spec, manufacturer")
+              .in("product_code", emptyNameCodes);
+            
+            if (products && products.length > 0) {
+              const nameMap: Record<string, any> = {};
+              products.forEach((p: any) => { nameMap[p.product_code] = p; });
+              
+              reports.forEach((r: any) => {
+                if (!r.product_name && r.product_code && nameMap[r.product_code]) {
+                  r.product_name = nameMap[r.product_code].product_name;
+                  if (!r.specification) r.specification = nameMap[r.product_code].product_spec;
+                  if (!r.manufacturer) r.manufacturer = nameMap[r.product_code].manufacturer;
+                }
+              });
+            }
+          }
+        }
+        
         result = reports || [];
         break;
       }
