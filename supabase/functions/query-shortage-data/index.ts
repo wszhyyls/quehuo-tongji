@@ -1800,26 +1800,24 @@ serve(async (req) => {
         // 检查是否是例外账号（不受设备限制）
         const isExempt = isExemptAccount(validUsername);
         
-        // 3.1 设备数量限制检查（每个门店限制设备台数）
+        // 3.1 设备绑定锁定检查（授权后锁定设备，换电脑必须管理员解绑）
         if (!isExempt) {
-          const deviceLimit = STORE_DEVICE_LIMITS[validUsername] || 1;
-          
-          // 查询该门店目前已授权的活跃设备
-          const { data: currentDeviceCheck } = await adminClient
+          // 查询该门店所有已授权设备（不管是否活跃，授权即锁定）
+          const { data: allAuthorized } = await adminClient
             .from("store_authorized_devices")
             .select("device_id")
             .eq("username", validUsername)
-            .eq("is_authorized", true)
-            .eq("is_active", true);
+            .eq("is_authorized", true);
           
-          const authorizedDevices = currentDeviceCheck || [];
-          const isCurrentDeviceAuthorized = authorizedDevices.some(d => d.device_id === validDeviceId);
+          const boundDevices = allAuthorized || [];
+          const isCurrentDeviceBound = boundDevices.some(d => d.device_id === validDeviceId);
           
-          if (!isCurrentDeviceAuthorized && authorizedDevices.length >= deviceLimit) {
-            console.log(`[store_login] 门店 ${validUsername} 已达到设备数量上限: ${authorizedDevices.length}/${deviceLimit}`);
+          // 已有授权设备且当前设备不在其中 → 拒绝，必须管理员解绑
+          if (boundDevices.length > 0 && !isCurrentDeviceBound) {
+            console.log(`[store_login] ${validUsername} 已绑定 ${boundDevices.length} 台设备，当前设备不在列表中`);
             return new Response(JSON.stringify({
               success: false, 
-              error: `该门店最多允许 ${deviceLimit} 台设备登录，当前已有 ${authorizedDevices.length} 台设备在线。请联系管理员处理。`
+              error: "该账号已绑定其他设备，不允许登录。如需更换设备，请联系管理员解除原设备绑定。"
             }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
         }
@@ -1921,7 +1919,7 @@ serve(async (req) => {
             })
             .eq("id", device.id);
         } else {
-          // 新设备
+          // 新设备（从未有过此设备记录）
           console.log("[store_login] 新设备, isExempt:", isExempt);
           if (isExempt) {
             // 例外账号：自动授权
@@ -1936,22 +1934,8 @@ serve(async (req) => {
                 authorized_at: new Date().toISOString(),
                 last_login_at: new Date().toISOString()
               }]);
-          } else if (authorizedDevices.length < deviceLimit) {
-            // 旧设备已退出（名额未满），新设备自动授权
-            console.log("[store_login] 名额未满（" + authorizedDevices.length + "/" + deviceLimit + "），自动授权");
-            await adminClient
-              .from("store_authorized_devices")
-              .insert([{
-                device_id: validDeviceId,
-                username: validUsername,
-                is_authorized: true,
-                is_active: true,
-                authorized_at: new Date().toISOString(),
-                last_login_at: new Date().toISOString()
-              }]);
           } else {
-            // 普通账号：创建待授权记录（先去重，防止重复点击产生多条记录）
-            console.log("[store_login] 新设备，检查是否已有待授权记录:", validDeviceId, validUsername);
+            // 普通账号：创建待授权记录，等待管理员审批
             
             const { data: existingPending } = await adminClient
               .from("store_authorized_devices")
