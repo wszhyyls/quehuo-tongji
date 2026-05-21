@@ -187,65 +187,60 @@
                 var accountSelect = document.getElementById('accountSelect');
                 var passwordEl = document.getElementById('passwordInput');
 
-                function populateAccountList(storeValue) {
-                    if (!storeValue || !STORE_ACCOUNTS[storeValue]) {
-                        accountSelect.disabled = true;
-                        accountSelect.innerHTML = '<option value="">-- 请先选择门店 --</option>';
+                // ===== 填充账号 =====
+                function fillAccounts(sv) {
+                    accountSelect.innerHTML = '';
+                    if (!sv || !STORE_ACCOUNTS[sv]) {
+                        accountSelect.appendChild(new Option('-- 请先选择门店 --', ''));
                         return;
                     }
-                    accountSelect.disabled = false;
-                    accountSelect.innerHTML = '<option value="">-- 请选择账号 --</option>';
-                    STORE_ACCOUNTS[storeValue].forEach(function(acc) {
-                        var option = document.createElement('option');
-                        option.value = acc.value;
-                        option.textContent = acc.label;
-                        accountSelect.appendChild(option);
+                    accountSelect.appendChild(new Option('-- 请选择账号 --', ''));
+                    STORE_ACCOUNTS[sv].forEach(function(a) {
+                        accountSelect.appendChild(new Option(a.label, a.value));
                     });
-                    if (STORE_ACCOUNTS[storeValue].length === 1) {
-                        accountSelect.value = STORE_ACCOUNTS[storeValue][0].value;
+                    if (STORE_ACCOUNTS[sv].length === 1) {
+                        accountSelect.value = STORE_ACCOUNTS[sv][0].value;
                     }
                 }
 
-                // 门店变化 → 填充账号
-                storeSelect.addEventListener('change', function() {
+                // ===== 门店变化 =====
+                storeSelect.onchange = function() {
                     accountSelect.value = '';
                     passwordEl.value = '';
                     document.getElementById('rememberPassword').checked = false;
-                    populateAccountList(this.value);
-                });
+                    fillAccounts(this.value);
+                };
 
-                // 立即恢复上次登录
-                var lastStore = localStorage.getItem('lastStore');
-                var lastAccount = localStorage.getItem('lastAccount');
-                if (lastStore && STORE_ACCOUNTS[lastStore]) {
-                    storeSelect.value = lastStore;
-                    populateAccountList(lastStore);
-                    if (lastAccount) {
-                        var accOpt = accountSelect.querySelector('option[value="' + lastAccount + '"]');
-                        if (accOpt) accountSelect.value = lastAccount;
-                    }
-                    // 恢复记住的密码
-                    if (lastAccount) {
-                        var sp = localStorage.getItem('savedPassword_' + lastStore + '_' + lastAccount);
-                        var rp = localStorage.getItem('rememberPassword_' + lastStore + '_' + lastAccount) === 'true';
-                        if (rp && sp) { passwordEl.value = sp; document.getElementById('rememberPassword').checked = true; }
+                // ===== 立即恢复上次登录 =====
+                var ls = localStorage.getItem('lastStore');
+                var la = localStorage.getItem('lastAccount');
+                if (ls && STORE_ACCOUNTS[ls]) {
+                    storeSelect.value = ls;
+                    fillAccounts(ls);
+                    if (la) {
+                        var ao = accountSelect.querySelector('option[value="' + la + '"]');
+                        if (ao) accountSelect.value = la;
+                        var sp = localStorage.getItem('savedPassword_' + ls + '_' + la);
+                        if (sp && localStorage.getItem('rememberPassword_' + ls + '_' + la) === 'true') {
+                            passwordEl.value = sp;
+                            document.getElementById('rememberPassword').checked = true;
+                        }
                     }
                 }
 
-                // 账号变化
-                accountSelect.addEventListener('change', function() {
+                // ===== 账号变化 =====
+                accountSelect.onchange = function() {
                     passwordEl.value = '';
                     document.getElementById('rememberPassword').checked = false;
                     if (this.value) {
                         var sv = storeSelect.value;
                         var sp = localStorage.getItem('savedPassword_' + sv + '_' + this.value);
-                        var rp = localStorage.getItem('rememberPassword_' + sv + '_' + this.value) === 'true';
-                        if (rp && sp) {
+                        if (sp && localStorage.getItem('rememberPassword_' + sv + '_' + this.value) === 'true') {
                             passwordEl.value = sp;
                             document.getElementById('rememberPassword').checked = true;
                         }
                     }
-                });
+                };
                 
                 // 确保密码框获得焦点的函数
                 function focusPasswordInput() {

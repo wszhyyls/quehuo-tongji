@@ -75,8 +75,17 @@ function createWindow() {
     show: false
   });
 
-  // 直接加载本地 login.html（不经过 CDN，永不缓存）
-  mainWindow.loadFile(path.join(__dirname, 'login.html'));
+  // 清除所有缓存，确保加载最新版本
+  const { session } = require('electron');
+  session.defaultSession.clearCache();
+  session.defaultSession.clearStorageData();
+
+  // 从 Cloudflare 加载（带强制缓存绕过）
+  var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
+  var cacheBuster = 'v=3.18.7&t=' + Date.now();
+  mainWindow.loadURL(BASE_URL + '/login.html?' + cacheBuster, {
+    extraHeaders: 'Cache-Control: no-cache, no-store, must-revalidate\nPragma: no-cache'
+  });
 
   // 页面加载完成后显示主窗口
   mainWindow.webContents.on('did-finish-load', () => {
