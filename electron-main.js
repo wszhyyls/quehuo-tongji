@@ -57,13 +57,24 @@ function createWindow() {
   // 立即创建启动画面（不等待任何资源）
   const splashWindow = createSplashWindow();
 
+  // 清除本地缓存，确保加载最新版本
+  const { session } = require('electron');
+  session.defaultSession.clearCache().then(() => {
+    log('浏览器缓存已清除');
+  }).catch(err => {
+    log('清除缓存失败: ' + err.message);
+  });
+  
+  // 清除 localStorage 中的旧设备 ID（强制重新生成 v2 设备码）
+  session.defaultSession.clearStorageData({ storages: ['localstorage'] }).catch(() => {});
+
   // 立即创建主窗口（隐藏状态）
   mainWindow = new BrowserWindow({
     ...CONFIG,
     show: false
   });
 
-  // 异步加载登录页面
+  // 异步加载登录页面，带时间戳防缓存
   var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
   mainWindow.loadURL(BASE_URL + '/login.html?v=' + new Date().getTime());
 

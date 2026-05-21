@@ -5,7 +5,8 @@
   Access-Control-Allow-Headers: Content-Type, Authorization
 
 # HTML 页面禁止缓存（确保用户立即获得最新版本）
-/*.html
+# /*.html 不匹配带 ?v= 参数的 URL，需要用 * 通配
+/*.html*
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache
   Expires: 0
