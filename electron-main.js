@@ -53,20 +53,22 @@ function createSplashWindow() {
   return splashWindow;
 }
 
-// 创建主窗口
-function createWindow() {
+// 创建主窗口（async：先清缓存再加载）
+async function createWindow() {
   // 立即创建启动画面（不等待任何资源）
   const splashWindow = createSplashWindow();
 
-  // 清除 HTTP 缓存（页面内容，不含 localStorage）
+  // 清除 HTTP 缓存和 cookies（保留 localStorage 中的设备码）
   var { session } = require('electron');
-  session.defaultSession.clearCache().then(function() {
-    log('浏览器缓存已清除（不含 localStorage）');
-  }).catch(function(err) {
+  try {
+    await session.defaultSession.clearCache();
+    await session.defaultSession.clearStorageData({ storages: ['cookies', 'cachestorage'] });
+    log('缓存和cookies已清除（localStorage已保留）');
+  } catch(err) {
     log('清除缓存失败: ' + err.message);
-  });
+  }
 
-  // 立即创建主窗口（隐藏状态）
+  // 创建主窗口（隐藏状态）
   mainWindow = new BrowserWindow({
     ...CONFIG,
     show: false
@@ -89,7 +91,7 @@ function createWindow() {
       if (splashWindow && !splashWindow.isDestroyed()) {
         splashWindow.close();
       }
-    }, 800);  // 从200ms延长到800ms，给动画充足时间
+    }, 800);
   });
 
   // 窗口关闭时退出应用
