@@ -314,6 +314,13 @@
                     populateAccountList(this.value);
                 });
                 
+                // 兜底：如果页面加载完成时门店已选中但账号未填充，强制执行
+                setTimeout(function() {
+                    if (storeSelect.value && accountSelect.options.length <= 1) {
+                        populateAccountList(storeSelect.value);
+                    }
+                }, 500);
+
                 // 账号选择变化时清空密码
                 accountSelect.addEventListener('change', function() {
                     passwordEl.value = ''; // 清空密码
