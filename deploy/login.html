@@ -253,17 +253,17 @@
                                 if (!isCurrentBound) shouldChange = true;
                             }
                             
-                            if (shouldChange) {
-                                // 默认选中匹配的门店或第一个绑定的门店
-                                var defaultStore = matchedStore || boundStores[0].username;
-                                if (storeSelect.value !== defaultStore) {
-                                    storeSelect.value = defaultStore;
-                                    storeSelect.dispatchEvent(new Event('change'));
-                                } else {
-                                    // 值相同也要触发change确保账号列表刷新
-                                    storeSelect.dispatchEvent(new Event('change'));
-                                }
+                        if (shouldChange) {
+                            // 默认选中匹配的门店或第一个绑定的门店
+                            var defaultStore = matchedStore || boundStores[0].username;
+                            storeSelect.value = defaultStore;
+                            populateAccountList(defaultStore);
+                        } else {
+                            // 值未变但也要确保账号列表被填充
+                            if (currentStore) {
+                                populateAccountList(currentStore);
                             }
+                        }
                             
                             // 添加锁标志 + 提示
                             var storeLabel = storeSelect.parentElement.querySelector('label');
@@ -285,31 +285,33 @@
                 // 启动设备检测（后台静默运行，不阻塞页面）
                 checkDeviceStores();
 
-                // 门店选择变化时更新账号列表并清空密码
-                storeSelect.addEventListener('change', function() {
-                    var storeValue = this.value;
-                    accountSelect.innerHTML = '<option value="">-- 请选择账号 --</option>';
-                    accountSelect.value = ''; // 重置账号选择
-                    passwordEl.value = ''; // 清空密码
-                    document.getElementById('rememberPassword').checked = false;
-                    
-                    if (storeValue && STORE_ACCOUNTS[storeValue]) {
-                        accountSelect.disabled = false;
-                        STORE_ACCOUNTS[storeValue].forEach(function(acc) {
-                            var option = document.createElement('option');
-                            option.value = acc.value;
-                            option.textContent = acc.label;
-                            accountSelect.appendChild(option);
-                        });
-                        // 如果只有一个账号，自动选中并聚焦密码框
-                        if (STORE_ACCOUNTS[storeValue].length === 1) {
-                            accountSelect.value = STORE_ACCOUNTS[storeValue][0].value;
-                            accountSelect.dispatchEvent(new Event('change'));
-                        }
-                    } else {
+                // 填充账号下拉列表（独立函数，支持直接调用+事件触发双保险）
+                function populateAccountList(storeValue) {
+                    if (!storeValue || !STORE_ACCOUNTS[storeValue]) {
                         accountSelect.disabled = true;
                         accountSelect.innerHTML = '<option value="">-- 请先选择门店 --</option>';
+                        return;
                     }
+                    accountSelect.disabled = false;
+                    accountSelect.innerHTML = '<option value="">-- 请选择账号 --</option>';
+                    STORE_ACCOUNTS[storeValue].forEach(function(acc) {
+                        var option = document.createElement('option');
+                        option.value = acc.value;
+                        option.textContent = acc.label;
+                        accountSelect.appendChild(option);
+                    });
+                    // 如果只有一个账号，自动选中
+                    if (STORE_ACCOUNTS[storeValue].length === 1) {
+                        accountSelect.value = STORE_ACCOUNTS[storeValue][0].value;
+                    }
+                }
+                
+                // 门店选择变化时更新账号列表
+                storeSelect.addEventListener('change', function() {
+                    accountSelect.value = ''; // 重置账号选择
+                    passwordEl.value = '';
+                    document.getElementById('rememberPassword').checked = false;
+                    populateAccountList(this.value);
                 });
                 
                 // 账号选择变化时清空密码
@@ -379,39 +381,36 @@
                     }
                     
                     if (lastStore && STORE_ACCOUNTS[lastStore]) {
-                        var needChange = (storeSelect.value !== lastStore);
-                        if (needChange) {
-                            storeSelect.value = lastStore;
-                            storeSelect.dispatchEvent(new Event('change'));
-                        }
+                        // 确保门店选中并填充账号
+                        storeSelect.value = lastStore;
+                        populateAccountList(lastStore);
                         
-                        // 延时设置账号（等待账号列表加载）
-                        setTimeout(function() {
-                            if (lastAccount) {
-                                // 检查账号是否存在
-                                var accOpt = accountSelect.querySelector('option[value="' + lastAccount + '"]');
-                                if (accOpt) {
-                                    accountSelect.value = lastAccount;
-                                    
-                                    // 如果记住密码，自动填充密码
-                                    var savedPassword = localStorage.getItem('savedPassword_' + lastStore + '_' + lastAccount);
-                                    var rememberPassword = localStorage.getItem('rememberPassword_' + lastStore + '_' + lastAccount) === 'true';
-                                    
-                                    if (rememberPassword && savedPassword) {
-                                        document.getElementById('passwordInput').value = savedPassword;
-                                        document.getElementById('rememberPassword').checked = true;
-                                        // 密码自动填充后聚焦登录按钮
-                                        setTimeout(function() {
-                                            document.getElementById('loginBtn').focus();
-                                        }, 50);
-                                    } else {
-                                        focusPasswordInput();
-                                    }
+                        if (lastAccount) {
+                            // 检查账号是否存在（populateAccountList已同步填充列表）
+                            var accOpt = accountSelect.querySelector('option[value="' + lastAccount + '"]');
+                            if (accOpt) {
+                                accountSelect.value = lastAccount;
+                                
+                                // 如果记住密码，自动填充密码
+                                var savedPassword = localStorage.getItem('savedPassword_' + lastStore + '_' + lastAccount);
+                                var rememberPassword = localStorage.getItem('rememberPassword_' + lastStore + '_' + lastAccount) === 'true';
+                                
+                                if (rememberPassword && savedPassword) {
+                                    document.getElementById('passwordInput').value = savedPassword;
+                                    document.getElementById('rememberPassword').checked = true;
+                                    // 密码自动填充后聚焦登录按钮
+                                    setTimeout(function() {
+                                        document.getElementById('loginBtn').focus();
+                                    }, 50);
+                                } else {
+                                    focusPasswordInput();
                                 }
                             } else {
                                 focusPasswordInput();
                             }
-                        }, 60);
+                        } else {
+                            focusPasswordInput();
+                        }
                     }
                 }, 200);
 
