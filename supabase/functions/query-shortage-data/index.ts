@@ -338,6 +338,14 @@ function validateInput(input: any, fieldName: string, maxLength: number = 100): 
   return str.replace(/[<>'"]/g, '');
 }
 
+// 格式化日期（用于提示文案）
+function formatDate(dateStr: string): string {
+  try {
+    const d = new Date(dateStr);
+    return d.getFullYear() + '/' + (d.getMonth()+1) + '/' + d.getDate();
+  } catch { return dateStr; }
+}
+
 serve(async (req) => {
   // 连接池预热（首次请求时自动触发）
   warmupPools();
@@ -2687,9 +2695,38 @@ serve(async (req) => {
       }
 
       case "insert_report": {
-        // 门店上报缺货/新品（绕过浏览器 Permissions Policy 限制）
         const reportData = params as Record<string, unknown>;
-        delete (reportData as Record<string, unknown>).action; // 清理多余字段
+        delete (reportData as Record<string, unknown>).action;
+        
+        const storeId = reportData.store_id as string;
+        const productCode = reportData.product_code as string;
+        
+        // 重复上报检测（同门店+同商品，7天内）
+        if (storeId && productCode && reportData.order_type === '缺货订购') {
+          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+          const { data: existing } = await supabase
+            .from("reports")
+            .select("id, replenish_status, created_at")
+            .eq("store_id", storeId)
+            .eq("product_code", productCode)
+            .eq("order_type", "缺货订购")
+            .gte("created_at", sevenDaysAgo)
+            .order("created_at", { ascending: false })
+            .limit(1);
+          
+          if (existing && existing.length > 0) {
+            const prev = existing[0];
+            return new Response(JSON.stringify({
+              success: false, 
+              error: "该商品已于 " + formatDate(prev.created_at) + " 上报过，状态为「" + (prev.replenish_status || '待处理') + "」，7天内请勿重复上报"
+            }), { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
+        }
+        
+        // 自动判断状态：在途>0 → 配货中，否则 → 待处理
+        const inTransit = Number(reportData.in_transit) || 0;
+        const autoStatus = inTransit > 0 ? "配货中" : "待处理";
+        (reportData as any).replenish_status = autoStatus;
         
         const { data: inserted, error } = await supabase
           .from("reports")
@@ -2697,7 +2734,7 @@ serve(async (req) => {
           .select();
         
         if (error) throw error;
-        result = { inserted: true, data: inserted?.[0] };
+        result = { inserted: true, data: inserted?.[0], auto_status: autoStatus };
         break;
       }
 
