@@ -514,24 +514,21 @@ serve(async (req) => {
         const force_refresh = params?.force_refresh === true;
         const sync_first = params?.sync_first === true;  // 是否先同步SPFXB_Result再查询
         
-        // 强制刷新+先同步：先刷新 SQL Server 的 SPFXB_Result 表（确保数据最新）
+        // 强制刷新+先同步：执行 SPFXB 增量刷新（从 ZHYYLS 实时取库存/销售/在途，5-15s）
         if (force_refresh && sync_first) {
-          console.log(`[get_store_inventory] 门店「${store_name}」触发先同步SPFXB_Result再查询...`);
+          console.log(`[get_store_inventory] 门店「${store_name}」触发SPFXB增量刷新...`);
           try {
             const syncPool = await getPool();
             try {
-              const syncResult = await syncPool.request().execute("usp_Sync_AllShortageCache");
-              // 记录存储过程返回的同步结果（如果有返回值则记录行数）
-              if (syncResult.recordsets && syncResult.recordsets[0]) {
-                console.log(`[get_store_inventory] SPFXB_Result同步完成，返回 ${syncResult.recordsets[0].length} 行`);
-              } else {
-                console.log(`[get_store_inventory] SPFXB_Result同步完成（无返回数据）`);
-              }
+              const syncReq = syncPool.request();
+              syncReq.input("RefreshRanking", sql.Int, 0);
+              await syncReq.execute("SPFXB");
+              console.log(`[get_store_inventory] SPFXB增量刷新完成`);
             } finally {
               releasePool(syncPool);
             }
           } catch (syncErr) {
-            console.error(`[get_store_inventory] 同步SPFXB_Result失败:`, syncErr);
+            console.error(`[get_store_inventory] SPFXB增量刷新失败:`, syncErr);
             // 同步失败不影响后续查询，继续从SQL Server获取现有数据
           }
         }
