@@ -315,7 +315,11 @@ const STORE_NAME_MAP: Record<string, string> = {
 
 function getCorsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("Origin") || "";
-  const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  // 允许 *.wszhyy.pages.dev 所有部署子域名 + localhost
+  const isAllowed = ALLOWED_ORIGINS.includes(origin) ||
+                    /^https:\/\/[\w-]+\.wszhyy\.pages\.dev$/.test(origin) ||
+                    origin.startsWith("http://localhost");
+  const allowedOrigin = isAllowed ? origin : ALLOWED_ORIGINS[0];
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
