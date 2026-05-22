@@ -358,6 +358,7 @@ serve(async (req) => {
     const { action, params } = reqBody;
 
     let result;
+    let lastRefreshTime: string | null = null;
     switch (action) {
       case "search_product": {
         // 搜索商品 - 查 Supabase 缓存（支持商品编码、名称、规格、厂家模糊匹配）
@@ -515,6 +516,7 @@ serve(async (req) => {
         const sync_first = params?.sync_first === true;  // 是否先同步SPFXB_Result再查询
         
         // 强制刷新+先同步：执行 SPFXB 增量刷新（从 ZHYYLS 实时取库存/销售/在途，5-15s）
+        let spfxbTime: string | null = null;
         if (force_refresh && sync_first) {
           console.log(`[get_store_inventory] 门店「${store_name}」触发SPFXB增量刷新...`);
           try {
@@ -523,15 +525,31 @@ serve(async (req) => {
               const syncReq = syncPool.request();
               syncReq.input("RefreshRanking", sql.Int, 0);
               await syncReq.execute("SPFXB");
+              spfxbTime = new Date().toISOString();
               console.log(`[get_store_inventory] SPFXB增量刷新完成`);
+              // 记录刷新时间到 Supabase（供所有门店读取）
+              await supabase.from("sync_metadata").upsert([{
+                sync_type: 'spfxb_refresh',
+                last_sync: spfxbTime,
+                status: 'success'
+              }], { onConflict: 'sync_type' });
             } finally {
               releasePool(syncPool);
             }
           } catch (syncErr) {
             console.error(`[get_store_inventory] SPFXB增量刷新失败:`, syncErr);
-            // 同步失败不影响后续查询，继续从SQL Server获取现有数据
           }
         }
+        // 如果没有刷新，从数据库读上次刷新时间
+        if (!spfxbTime) {
+          const { data: metaRow } = await supabase
+            .from("sync_metadata")
+            .select("last_sync")
+            .eq("sync_type", "spfxb_refresh")
+            .single();
+          spfxbTime = metaRow?.last_sync || null;
+        }
+        lastRefreshTime = spfxbTime;
         
         // 尝试从 Supabase 缓存查询（强制刷新时跳过缓存，直接查 SQL Server 最新数据）
         if (!force_refresh) {
@@ -2955,6 +2973,9 @@ serve(async (req) => {
     if (result && result.debug) {
       responseBody.debug = result.debug;
       delete result.debug;
+    }
+    if (lastRefreshTime) {
+      responseBody.last_refresh = lastRefreshTime;
     }
     return new Response(JSON.stringify(responseBody), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

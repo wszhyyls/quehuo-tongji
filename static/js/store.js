@@ -56,6 +56,13 @@ async function preloadStoreInventory(forceRefresh, syncFirst) {
             storeInventoryLoaded = true;
             logInfo('[预加载] 本店库存加载完成，共 ' + result.data.length + ' 条', null);
             
+            // 显示上次数据刷新时间
+            var timeEl = document.getElementById('lastRefreshTime');
+            if (timeEl && result.last_refresh) {
+                var d = new Date(result.last_refresh);
+                timeEl.textContent = '🕐 ' + d.toLocaleString('zh-CN');
+            }
+            
             // 保存到 localStorage（按门店名称存储，避免混淆）
             try {
                 var storeKey = 'storeInventoryCache_' + (user?.store_name || 'default');
