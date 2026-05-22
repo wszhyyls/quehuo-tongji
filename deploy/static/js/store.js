@@ -60,7 +60,11 @@ async function preloadStoreInventory(forceRefresh, syncFirst) {
             var timeEl = document.getElementById('lastRefreshTime');
             if (timeEl && result.last_refresh) {
                 var d = new Date(result.last_refresh);
-                timeEl.textContent = '🕐 ' + d.toLocaleString('zh-CN');
+                var t = d.getFullYear() + '/' + (d.getMonth()+1) + '/' + d.getDate() + ' ' +
+                        String(d.getHours()).padStart(2,'0') + ':' +
+                        String(d.getMinutes()).padStart(2,'0') + ':' +
+                        String(d.getSeconds()).padStart(2,'0');
+                timeEl.textContent = '库存更新时间：🕐 ' + t;
             }
             
             // 保存到 localStorage（按门店名称存储，避免混淆）

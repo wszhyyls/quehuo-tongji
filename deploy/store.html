@@ -39,8 +39,6 @@
             <span class="company-name">微山县众和医药连锁有限公司</span>
         </div>
         <div class="header-right">
-            <span id="lastRefreshTime" style="font-size:11px;color:#888;margin-right:8px;"></span>
-            <button id="refreshCacheBtn" class="btn-refresh" title="刷新库存数据">刷新库存</button>
             <button id="themeBtn" class="btn-theme" title="切换主题">切换主题</button>
             <button id="logoutBtn" class="btn-logout">退出登录</button>
         </div>
@@ -55,9 +53,15 @@
             <h1 id="storeName" class="store-title">门店</h1>
         </div>
 
-        <div class="order-tabs">
-            <button class="tab-btn active" data-tab="shortage">缺货订购</button>
-            <button class="tab-btn" data-tab="new">新品订购</button>
+        <div class="order-tabs" style="display:flex;align-items:center;justify-content:space-between;">
+            <div>
+                <button class="tab-btn active" data-tab="shortage">缺货订购</button>
+                <button class="tab-btn" data-tab="new">新品订购</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <button id="refreshCacheBtn" class="btn-refresh" title="刷新库存数据">刷新库存</button>
+                <span id="lastRefreshTime" style="font-size:11px;color:#888;white-space:nowrap;"></span>
+            </div>
         </div>
 
         <div id="shortageContent" class="tab-content active">
