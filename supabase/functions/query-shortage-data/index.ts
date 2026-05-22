@@ -1095,7 +1095,7 @@ serve(async (req) => {
           
           // 修复：获取 USERCODE（商品条码，原业务系统使用的编码，如 0002100277）
           // product_cache 表只有 product_code 列，所以将 USERCODE 存入 product_code
-          // 优化：只同步"近2年有销售"或"有库存"的商品，大幅减少商品数量
+          // 优化：只同步"近1年有销售"或"有库存"的商品，大幅减少商品数量
           const productsResult = await poolZHYYLS.request()
             .query(`SELECT
                     LTRIM(RTRIM(ISNULL(a.USERCODE, ''))) as USERCODE,
@@ -1108,13 +1108,12 @@ serve(async (req) => {
                     LEFT JOIN ZHYYLS.dbo.cstype b WITH (NOLOCK) ON a.area = b.rec
                     WHERE a.leveal = '3'
                       AND (
-                        -- 近2年有销售记录的商品
+                        -- 近1年有销售记录的商品（放宽BillType限制）
                         EXISTS (
                           SELECT 1 FROM ZHYYLS.dbo.Vsalebill s WITH (NOLOCK)
                           JOIN ZHYYLS.dbo.Vbillindex i WITH (NOLOCK) ON s.billid = i.billid
                           WHERE s.prec = a.rec
-                            AND i.billdate >= DATEADD(year, -2, GETDATE())
-                            AND i.BillType IN ('101', '102', '103', '104', '105')
+                            AND i.billdate >= DATEADD(year, -1, GETDATE())
                         )
                         -- 或有库存的商品（任意门店）
                         OR EXISTS (
