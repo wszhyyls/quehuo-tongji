@@ -65,6 +65,14 @@
             <div class="list-card">
                 <div class="list-header">
                     <h2>缺货订购汇总</h2>
+                    <select id="statusFilter" class="filter-select-sm" style="margin-right:6px;" onchange="applyStatusFilter()">
+                        <option value="">全部状态</option>
+                        <option value="待处理">待处理</option>
+                        <option value="配货中">配货中</option>
+                        <option value="已订购">已订购</option>
+                        <option value="已到货">已到货</option>
+                        <option value="已完成">已完成</option>
+                    </select>
                     <button id="syncPlanBtn" class="btn-search" style="margin-right:6px;background:var(--accent);">同步采购计划</button>
                     <button id="refreshBtn" class="btn-search">刷新</button>
                 </div>

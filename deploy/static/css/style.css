@@ -1003,6 +1003,12 @@ body.login-page {
     color: #2e7d32;
 }
 
+.replenish-badge.replenish-completed {
+    background: #c8e6c9;
+    color: #1b5e20;
+    font-weight: 700;
+}
+
 .replenish-badge.replenish-text {
     background: #fce4ec;
     color: #c62828;
@@ -1030,6 +1036,12 @@ body.login-page {
 [data-theme="dark"] .replenish-badge.replenish-arrived {
     background: #1a3a1a;
     color: #81c784;
+}
+
+[data-theme="dark"] .replenish-badge.replenish-completed {
+    background: #0d280d;
+    color: #4caf50;
+    font-weight: 700;
 }
 
 [data-theme="dark"] .replenish-badge.replenish-text {

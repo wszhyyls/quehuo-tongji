@@ -430,8 +430,9 @@ function getUrgencyBadge(level) {
 function getReplenishBadge(status) {
     var cls = 'replenish-badge ';
     var label = status || '待处理';
-    if (label === '已订购' || label === '已下单') cls += 'replenish-ordered';
-    else if (label === '在途') cls += 'replenish-intransit';
+    if (label === '已完成') cls += 'replenish-completed';
+    else if (label === '已订购' || label === '已下单') cls += 'replenish-ordered';
+    else if (label === '配货中' || label === '在途') cls += 'replenish-intransit';
     else if (label === '已到货' || label === '到货') cls += 'replenish-arrived';
     else if (label === '待处理') cls += 'replenish-pending';
     else cls += 'replenish-text';
@@ -593,7 +594,7 @@ async function loadSummary() {
             var statusDisplay;
             if (canEdit) {
                 var statusOptions = '';
-                var statuses = ['待处理', '已订购', '已到货'];
+                var statuses = ['待处理', '配货中', '已订购', '已到货', '已完成'];
                 statuses.forEach(function(s) {
                     statusOptions += '<option value="' + s + '"' + (p.replenish_status === s ? ' selected' : '') + '>' + s + '</option>';
                 });
@@ -647,6 +648,20 @@ async function loadSummary() {
         }
     } catch(err) { logError('加载汇总数据失败', err); showAlert('加载失败：' + err.message); }
 }
+
+// ========== 状态筛选 ==========
+window.applyStatusFilter = function() {
+    var filterVal = document.getElementById('statusFilter').value;
+    var rows = document.querySelectorAll('#summaryTbody tr');
+    rows.forEach(function(tr) {
+        var statusEl = tr.querySelector('.replenish-badge, select.status-select');
+        var status = '';
+        if (statusEl) {
+            status = statusEl.tagName === 'SELECT' ? statusEl.value : statusEl.textContent;
+        }
+        tr.style.display = (!filterVal || status === filterVal) ? '' : 'none';
+    });
+};
 
 // ========== 更新补货状态 ==========
 window.updateReplenishStatus = async function(selectEl) {
