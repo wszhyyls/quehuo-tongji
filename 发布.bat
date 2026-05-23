@@ -107,15 +107,15 @@ if "%choice%"=="2" goto end
 if "%choice%"=="5" goto end
 echo.
 echo ═══ 步骤 E: 推送到 GitHub ═══
-echo 请输入提交说明:
-set /p MSG="> "
+set MSG=
+set /p MSG="提交说明(回车跳过): "
 if "%MSG%"=="" set MSG=Update v%V%
-git tag -f v%V% >nul 2>&1
-git add -A
-git commit -m "%MSG%"
-if errorlevel 1 (echo [提示] 无变更或提交失败)
-git push origin main
-if errorlevel 1 (echo [警告] 推送失败，请检查网络后重试) else (echo [OK] 推送成功)
+echo 提交: %MSG%
+git tag -f v%V% 2>nul
+git add -A 2>nul
+git commit -m "%MSG%" 2>nul
+git push origin main 2>&1
+if errorlevel 1 (echo [提示] 网络不通，请稍后手动推送) else (echo [OK] 推送成功)
 git push origin v%V% --force 2>nul
 
 :end

@@ -736,11 +736,20 @@ async function loadSummary() {
             }
         });
 
+        // 填充供货商筛选下拉
+        var supplierFilter = document.getElementById('supplierFilter');
+        var suppliers = {};
+        allItems.forEach(function(p) { if (p.supplier) suppliers[p.supplier] = true; });
+        var supplierList = Object.keys(suppliers).sort();
+        supplierFilter.innerHTML = '<option value="">全部供货商</option>';
+        supplierList.forEach(function(s) { supplierFilter.innerHTML += '<option>' + s + '</option>'; });
+        
         // ===== 渲染主表格（翻页支持）=====
         filteredData = activeData;
         currentPage = 1;
         currentFilterStatus = '';
         document.getElementById('statusFilter').value = '';
+        document.getElementById('supplierFilter').value = '';
         renderSummaryPage();
 
         // ===== 渲染已完成区域 =====
@@ -928,23 +937,28 @@ window.toggleCompletedSection = function() {
 
 // ========== 状态筛选 ==========
 window.applyStatusFilter = function() {
-    var filterVal = document.getElementById('statusFilter').value;
-    currentFilterStatus = filterVal;
+    var statusVal = document.getElementById('statusFilter').value;
+    var supplierVal = document.getElementById('supplierFilter').value;
+    currentFilterStatus = statusVal;
     
-    // 从完整数据中筛选（排除已完成+厂家断货，除非主动选）
+    // 从完整数据中筛选
     var allItems = summaryData.shortage_by_product || [];
-    if (filterVal === '已完成') {
-        // 选择"已完成"时：上方表格清空，已完成区域显示（含厂家断货）
+    
+    // 先按供货商筛选
+    var supplierFiltered = allItems;
+    if (supplierVal) {
+        supplierFiltered = allItems.filter(function(p) { return (p.supplier||'') === supplierVal; });
+    }
+    
+    if (statusVal === '已完成') {
         filteredData = [];
-        completedData = allItems.filter(function(p) { return isCompletedStatus(p.replenish_status); });
-    } else if (!filterVal) {
-        // 全部：排除已完成+厂家断货
-        filteredData = allItems.filter(function(p) { return !isCompletedStatus(p.replenish_status); });
-        completedData = allItems.filter(function(p) { return isCompletedStatus(p.replenish_status); });
+        completedData = supplierFiltered.filter(function(p) { return isCompletedStatus(p.replenish_status); });
+    } else if (!statusVal) {
+        filteredData = supplierFiltered.filter(function(p) { return !isCompletedStatus(p.replenish_status); });
+        completedData = supplierFiltered.filter(function(p) { return isCompletedStatus(p.replenish_status); });
     } else {
-        // 选择特定状态
-        filteredData = allItems.filter(function(p) { return p.replenish_status === filterVal && !isCompletedStatus(p.replenish_status); });
-        completedData = allItems.filter(function(p) { return isCompletedStatus(p.replenish_status); });
+        filteredData = supplierFiltered.filter(function(p) { return p.replenish_status === statusVal && !isCompletedStatus(p.replenish_status); });
+        completedData = supplierFiltered.filter(function(p) { return isCompletedStatus(p.replenish_status); });
     }
     
     currentPage = 1;

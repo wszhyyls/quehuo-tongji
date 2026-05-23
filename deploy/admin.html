@@ -66,6 +66,9 @@
                 <div class="list-header">
                     <h2>缺货订购汇总</h2>
                     <button id="syncPlanBtn" class="btn-search" style="margin-right:6px;background:var(--accent);">同步采购计划</button>
+                    <select id="supplierFilter" class="filter-select-sm" style="margin-right:6px;" onchange="applyStatusFilter()">
+                        <option value="">全部供货商</option>
+                    </select>
                     <select id="statusFilter" class="filter-select-sm" style="margin-right:6px;" onchange="applyStatusFilter()">
                         <option value="">全部状态</option>
                         <option value="待处理">待处理</option>
