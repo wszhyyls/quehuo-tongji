@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN" data-theme="purple">
 <head>
     <meta charset="UTF-8">
@@ -10,9 +10,9 @@
     <meta name="theme-color" content="#667eea">
 
     <title>微山县众和医药连锁有限公司 药品订购系统 - 管理后台</title>
-    <link rel="stylesheet" href="./static/css/style.css?v=21">
+    <link rel="stylesheet" href="./static/css/style.css?v=26">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="./static/js/utils.js?v=21"></script>
+    <script src="./static/js/utils.js?v=24"></script>
 </head>
 <body>
     <div class="app-header">
@@ -65,6 +65,10 @@
             <div class="list-card">
                 <div class="list-header">
                     <h2>缺货订购汇总</h2>
+                    <button id="syncPlanBtn" class="btn-search" style="margin-right:6px;background:var(--accent);">同步采购计划</button>
+                    <select id="supplierFilter" class="filter-select-sm" style="margin-right:6px;" onchange="applyStatusFilter()">
+                        <option value="">全部供货商</option>
+                    </select>
                     <select id="statusFilter" class="filter-select-sm" style="margin-right:6px;" onchange="applyStatusFilter()">
                         <option value="">全部状态</option>
                         <option value="待处理">待处理</option>
@@ -72,8 +76,9 @@
                         <option value="已订购">已订购</option>
                         <option value="已到货">已到货</option>
                         <option value="已完成">已完成</option>
+                        <option value="待付款">待付款</option>
+                        <option value="厂家断货">厂家断货</option>
                     </select>
-                    <button id="syncPlanBtn" class="btn-search" style="margin-right:6px;background:var(--accent);">同步采购计划</button>
                     <button id="refreshBtn" class="btn-search">刷新</button>
                 </div>
                 
@@ -86,9 +91,34 @@
                 
                 <div class="table-wrapper">
                     <table class="data-table" id="summaryTable">
-                        <thead><tr><th style="width:32px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"></th><th style="width:80px;">编码</th><th>商品名称</th><th style="width:60px;">规格</th><th style="width:120px;">厂家</th><th style="width:70px;">紧急</th><th style="width:60px;">需求</th><th style="width:70px;">订货</th><th style="width:100px;">状态</th><th style="width:60px;">操作</th></tr></thead>
+                        <thead><tr><th style="width:32px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"></th><th style="width:75px;">供货商</th><th style="width:80px;">编码</th><th style="width:170px;">商品名称</th><th style="width:60px;">规格</th><th style="width:55px;">紧急</th><th style="width:50px;">需求</th><th style="width:55px;">订货</th><th style="width:75px;">状态</th><th style="width:50px;">操作</th></tr></thead>
                         <tbody id="summaryTbody"></tbody>
                     </table>
+                </div>
+                
+                <!-- 翻页控制 -->
+                <div id="paginationBar" class="pagination-bar" style="display:none;">
+                    <span id="pageInfo" style="font-size:14px;color:var(--text-secondary);"></span>
+                    <div class="pagination-btns">
+                        <button id="prevPageBtn" class="btn-page" onclick="changePage(-1)">上一页</button>
+                        <button id="nextPageBtn" class="btn-page" onclick="changePage(1)">下一页</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 已完成订单折叠区 -->
+            <div class="list-card" id="completedCard" style="display:none;">
+                <div class="list-header" style="cursor:pointer;" onclick="toggleCompletedSection()">
+                    <h2>✅ 已完成订单 <span id="completedCount" style="font-size:14px;color:var(--text-muted);"></span></h2>
+                    <span id="completedToggle" style="font-size:18px;">▼ 展开</span>
+                </div>
+                <div id="completedBody" style="display:none;">
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th style="width:75px;">供货商</th><th style="width:80px;">编码</th><th>商品名称</th><th style="width:60px;">规格</th><th style="width:55px;">订货</th><th style="width:75px;">状态</th><th style="width:50px;">操作</th></tr></thead>
+                            <tbody id="completedTbody"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -209,6 +239,32 @@
                     </table>
                 </div>
             </div>
+            
+            <!-- 状态变更日志 -->
+            <div class="list-card" style="margin-top:16px;">
+                <div class="list-header">
+                    <h2>📋 状态变更日志</h2>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="text" id="statusLogProductCode" placeholder="商品编码筛选" style="width:130px;padding:6px 10px;border-radius:8px;border:1px solid var(--input-border);font-size:13px;">
+                        <button id="statusLogQueryBtn" class="btn-search" style="padding:8px 14px;font-size:13px;">查询</button>
+                    </div>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table" style="table-layout:fixed;">
+                        <thead><tr>
+                            <th style="width:95px;">变更时间</th>
+                            <th style="width:80px;">商品编码</th>
+                            <th style="width:65px;">原状态</th>
+                            <th style="width:65px;">新状态</th>
+                            <th style="width:70px;">操作人</th>
+                            <th>备注</th>
+                        </tr></thead>
+                        <tbody id="statusLogTbody">
+                            <tr><td colspan="6" style="text-align:center;color:var(--text-muted);">点击「查询」加载状态变更记录</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- 子账号管理（仅超级管理员可见）-->
@@ -233,16 +289,17 @@
         </div>
     </div>
 
-    <!-- 明细弹窗（增加上报人列）-->
+    <!-- 明细弹窗 -->
     <div id="detailModal" class="modal">
-        <div class="modal-content detail-modal-content">
+        <div class="modal-content detail-modal-content" style="max-width:600px;">
             <div class="stock-modal-header">
                 <h3 id="detailTitle">需求明细</h3>
                 <button id="detailModalClose" class="btn-modal-close">×</button>
             </div>
-            <div class="stock-modal-body">
-                <table class="stock-table stock-compact-table">
-                    <thead><tr><th>门店</th><th>库存</th><th>在途</th><th>紧急</th><th>需求</th><th>补货</th><th>上报人</th></tr></thead>
+            <div id="detailProductInfo" style="padding:10px 16px;font-size:14px;color:var(--text-secondary);border-bottom:1px solid var(--input-border);background:linear-gradient(135deg,#667eea18,#764ba218);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div class="stock-modal-body" style="padding:0;">
+                <table class="stock-table stock-compact-table" id="detailTable" style="font-size:13px;table-layout:fixed;width:100%;">
+                    <thead><tr><th style="width:85px;">日期</th><th style="width:105px;">门店</th><th style="width:50px;">库存</th><th style="width:50px;">在途</th><th style="width:50px;">需求</th><th style="width:70px;">上报人</th></tr></thead>
                     <tbody id="detailTbody"></tbody>
                 </table>
             </div>
@@ -283,6 +340,8 @@
             </div>
         </div>
     </div>
+
+
 
     <!-- 修改密码弹窗 -->
     <div id="passwordModal" class="modal">
@@ -339,8 +398,12 @@
                     <select id="omTargetStatus" style="width:100%;padding:9px;border-radius:6px;border:1px solid #ddd;font-size:14px;">
                         <option value="">不修改</option>
                         <option value="待处理">待处理</option>
+                        <option value="配货中">配货中</option>
                         <option value="已订购">已订购</option>
                         <option value="已到货">已到货</option>
+                        <option value="已完成">已完成</option>
+                        <option value="待付款">待付款</option>
+                        <option value="厂家断货">厂家断货</option>
                     </select>
                 </div>
 
@@ -404,7 +467,7 @@
         </div>
     </div>
 
-    <script src="./static/js/admin.js?v=21"></script>
+    <script src="./static/js/admin.js?v=25"></script>
 
     <!-- ========== PWA Service Worker ========== -->
     <script>

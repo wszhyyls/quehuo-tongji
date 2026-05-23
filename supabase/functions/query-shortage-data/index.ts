@@ -861,7 +861,7 @@ serve(async (req) => {
               .input("关键字", sql.NVarChar, validateInput(keyword || "", "关键词", 50) || null)
               .input("状态筛选", sql.NVarChar, validateInput(status_filter || "", "状态筛选", 20) || null)
               .input("仅缺货", sql.Bit, 1)
-              .input("Top", sql.Int, 500)
+              .input("Top", sql.Int, 5000)
               .execute("usp_GetPurchasePlanWithFeedback");
             planResult = planList.recordsets;
           }
@@ -888,7 +888,50 @@ serve(async (req) => {
             }
           }
 
-          result = planResult;
+          // 补充供货商信息（Vptype.comment）
+          var globalSupplierMap: Record<string, string> = {};
+          if (planResult && planResult[0] && Array.isArray(planResult[0]) && planResult[0].length > 0) {
+            const codes2 = planResult[0].map((r: any) => r.商品编码).filter(Boolean);
+            if (codes2.length > 0) {
+              try {
+                function normalizeCode(code: string) {
+                  return (code || '').trim().toUpperCase().replace(/^0+/, '');
+                }
+                // 一次性拉取全部有备注的Vptype数据
+                const supplierResult = await pool.request()
+                  .query(`SELECT LTRIM(RTRIM(ISNULL(usercode, ''))) as 商品编码, LTRIM(RTRIM(ISNULL(comment, ''))) as 供货商 FROM ZHYYLS.dbo.Vptype WHERE comment IS NOT NULL AND comment != ''`);
+                if (supplierResult.recordset) {
+                  supplierResult.recordset.forEach((row: any) => { 
+                    var rawCode = (row.商品编码 || '').trim().toUpperCase();
+                    var norm = normalizeCode(rawCode);
+                    if (norm && !globalSupplierMap[norm]) {
+                      globalSupplierMap[norm] = row.供货商 || '';
+                    }
+                    if (rawCode && !globalSupplierMap[rawCode]) {
+                      globalSupplierMap[rawCode] = row.供货商 || '';
+                    }
+                  });
+                }
+                var matchedCount = 0;
+                planResult[0] = planResult[0].map((r: any) => {
+                  var rawKey = (r.商品编码 || '').trim().toUpperCase();
+                  var normKey = normalizeCode(rawKey);
+                  var sup = globalSupplierMap[normKey] || globalSupplierMap[rawKey] || '';
+                  if (sup) matchedCount++;
+                  return { ...r, 供货商: sup };
+                });
+                console.log(`[供货商] Vptype共 ${Object.keys(globalSupplierMap).length} 家有备注，成功匹配 ${matchedCount}/${planResult[0].length} 条`);
+              } catch (e) {
+                console.error('获取供货商信息失败:', e);
+              }
+            }
+          }
+
+          // 将供应商映射作为附加数据返回
+          result = { 
+            plan: planResult,
+            supplierLookup: globalSupplierMap
+          };
         } finally {
           releasePool(pool);
         }
@@ -914,7 +957,7 @@ serve(async (req) => {
       }
 
       case "manual_update_status": {
-        // 手动修改补货状态
+        // 手动修改补货状态（含状态变更日志）
         const { product_code, target_status, operator, remark } = params;
         if (!target_status) {
           return new Response(JSON.stringify({ error: "目标状态不能为空" }), {
@@ -929,7 +972,13 @@ serve(async (req) => {
           const validOperator = validateInput(operator || '管理员', "操作人", 50);
           const validRemark = validateInput(remark || `手动改为${validStatus}`, "备注", 200);
 
-          // 直接使用 SQL 更新/插入，避免存储过程参数不兼容或内部错误导致 500
+          // 先查原状态
+          const oldStatusResult = await pool.request()
+            .input("商品编码", sql.NVarChar, validProductCode)
+            .query(`SELECT 补货状态 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 = @商品编码`);
+          const oldStatus = oldStatusResult.recordset && oldStatusResult.recordset[0] ? oldStatusResult.recordset[0].补货状态 : '';
+
+          // 直接使用 SQL 更新/插入
           await pool.request()
             .input("商品编码", sql.NVarChar, validProductCode)
             .input("补货状态", sql.NVarChar, validStatus)
@@ -950,6 +999,32 @@ serve(async (req) => {
                 VALUES (@商品编码, 0, @补货状态, GETDATE(), @操作人, @备注)
               END
             `);
+
+          // 写入状态变更日志（StatusChangeLog）
+          try {
+            await pool.request()
+              .input("商品编码", sql.NVarChar, validProductCode)
+              .input("原状态", sql.NVarChar, oldStatus || null)
+              .input("新状态", sql.NVarChar, validStatus)
+              .input("操作人", sql.NVarChar, validOperator)
+              .input("备注", sql.NVarChar, `[状态变更] ${validRemark}`)
+              .query(`
+                IF EXISTS (SELECT 1 FROM sys.objects WHERE name = 'StatusChangeLog' AND type = 'U')
+                INSERT INTO dbo.StatusChangeLog (商品编码, 原状态, 新状态, 操作人, 备注, 变更时间)
+                VALUES (@商品编码, @原状态, @新状态, @操作人, @备注, GETDATE())
+              `);
+          } catch (logErr) {
+            console.warn("[manual_update_status] 状态变更日志写入失败（不影响主流程）:", logErr);
+          }
+          // 同步更新 Supabase reports 表中的状态
+          try {
+            await supabase
+              .from("reports")
+              .update({ replenish_status: validStatus })
+              .eq("product_code", validProductCode);
+          } catch (supabaseErr) {
+            console.warn("[manual_update_status] Supabase 同步失败（不影响核心更新）:", supabaseErr);
+          }
           result = { success: true, message: '状态更新成功', product_code: validProductCode, status: validStatus };
         } catch (sqlErr) {
           console.error("手动更新状态 SQL 错误:", sqlErr);
@@ -1057,6 +1132,30 @@ serve(async (req) => {
           }]); } catch(e) {}
         } catch (e1) {
           throw e1;
+        } finally {
+          releasePool(pool);
+        }
+        break;
+      }
+
+      case "get_status_change_log": {
+        // 查询状态变更日志（从 StatusChangeLog 表读取）
+        const { log_product_code, top } = params;
+        const pool = await getPool();
+        try {
+          const logs = await pool.request()
+            .input("商品编码", sql.NVarChar, validateInput(log_product_code || "", "商品编码", 50) || null)
+            .input("Top", sql.Int, Math.min(top || 100, 500))
+            .query(`
+              SELECT TOP (@Top) 商品编码, 原状态, 新状态, 操作人, 备注, 变更时间
+              FROM dbo.StatusChangeLog
+              WHERE (@商品编码 IS NULL OR 商品编码 = @商品编码)
+              ORDER BY 变更时间 DESC
+            `);
+          result = logs.recordset;
+        } catch (e) {
+          console.error("查询状态变更日志失败:", e);
+          result = [];
         } finally {
           releasePool(pool);
         }
@@ -1531,6 +1630,15 @@ serve(async (req) => {
         }
         
         const employee = empData[0];
+        
+        // 2.5 登录限制：只有特定账号允许登录门店，其他仅用于上报人名册
+        const EMPLOYEE_LOGIN_WHITELIST = ['15305479520'];
+        const hasPhone = employee.phone && employee.phone.trim() !== '';
+        if (!hasPhone || !EMPLOYEE_LOGIN_WHITELIST.includes(employee.phone.trim())) {
+          return new Response(JSON.stringify({ 
+            success: false, error: "该员工暂不支持登录，仅供上报人名册使用。请联系管理员。" 
+          }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
         
         // 3. 验证密码
         const storedPwd = employee.password || DEFAULT_EMPLOYEE_PASSWORD;
@@ -2300,7 +2408,7 @@ serve(async (req) => {
         // 查询该设备上所有已授权的门店
         const { data: boundStores, error: boundErr } = await supabase
           .from("store_authorized_devices")
-          .select("username, is_authorized, is_active")
+          .select("username, store_id, is_authorized, is_active")
           .eq("device_id", validDeviceId)
           .eq("is_authorized", true);
         
@@ -2310,11 +2418,21 @@ serve(async (req) => {
           break;
         }
         
-        // 返回已绑定的门店列表（不管 is_active，授权过的都算）
-        const stores = (boundStores || []).map(d => ({
-          username: d.username,
-          is_active: d.is_active
-        }));
+        // 账号到门店ID的特殊映射（手机号登录的账号）
+        const USER_STORE_MAP: Record<string, string> = {
+          '15305479520': 'wszhyy02',
+        };
+        
+        // 返回已绑定的门店列表
+        const stores = (boundStores || []).map(d => {
+          // 如果有 store_id 直接用，没有则尝试从映射表获取
+          const storeId = d.store_id || USER_STORE_MAP[d.username] || d.username;
+          return {
+            username: storeId,  // 返回 store_id，让前端能匹配门店选项
+            original_username: d.username,
+            is_active: d.is_active
+          };
+        });
         
         console.log(`[check_device_stores] 设备 ${validDeviceId} 已绑定门店:`, JSON.stringify(stores));
         result = { stores };
@@ -2423,24 +2541,28 @@ serve(async (req) => {
       case "add_employee": {
         const { phone, name, store_id, store_name, created_by } = params;
         
-        // 验证手机号格式
-        const validPhone = validateInput(phone, "手机号", 11);
-        if (!/^\d{11}$/.test(validPhone)) {
-          return new Response(JSON.stringify({ success: false, error: "请输入正确的11位手机号" }), {
-            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-          });
-        }
-        
-        // 检查重复
-        const { data: existing } = await supabase
-          .from("store_employees")
-          .select("id")
-          .eq("phone", validPhone)
-          .limit(1);
-        if (existing && existing.length > 0) {
-          return new Response(JSON.stringify({ success: false, error: "该手机号已注册" }), {
-            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-          });
+        // 手机号可为空（空手机号=仅用于上报人名册，不可登录）
+        var validPhone = '';
+        if (phone && String(phone).trim() !== '') {
+          const rawPhone = validateInput(phone, "手机号", 11);
+          if (!/^\d{11}$/.test(rawPhone)) {
+            return new Response(JSON.stringify({ success: false, error: "请输入正确的11位手机号" }), {
+              status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+            });
+          }
+          validPhone = rawPhone;
+          
+          // 检查重复（仅对有手机号的员工检查）
+          const { data: existing } = await supabase
+            .from("store_employees")
+            .select("id")
+            .eq("phone", validPhone)
+            .limit(1);
+          if (existing && existing.length > 0) {
+            return new Response(JSON.stringify({ success: false, error: "该手机号已注册" }), {
+              status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+            });
+          }
         }
 
         const { data: newEmp, error: addErr } = await supabase
@@ -2451,6 +2573,7 @@ serve(async (req) => {
             store_id: validateInput(store_id, "门店ID", 50),
             store_name: validateInput(store_name, "门店名称", 100),
             password: DEFAULT_EMPLOYEE_PASSWORD,  // 默认密码
+            is_active: true,
             created_by: created_by
           }])
           .select();

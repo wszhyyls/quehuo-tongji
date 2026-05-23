@@ -1,4 +1,4 @@
-
+﻿
 :root {
     --bg-gradient-1: #667eea;
     --bg-gradient-2: #764ba2;
@@ -24,6 +24,8 @@
     --badge-new-bg: #48bb7815;
     --badge-new-color: #48bb78;
     --input-bg: white;
+    --row-stripe: #f7f8fa;
+    --row-hover: #eef0f5;
 }
 
 [data-theme="blue"] {
@@ -77,6 +79,8 @@
     --badge-shortage-color: #d4a574;
     --badge-new-bg: #48bb7820;
     --badge-new-color: #66bb6a;
+    --row-stripe: #323248;
+    --row-hover: #3a3a55;
 }
 
 [data-theme="orange"] {
@@ -781,7 +785,6 @@ body.login-page {
 
 .history-name {
     cursor: help;
-    border-bottom: 1px dashed var(--text-muted);
 }
 
 .btn-view-stock {
@@ -1009,6 +1012,17 @@ body.login-page {
     font-weight: 700;
 }
 
+.replenish-badge.replenish-payment {
+    background: #fff8e1;
+    color: #f57f17;
+    font-weight: 600;
+}
+.replenish-badge.replenish-outstock {
+    background: #ffebee;
+    color: #c62828;
+    font-weight: 600;
+}
+
 .replenish-badge.replenish-text {
     background: #fce4ec;
     color: #c62828;
@@ -1044,10 +1058,56 @@ body.login-page {
     font-weight: 700;
 }
 
+[data-theme="dark"] .replenish-badge.replenish-payment {
+    background: #3d2e00;
+    color: #ffd54f;
+    font-weight: 600;
+}
+[data-theme="dark"] .replenish-badge.replenish-outstock {
+    background: #3d0000;
+    color: #ef9a9a;
+    font-weight: 600;
+}
+
 [data-theme="dark"] .replenish-badge.replenish-text {
     background: #4a2030;
     color: #ef9a9a;
 }
+
+/* 状态下拉框徽章颜色 */
+.status-select {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    outline: none;
+    text-align: center;
+    appearance: auto;
+    min-width: 72px;
+}
+.status-select option { background: #fff; color: #333; font-weight: normal; }
+
+/* 各状态颜色（select直接显示） */
+.status-select[data-status="待处理"] { background: #e0e0e0; color: #757575; }
+.status-select[data-status="配货中"] { background: #fff3e0; color: #e65100; }
+.status-select[data-status="已订购"] { background: #e3f2fd; color: #1565c0; }
+.status-select[data-status="已到货"] { background: #e8f5e9; color: #2e7d32; }
+.status-select[data-status="已完成"] { background: #c8e6c9; color: #1b5e20; font-weight: 700; }
+.status-select[data-status="待付款"] { background: #fff8e1; color: #f57f17; font-weight: 600; }
+.status-select[data-status="厂家断货"] { background: #ffebee; color: #c62828; font-weight: 600; }
+
+/* 暗色主题 */
+[data-theme="dark"] .status-select { color: #ccc; }
+[data-theme="dark"] .status-select option { background: #2a2a3d; color: #d4d4e0; }
+[data-theme="dark"] .status-select[data-status="待处理"] { background: #444460; color: #a0a0b8; }
+[data-theme="dark"] .status-select[data-status="配货中"] { background: #4a3520; color: #ffb74d; }
+[data-theme="dark"] .status-select[data-status="已订购"] { background: #1a2a4a; color: #64b5f6; }
+[data-theme="dark"] .status-select[data-status="已到货"] { background: #1a3a1a; color: #81c784; }
+[data-theme="dark"] .status-select[data-status="已完成"] { background: #0d280d; color: #4caf50; font-weight: 700; }
+[data-theme="dark"] .status-select[data-status="待付款"] { background: #3d2e00; color: #ffd54f; font-weight: 600; }
+[data-theme="dark"] .status-select[data-status="厂家断货"] { background: #3d0000; color: #ef9a9a; font-weight: 600; }
 
 .replenish-select {
     padding: 5px 8px;
@@ -1266,6 +1326,32 @@ body.login-page {
     background: var(--accent-dark);
 }
 
+/* ========== 翻页控制 ========== */
+.pagination-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    margin-top: 8px;
+    border-top: 1px solid var(--input-border);
+}
+.pagination-btns { display: flex; gap: 6px; }
+.btn-page {
+    padding: 6px 16px;
+    font-size: 13px;
+    border-radius: 6px;
+    border: 1px solid var(--input-border);
+    background: var(--card-bg);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.btn-page:hover { background: var(--primary-light); border-color: var(--primary); }
+.btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 已完成折叠区 */
+#completedToggle { font-size: 13px; color: var(--text-muted); }
+
 .btn-batch-clear {
     background: white;
     color: var(--text-secondary);
@@ -1320,22 +1406,35 @@ body.login-page {
     background: var(--stock-bg);
 }
 
+.data-table tbody tr:nth-child(odd) {
+    background: var(--row-stripe);
+}
+.data-table tbody tr:nth-child(even) {
+    background: var(--card-bg);
+}
+.data-table tbody tr:hover {
+    background: var(--row-hover) !important;
+    transition: background 0.15s ease;
+}
+
 .data-table th,
 .stock-table th {
-    padding: 12px 18px;
+    padding: 12px 10px;
     text-align: left;
     font-size: 13px;
     font-weight: 600;
     color: var(--text-secondary);
     border-bottom: 2px solid var(--input-border);
+    white-space: nowrap;
 }
 
 .data-table td,
 .stock-table td {
-    padding: 12px 18px;
+    padding: 12px 6px;
     border-bottom: 1px solid var(--input-border);
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text-primary);
+    white-space: nowrap;
 }
 
 .data-table td:nth-child(2) {
@@ -1343,10 +1442,6 @@ body.login-page {
     padding-left: 4px;
     width: 50px;
     text-align: center;
-}
-
-.data-table tbody tr:hover {
-    background: var(--hover-bg);
 }
 
 .type-badge {
@@ -1370,17 +1465,17 @@ body.login-page {
 
 /* 状态下拉选择框样式 */
 .status-select {
-    padding: 4px 8px;
+    padding: 4px 2px;
     border: 1px solid var(--input-border);
     border-radius: 6px;
     background: var(--bg-secondary);
     color: var(--text-primary);
-    width: 90px;
+    width: 100% !important;
+    max-width: 75px !important;
     font-size: 12px;
-    font-size: 13px;
     cursor: pointer;
     transition: all 0.2s;
-    min-width: 100px;
+    min-width: 0 !important;
 }
 
 .status-select:hover {
@@ -2816,8 +2911,9 @@ h3 {
     }
 
     .data-table tbody td {
-        padding: 10px 8px;
+        padding: 10px 6px;
         font-size: 12px;
+        white-space: nowrap;
     }
 
     .data-table tbody tr {

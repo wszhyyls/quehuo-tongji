@@ -277,9 +277,11 @@
                 }
                 
                 // 1. 先从缓存读取，立即锁定（无延迟）
+                // v2 版本标记：旧缓存（username=手机号）需要忽略
+                var cacheVer = localStorage.getItem('device_bound_cache_ver');
                 try {
                     var cached = JSON.parse(localStorage.getItem('device_bound_stores'));
-                    if (cached && cached.length > 0) {
+                    if (cacheVer === 'v2' && cached && cached.length > 0 && cached[0]) {
                         applyDeviceLock(cached);
                     }
                 } catch(e) {}
@@ -295,6 +297,7 @@
                         signal: ctrl.signal
                     }).then(function(r) { return r.json(); }).then(function(r) {
                         if (r.success && r.data && r.data.stores && r.data.stores.length > 0) {
+                            localStorage.setItem('device_bound_cache_ver', 'v2');
                             applyDeviceLock(r.data.stores);
                         }
                     }).catch(function() {});

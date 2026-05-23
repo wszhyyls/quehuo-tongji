@@ -4,7 +4,7 @@ const { autoUpdater } = require('electron-updater');
 
 // 配置
 const CONFIG = {
-  title: 'WSZH-ShortageStore v3.18.7',
+  title: 'WSZH-ShortageStore v3.19.0',
   width: 1400,
   height: 900,
   minWidth: 800,
@@ -20,7 +20,7 @@ const CONFIG = {
 
 // 更新服务器地址
 const UPDATE_CHECK_URL = 'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/check-update';
-const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.7/';  // GitHub Releases
+const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.19.0/';  // GitHub Releases
 
 let mainWindow = null;
 
@@ -94,7 +94,25 @@ async function createWindow() {
     }, 800);
   });
 
-  // 窗口关闭时退出应用
+  // 关闭窗口时弹出确认提示
+  mainWindow.on('close', (e) => {
+    e.preventDefault();
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'question',
+      buttons: ['取消', '退出'],
+      defaultId: 0,
+      cancelId: 0,
+      title: '确认退出',
+      message: '确定要退出缺货统计系统吗？',
+      detail: '退出后需重新登录。',
+      icon: path.join(__dirname, 'static', 'icon-192.png')
+    });
+    if (choice === 1) {
+      mainWindow.destroy();
+    }
+  });
+
+  // 窗口销毁后退出应用
   mainWindow.on('closed', () => {
     mainWindow = null;
     app.quit();

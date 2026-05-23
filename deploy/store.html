@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN" data-theme="purple">
 <head>
     <meta charset="UTF-8">
@@ -14,10 +14,10 @@
     <meta name="theme-color" content="#667eea">
     <!-- ============================ -->
 
-    <link rel="stylesheet" href="./static/css/style.css?v=22">
+    <link rel="stylesheet" href="./static/css/style.css?v=28">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="./static/js/fuse.min.js?v=1"></script>
-    <script src="./static/js/utils.js?v=22"></script>
+    <script src="./static/js/utils.js?v=26"></script>
 </head>
 <body>
     <!-- 预加载遮罩层 -->
@@ -136,9 +136,12 @@
                         </div>
                         <div class="input-group-sm">
                             <label>备注</label>
-                            <input type="text" id="remark" placeholder="选填" class="remark-input-sm">
+                            <div style="display:flex;gap:8px;align-items:flex-end;">
+                                <input type="text" id="remark" placeholder="选填" class="remark-input-sm" style="flex:1;">
+                                <select id="reporterSelect" class="filter-select-sm" style="min-width:100px;height:35px;"><option value="">--上报人--</option></select>
+                                <button id="addBtn" class="btn-add btn-add-sm">上报</button>
+                            </div>
                         </div>
-                        <button id="addBtn" class="btn-add btn-add-sm">上报</button>
                     </div>
                 </div>
             </div>
@@ -172,7 +175,10 @@
                         <input type="text" id="npRemark" placeholder="选填">
                     </div>
                 </div>
-                <button id="addNewBtn" class="btn-add btn-full">上报</button>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
+                    <select id="reporterSelectNew" class="filter-select-sm" style="min-width:100px;"><option value="">--上报人--</option></select>
+                    <button id="addNewBtn" class="btn-add btn-full">上报</button>
+                </div>
             </div>
         </div>
 
@@ -188,8 +194,12 @@
                     <select id="historyStatusFilter" class="filter-select-sm">
                         <option value="">全部状态</option>
                         <option value="待处理">待处理</option>
+                        <option value="配货中">配货中</option>
                         <option value="已订购">已订购</option>
                         <option value="已到货">已到货</option>
+                        <option value="已完成">已完成</option>
+                        <option value="待付款">待付款</option>
+                        <option value="厂家断货">厂家断货</option>
                     </select>
                     <select id="historyTimeFilter" class="filter-select-sm">
                         <option value="7">最近7天</option>
@@ -203,13 +213,15 @@
                 <table id="historyList" class="data-table">
                     <thead>
                         <tr>
-                            <th>时间</th>
-                            <th>类型</th>
-                            <th>名称</th>
-                            <th>紧急</th>
-                            <th>需求</th>
-                            <th>补货</th>
-                            <th id="reporterHeader">上报人</th>
+                            <th style="width:85px;white-space:nowrap;">日期</th>
+                            <th style="width:55px;text-align:center;white-space:nowrap;">类型</th>
+                            <th style="width:80px;white-space:nowrap;">商品编码</th>
+                            <th style="width:140px;white-space:nowrap;">品名</th>
+                            <th style="width:60px;white-space:nowrap;">规格</th>
+                            <th style="width:55px;white-space:nowrap;">紧急</th>
+                            <th style="width:50px;white-space:nowrap;">需求</th>
+                            <th style="width:90px;white-space:nowrap;">补货</th>
+                            <th id="reporterHeader" style="width:68px;white-space:nowrap;">上报人</th>
                         </tr>
                     </thead>
                     <tbody id="historyTbody"></tbody>
@@ -263,7 +275,7 @@
         </div>
     </div>
 
-    <script src="./static/js/store.js?v=25"></script>
+    <script src="./static/js/store.js?v=28"></script>
 
     <!-- ========== PWA Service Worker ========== -->
     <script>

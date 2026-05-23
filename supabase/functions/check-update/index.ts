@@ -7,8 +7,8 @@ const corsHeaders = {
 };
 
 // 最新版本配置（每次发布新版本时更新）
-const LATEST_VERSION = '3.18.7';
-const UPDATE_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.18.7/';  // GitHub Releases
+const LATEST_VERSION = '3.19.0';
+const UPDATE_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.19.0/';  // GitHub Releases
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -27,17 +27,20 @@ serve(async (req) => {
       data: {
         version: LATEST_VERSION,
         updateAvailable: isUpdateAvailable,
-        releaseDate: '2026-05-20',
+        releaseDate: '2026-05-23',
         releaseNotes: `
-v3.18.7 更新内容：
-- 库存同步机制重构，数据与Excel一致
-- 设备码v2：不同电脑生成不同设备码
-- 批量授权：一键授权所有待授权设备
-- 各店库存弹窗优化（可调拨计算）
-- 启动动画过渡优化
-- 并行加载+按钮防抖+错误通俗化
+v3.19.0 更新内容：
+- 新增供货商字段（缺货订购汇总）
+- 状态变更日志系统（可追溯每次修改）
+- 历史上报新增规格、商品编码列
+- 双表格斑马纹隔行变色+悬停加深
+- 品名列间距优化，表格更紧凑
+- 需求明细弹窗商品信息蓝色高亮
+- 悬停信息范围扩展至整行
+- 操作日志翻页（每页10条）
+- 退出客户端确认提示
         `.trim(),
-        downloadUrl: `${UPDATE_URL}WSZH-ShortageStore-3.18.6.exe`,
+        downloadUrl: `${UPDATE_URL}WSZH-ShortageStore-3.19.0.exe`,
         forceUpdate: false
       }
     };

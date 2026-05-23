@@ -351,6 +351,74 @@ async function initializeApp() {
     setTimeout(hideLoadingOverlay, 300);
     preloadComplete = true;
     logInfo('[预加载] 所有数据加载完成，页面已准备好', null);
+    
+    // 6. 加载本店员工列表（填充上报人下拉框）
+    loadReporterOptions();
+}
+
+// ========== 上报人下拉框 ==========
+var storeEmployees = [];
+
+async function loadReporterOptions() {
+    try {
+        // 获取所有员工（不传 store_id，前端自己按门店筛选）
+        var result = await callEdgeFunction('list_employees', {});
+        if (!result || !result.success) {
+            console.warn('[上报人] 加载失败:', (result && result.error) || '无响应');
+            return;
+        }
+        var allEmps = result.data || [];
+        
+        // 获取正确的门店store_id（兼容手机号登录的情况）
+        var STORE_ID_MAP = {
+            '15305479520': 'wszhyy02', '02': 'wszhyy02',
+            'wszhyy02': 'wszhyy02', 'wszhyy03': 'wszhyy03', 'wszhyy04': 'wszhyy04',
+            'wszhyy06': 'wszhyy06', 'wszhyy08': 'wszhyy08', 'wszhyy09': 'wszhyy09',
+            'wszhyy14': 'wszhyy14', 'wszhyy16': 'wszhyy16', 'wszhyy17': 'wszhyy17', 'wszhyy21': 'wszhyy21'
+        };
+        var rawId = user.store_id || user.username || '';
+        var storeId = STORE_ID_MAP[rawId] || rawId;
+        console.log('[上报人] 全部员工数:', allEmps.length, '原始store_id:', rawId, '映射后:', storeId);
+        
+        // 前端按门店筛选（严格匹配 store_id）
+        var emps = allEmps.filter(function(e) { return e.store_id === storeId; });
+        console.log('[上报人] 本店员工数:', emps.length);
+        
+        // 只显示本店员工
+        storeEmployees = emps;
+        if (emps.length > 0) {
+            console.log('[上报人] 第一个员工数据:', JSON.stringify(emps[0]));
+        }
+        
+        var opts = '<option value="">--上报人--</option>';
+        storeEmployees.forEach(function(e) {
+            var label = (e.name || e.phone || e.id || '');
+            var val = e.id || '';
+            opts += '<option value="' + val + '" data-phone="' + (e.phone || '') + '" data-name="' + (e.name || '') + '">' + escapeHtml(label) + '</option>';
+        });
+        
+        var sel1 = document.getElementById('reporterSelect');
+        var sel2 = document.getElementById('reporterSelectNew');
+        if (sel1) sel1.innerHTML = opts;
+        if (sel2) sel2.innerHTML = opts;
+        console.log('[上报人] 下拉框已更新，选项数:', storeEmployees.length);
+    } catch(e) {
+        logError('加载员工列表失败', e);
+    }
+}
+
+function getSelectedReporter() {
+    var sel = document.getElementById('reporterSelect');
+    if (!sel || !sel.value) {
+        sel = document.getElementById('reporterSelectNew');
+    }
+    if (!sel || !sel.value) return null;
+    var opt = sel.options[sel.selectedIndex];
+    return {
+        id: sel.value,
+        phone: opt.getAttribute('data-phone') || '',
+        name: opt.getAttribute('data-name') || ''
+    };
 }
 
 // 启动初始化
@@ -675,9 +743,10 @@ function renderSearchResults(products) {
 function appendSearchItem(container, p) {
     var div = document.createElement('div');
     div.className = 'search-item';
+    var displayName = p.product_name || p.product_code || '';
     div.innerHTML = '<span class="code">' + safeText(p.product_code || '') + '</span>' +
         '<div class="product-info">' +
-        '<span class="product-name">' + safeText(p.product_name || '') + '</span>' +
+        '<span class="product-name">' + safeText(displayName) + '</span>' +
         '<span class="spec" style="color:#888;font-size:12px;">' + safeText(p.specification || '') + '</span>' +
         '<span class="mfg" style="color:#aaa;font-size:11px;">' + safeText(p.manufacturer || '') + '</span>' +
         '</div>';
@@ -725,13 +794,14 @@ function showQuickProduct(product) {
         demandQtyEl.placeholder = '数量';
     }
     
-    // 快速填充基本信息（来自搜索结果，无需网络请求）
-    document.getElementById('pName').textContent = product.product_name || '';
+    // 快速填充基本信息（名称为空时回退到编码）
+    document.getElementById('pName').textContent = product.product_name || product.product_code || '';
     document.getElementById('pSpec').textContent = product.specification || '';
     document.getElementById('pMfg').textContent = product.manufacturer || '';
     
     // 显示加载中的库存数据
     document.getElementById('pStock').textContent = '...';
+    document.getElementById('pTransit').textContent = '...';
     document.getElementById('pTransit').textContent = '...';
     document.getElementById('pDcStock').textContent = '...';
     document.getElementById('pSales30').textContent = '...';
@@ -866,14 +936,16 @@ async function queryProductByCode(code, forceRefresh) {
                     };
                 });
                 
+                // 补充本地缓存中的商品名称（SPFXB_Result 可能缺少名称字段）
+                var productInfo3 = allProducts.find(function(p) { return p.product_code === code; }) || {};
                 currentProduct = {
                     found: true,
                     is_new: false,
                     data: {
                         product_code: myRecord.商品编码,
-                        product_name: myRecord.商品名称,
-                        specification: myRecord.规格,
-                        manufacturer: myRecord.生产企业,
+                        product_name: myRecord.商品名称 || productInfo3.product_name || myRecord.商品编码,
+                        specification: myRecord.规格 || productInfo3.product_spec || '',
+                        manufacturer: myRecord.生产企业 || productInfo3.manufacturer || '',
                         current_stock: myRecord.库存数量 || 0,
                         in_transit: myRecord.在途数量 || 0,
                         dc_stock: myRecord.配送中心库存数量 || 0,
@@ -1053,6 +1125,8 @@ function checkReportPermission() {
 document.getElementById('addBtn').addEventListener('click', async function() {
     if (!checkReportPermission()) return;
     if (!currentProduct) { showAlert('请先查询商品'); return; }
+    // 上报人必填检查
+    if (!getSelectedReporter()) { showAlert('请选择上报人'); return; }
     var qty = parseFloat(document.getElementById('demandQty').value);
     if (!qty || qty <= 0) { showAlert('请输入有效的需求数量'); return; }
     var urgencyLevel = document.getElementById('urgencyLevel').value;
@@ -1088,6 +1162,7 @@ document.getElementById('addBtn').addEventListener('click', async function() {
 // 新品订购上报
 document.getElementById('addNewBtn').addEventListener('click', async function() {
     if (!checkReportPermission()) return;
+    if (!getSelectedReporter()) { showAlert('请选择上报人'); return; }
     var name = document.getElementById('npName').value.trim();
     var spec = document.getElementById('npSpec').value.trim();
     var mfg = document.getElementById('npMfg').value.trim();
@@ -1121,8 +1196,13 @@ async function submitReport(report) {
             replenish_status: '待处理'
         };
 
-        // 上报人信息（员工登录时有，主账号为空）
-        if (user.is_employee) {
+        // 上报人信息：优先使用下拉框选择，其次员工登录身份
+        var selReporter = getSelectedReporter();
+        if (selReporter) {
+            insertObj.reporter_id = selReporter.id;
+            insertObj.reporter_phone = selReporter.phone;
+            insertObj.reporter_name = selReporter.name || selReporter.phone;
+        } else if (user.is_employee) {
             insertObj.reporter_id = user.id;
             insertObj.reporter_phone = user.employee_phone;
             insertObj.reporter_name = user.employee_name || user.employee_phone;
@@ -1287,17 +1367,25 @@ function renderHistoryPage(records) {
         var typeBadge = r.order_type === '缺货订购'
             ? '<span class="type-badge type-shortage">缺货</span>'
             : '<span class="type-badge type-new">新品</span>';
-        var name = r.order_type === '缺货订购' ? r.product_name : r.new_product_name;
+        var name = r.product_name || r.new_product_name || r.product_code || '(无名称)';
         var urgencyBadge = getUrgencyBadge(r.urgency_level);
         var replenishBadge = getReplenishBadge(r.replenish_status);
-        var nameCell = '<span class="history-name" title="' + 
-            escapeHtml((r.product_code||'') + ' ' + (r.product_name||r.new_product_name||'') + ' ' + 
-            (r.specification||r.new_specification||'') + ' ' + (r.manufacturer||r.new_manufacturer||'')) + '">' + 
+        var fullInfo = escapeHtml((r.product_code||'') + ' ' + (r.product_name||r.new_product_name||'') + ' ' + 
+            (r.specification||r.new_specification||'') + ' ' + (r.manufacturer||r.new_manufacturer||''));
+        var nameCell = '<span class="history-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:100%;">' + 
             escapeHtml(name) + '</span>';
-        var createdAt = r.created_at ? new Date(r.created_at).toLocaleString('zh-CN') : '';
+        var specCell = '<span style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:60px;">' + 
+            escapeHtml(r.specification||r.new_specification||'-') + '</span>';
+        // 日期显示（仅日期，title悬停显示完整时间）
+        var dateObj = r.created_at ? new Date(r.created_at) : null;
+        var dateStr = dateObj ? dateObj.toLocaleDateString('zh-CN') : '';
+        var fullTimeStr = dateObj ? dateObj.toLocaleString('zh-CN') : '';
 
-        var html = '<td>' + safeText(createdAt) + '</td><td>' + typeBadge + '</td><td>' + 
-                   nameCell + '</td><td>' + urgencyBadge + '</td><td>' + 
+        var html = '<td style="font-size:12px;" title="' + escapeHtml(fullTimeStr) + '">' + safeText(dateStr) + '</td>' +
+            '<td style="text-align:center;">' + typeBadge + '</td>' +
+            '<td style="font-size:12px;white-space:nowrap;" title="' + fullInfo + '">' + safeText(r.product_code||'-') + '</td>' +
+            '<td style="white-space:nowrap;" title="' + fullInfo + '">' + 
+                   nameCell + '</td><td title="' + fullInfo + '">' + specCell + '</td><td>' + urgencyBadge + '</td><td>' + 
                    safeText(r.demand_quantity) + '</td><td>' + replenishBadge + '</td>';
 
         // 主账号可见上报人列
@@ -1353,9 +1441,13 @@ function getUrgencyBadge(level) {
 function getReplenishBadge(status) {
     var cls = 'replenish-badge ';
     var label = status || '待处理';
-    if (label === '已订购') cls += 'replenish-ordered';
-    else if (label === '已到货') cls += 'replenish-arrived';
+    if (label === '已完成') cls += 'replenish-completed';
+    else if (label === '已订购' || label === '已下单') cls += 'replenish-ordered';
+    else if (label === '配货中' || label === '在途') cls += 'replenish-intransit';
+    else if (label === '已到货' || label === '到货') cls += 'replenish-arrived';
     else if (label === '待处理') cls += 'replenish-pending';
+    else if (label === '待付款') cls += 'replenish-payment';
+    else if (label === '厂家断货') cls += 'replenish-outstock';
     else cls += 'replenish-text';
     return '<span class="' + cls + '">' + label + '</span>';
 }

@@ -21,13 +21,13 @@
 
 # 静态资源强缓存（改版时升级版本号?v=X即可刷新）
 /static/js/*
-  Cache-Control: public, max-age=86400, immutable
+  Cache-Control: public, max-age=3600
 /static/css/*
-  Cache-Control: public, max-age=86400, immutable
+  Cache-Control: public, max-age=3600
 /static/*.png
-  Cache-Control: public, max-age=2592000, immutable
+  Cache-Control: public, max-age=2592000
 /static/*.jpg
-  Cache-Control: public, max-age=2592000, immutable
+  Cache-Control: public, max-age=2592000
 /manifest.json
   Cache-Control: public, max-age=86400
 /sw.js
