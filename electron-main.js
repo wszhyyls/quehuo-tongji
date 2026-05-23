@@ -76,7 +76,7 @@ async function createWindow() {
 
   // 从 Cloudflare 加载（带强制缓存绕过）
   var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
-  var cacheBuster = 'v=3.18.7&t=' + Date.now();
+  var cacheBuster = 'v=3.19.0&t=' + Date.now();
   mainWindow.loadURL(BASE_URL + '/login.html?' + cacheBuster, {
     extraHeaders: 'Cache-Control: no-cache, no-store, must-revalidate\nPragma: no-cache'
   });
