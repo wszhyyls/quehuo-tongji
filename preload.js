@@ -1,7 +1,13 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, shell } = require('electron');
 
 // 暴露安全的 API 到渲染进程
 contextBridge.exposeInMainWorld('electron', {
+    // 在系统默认浏览器中打开链接
+    openExternal: (url) => {
+        if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
+            shell.openExternal(url);
+        }
+    },
     ipcRenderer: {
         // 发送消息
         send: (channel, data) => {

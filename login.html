@@ -55,7 +55,7 @@
     <!-- 版本更新提示条 -->
     <div id="updateBanner" style="display:none;position:fixed;top:0;left:0;right:0;background:linear-gradient(135deg,#ff6b35,#f7931e);color:#fff;text-align:center;padding:12px 16px;font-size:14px;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,0.3);">
         <span id="updateBannerMsg">🔄 有新版本可用！建议更新后使用。</span>
-        <button id="updateBannerBtn" onclick="window.open(this.dataset.url)" style="margin-left:12px;padding:4px 16px;background:#fff;color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;">立即下载</button>
+        <button id="updateBannerBtn" onclick="window.location.href=this.dataset.url" style="margin-left:12px;padding:4px 16px;background:#fff;color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;">立即下载</button>
         <button onclick="this.parentElement.style.display='none'" style="margin-left:8px;background:none;border:none;color:rgba(255,255,255,0.7);cursor:pointer;font-size:18px;">&times;</button>
     </div>
     <div class="login-container">
