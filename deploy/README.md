@@ -5,6 +5,42 @@
 
 ---
 
+## ⚡ AI Agent 快速理解（30秒概览）
+
+**这是什么？** 药品连锁门店缺货上报 + 管理端汇总采购系统。10 个门店通过 Electron 客户端上报缺货/新品，管理员查看汇总后采购，数据同步到 SQL Server。
+
+**核心架构**：
+```
+门店客户端 (Electron/login.html → store.html) 
+    ↓ Edge Function (query-shortage-data: 45个action, 3150行)
+    ↓ SQL Server RQZT (读写) + ZHYYLS (只读源数据) + Supabase (缓存/认证)
+管理后台 (admin.html)
+```
+
+**修改文件指南**：
+- 改前端 → `login.html` / `store.html` + `static/js/store.js` / `admin.html` + `static/js/admin.js`
+- 改样式 → `static/css/style.css`
+- 改业务逻辑 → `supabase/functions/query-shortage-data/index.ts`
+- 改定时任务 → `supabase/functions/scheduled-task/index.ts`
+- 改自动更新 → `supabase/functions/check-update/index.ts` + `electron-main.js`
+- 改数据库 → `sql/` 目录脚本 + Supabase SQL Editor
+
+**部署命令**：
+```bash
+# 部署 Edge Function
+npx supabase functions deploy query-shortage-data --project-ref qswpgnnedqvuegwfbprd
+# 部署前端
+npx wrangler pages deploy . --project-name=wszhyy --branch=main
+# 打包客户端
+npx electron-builder --win
+# 上传 Release
+gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
+```
+
+**⚠️ 权限约束**：ZHYYLS 数据库只读，禁止创建索引/修改表；RQZT 可读写；Supabase 完全管理。
+
+---
+
 ## 一、项目总览
 
 ### 1.1 核心定位
@@ -140,7 +176,7 @@
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐                          │
 │  │ 门店端    │  │ 管理后台  │  │ 桌面客户端│                          │
 │  │ store    │  │ admin    │  │ Electron │                          │
-│  │ v3.18.8  │  │ v3.18.8  │  │ v3.18.8  │                          │
+│  │ v3.19.0  │  │ v3.19.0  │  │ v3.19.0  │                          │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘                          │
 └───────┼─────────────┼─────────────┼────────────────────────────────┘
         └─────────────┼─────────────┘
@@ -703,7 +739,7 @@ cmd /c "一键部署.bat"
 |------|------|
 | `wrangler.toml` | Cloudflare Pages 配置（项目名 `wszhyy`） |
 | `_headers` | Cloudflare Pages CORS 头 |
-| `package.json` | Electron 打包配置（版本 v3.18.6） |
+| `package.json` | Electron 打包配置（版本 v3.19.0） |
 | `.npmrc` | npm 国内镜像 |
 
 ### 8.4 桌面客户端自动更新
@@ -723,7 +759,7 @@ cmd /c "一键部署.bat"
 |------|------|------|
 | 版本检测 | `supabase/functions/check-update/index.ts` | 返回最新版本号、更新日志、下载URL |
 | 客户端检测 | `electron-main.js` 的 `checkForUpdates()` | 启动后3秒自动检测；`UPDATE_FILES_URL` 指向 .exe 存放目录 |
-| 安装包托管 | Cloudflare Pages `deploy/releases/` | 存放 `WSZH-ShortageStore 3.18.6.exe` + `latest.yml` |
+| 安装包托管 | GitHub Releases | 存放 `WSZH-ShortageStore Setup 3.19.0.exe` + `latest.yml` |
 | 打包配置 | `package.json` `publish.url` | 指向 `https://wszhyy.pages.dev/releases/` |
 
 **发布新版本流程**：
@@ -731,9 +767,8 @@ cmd /c "一键部署.bat"
 # 1. 打包（生成 .exe + latest.yml）
 打包门店端.bat
 
-# 2. 复制到 deploy/releases/
-copy "dist\WSZH-ShortageStore 3.18.6.exe" "deploy\releases\"
-copy "dist\latest.yml" "deploy\releases\"
+# 2. 上传到 GitHub Release（使用 gh CLI）
+gh release upload v3.19.0 "dist\WSZH-ShortageStore Setup 3.19.0.exe" "dist\WSZH-ShortageStore Setup 3.19.0.exe.blockmap" "dist\latest.yml" --clobber
 
 # 3. 更新 check-update 函数版本号 + 部署
 npx supabase functions deploy check-update --project-ref qswpgnnedqvuegwfbprd
@@ -902,7 +937,10 @@ cmd /c "一键部署.bat"
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
-| v3.18.6 | 2026-05-20 | **库存同步重构、各店库存优化、设备锁定+数量限制、设备码v2、待授权去重、中文门店名、登录记忆、并行加载、防抖、重试、批量授权、错误通俗化、数据库索引** |
+| v3.19.0 | 2026-05-23~24 | 双表格优化、供货商+状态日志、RQZT商品缓存(200ms)、库存UPSERT、自动更新修复、登录页更新提示条 |
+| v3.18.8 | 2026-05-23 | 订货状态完善(待付款/厂家断货)、上报人管理、历史记录格式优化 |
+| v3.18.7 | 2026-05-21 | 登录页致命Bug修复、设备码持久化、CDN缓存优化、一键发布工具 |
+| v3.18.6 | 2026-05-20 | 库存同步重构、各店库存优化、设备锁定+数量限制、设备码v2、批量授权 |
 | v3.18.5 | 2026-05-19 | 设备授权优化、启动体验优化、自动更新配置 |
 | v3.18.0 | 2026-05-19 | 管理后台增强（修改密码、自动化部署配置） |
 | v3.17 | 2026-05-18 | 设备授权机制升级 |
