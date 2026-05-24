@@ -41,7 +41,7 @@ v3.19.0 更新内容：
 - 操作日志翻页（每页10条）
 - 退出客户端确认提示
         `.trim(),
-        downloadUrl: `https://github.com/wszhyyls/quehuo-tongji/releases/tag/v3.19.0`,
+        downloadUrl: `https://github.com/wszhyyls/quehuo-tongji/releases/latest`
         forceUpdate: false
       }
     };
