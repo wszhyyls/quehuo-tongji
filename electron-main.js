@@ -152,10 +152,14 @@ async function checkForUpdates() {
         });
       }
       
+      // 从 Edge Function 获取动态更新文件 URL，避免旧版客户端硬编码 URL 失效
+      const updateFilesUrl = result.data.updateFilesUrl || `https://github.com/wszhyyls/quehuo-tongji/releases/download/v${result.data.version}/`;
+      log(`更新文件URL: ${updateFilesUrl}`);
+      
       // 使用 electron-updater 通用提供者下载
       autoUpdater.setFeedURL({
         provider: 'generic',
-        url: UPDATE_FILES_URL
+        url: updateFilesUrl
       });
       
       autoUpdater.on('download-progress', (progress) => {

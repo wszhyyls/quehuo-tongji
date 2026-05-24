@@ -28,6 +28,7 @@ serve(async (req) => {
         version: LATEST_VERSION,
         updateAvailable: isUpdateAvailable,
         releaseDate: '2026-05-23',
+        updateFilesUrl: UPDATE_URL,  // electron-updater 从此 URL 读取 latest.yml
         releaseNotes: `
 v3.19.0 更新内容：
 - 新增供货商字段（缺货订购汇总）
