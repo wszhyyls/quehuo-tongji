@@ -251,9 +251,9 @@ ZHYYLS 实时数据库（药房 ERP 系统）
   │  ├ Zhyyls.dbo.Vptype, cstype            → 商品主表、生产厂商
   │  └ Zhyyls.dbo.Gp_SendDoing              → 配送在途数量
   │
-  ↓ SPFXB 存储过程（Excel VBA 手动调用）
-  │  ┌ @RefreshRanking = 1：全量刷新（重算排名/标记/标准库存）
-  │  └ @RefreshRanking = 0：数据刷新（仅更新销售/库存/在途）
+  ↓ SPFXB 存储过程（系统内调用 + Excel VBA 均可用）
+  │  ┌ @RefreshRanking = 1：全量刷新（重算排名/标记/标准库存）— 仅 Excel VBA
+  │  └ @RefreshRanking = 0：数据刷新（仅更新销售/库存/在途）— 系统+Excel 均可
   │
 RQZT.dbo.SPFXB_Result（核心缓存表 → 网页直读）
   │
@@ -266,8 +266,8 @@ RQZT.dbo.SPFXB_Result（核心缓存表 → 网页直读）
   └──→ 管理员「同步采购计划」→ usp_Sync_AllShortageCache → usp_AutoDetectOrderStatus
          + 同步到 Supabase
 
-ZHYYLS 实时表 → SPFXB 存储过程：⚠️ 只能 Excel VBA 手动调用，无自动机制
-SPFXB_Result → Supabase：   ✅ 每30分钟自动同步 + 刷新库存时实时同步
+ZHYYLS → SPFXB 刷新：    ✅ 门店点击「刷新库存」→ 自动调用 @RefreshRanking=0（实时） + Excel VBA @RefreshRanking=1（全量）
+SPFXB_Result → Supabase： ✅ 每30分钟自动同步 + 管理员同步采购计划时同步
 
 ### 4.2 「刷新库存」按钮（v3.18.7 优化）
 
@@ -308,10 +308,11 @@ SPFXB_Result 更新为最新
 
 | 问题 | 答案 |
 |------|------|
-| 30分钟定时任务刷新的是源数据吗？ | ❌ 否。它只从 SPFXB_Result 读到 Supabase，不会让 SPFXB_Result 变新 |
-| 真正让数据"变新"的是什么？ | Excel VBA 的「全量刷新」/「数据刷新」按钮，调用 SPFXB 从 ZHYYLS 实时取数 |
-| 门店刷新库存拿到的是最新数据吗？ | ✅ 是（前提有人跑过 Excel VBA 刷新） |
-| SPFXB_Result 会自动更新吗？ | ❌ 不会，必须人工跑 Excel VBA |
+| 30分钟定时任务刷新的是源数据吗？ | ❌ 否。它只从 SPFXB_Result 同步到 Supabase 缓存，不会更新 SPFXB_Result 本身 |
+| 真正让数据「变新」的是什么？ | 门店点击「刷新库存」→ Edge Function 自动调用 `SPFXB @RefreshRanking=0`，从 ZHYYLS 实时取库存/销售/在途并写入 SPFXB_Result |
+| 门店刷新库存拿到的是最新数据吗？ | ✅ 是（系统内调用 SPFXB 从 ZHYYLS 实时获取，不需要 Excel VBA） |
+| SPFXB_Result 能自动更新吗？ | ✅ 能（门店刷新库存时自动触发增量刷新；管理端同步时也可触发） |
+| 还需要 Excel VBA 吗？ | 仅 @RefreshRanking=1（全量刷新排名）需要 VBA；@RefreshRanking=0（数据刷新）系统已自动执行 |
 
 ### 4.5 门店端数据流
 
