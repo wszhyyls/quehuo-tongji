@@ -1011,7 +1011,7 @@ serve(async (req) => {
           sync_type: "status_detect", 
           status: "success", 
           detail: "自动状态检测完成" 
-        }]); } catch(e) {}
+        }]); } catch(_e) {}
         break;
       }
 
