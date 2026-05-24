@@ -1,354 +1,102 @@
-# 缺货统计系统 - 项目文件说明
+# 缺货统计系统 - 项目文件速查手册
+
+> **适用版本**：v3.19.0 | **更新日期**：2026-05-24  
+> 详细文档见 [README.md](./README.md)，本文档仅作文件索引。
+
+---
 
 ## 📁 项目结构总览
 
 ```
 缺货统计系统/
-├── 📄 HTML 页面文件
-├── 📂 static/                 # 静态资源目录
-├── 📂 supabase/              # Supabase 云函数
-├── 📂 sql/                   # SQL 脚本
-├── 📂 vba/                   # VBA 脚本（业务系统用）
-├── 📂 dist/                  # Electron 打包输出
-├── 📂 backups/               # 备份文件
-├── ⚙️ package.json           # Node.js 项目配置
-├── 📝 manifest.json          # PWA 应用清单
-└── 🔧 其他配置文件
+├── 📄 login.html              # 登录页面
+├── 📄 store.html              # 门店端页面
+├── 📄 admin.html              # 管理端页面
+├── 📂 deploy/                 # 部署镜像目录（与源文件同步）
+├── 📂 static/                 # 静态资源
+│   ├── css/style.css          # 全局样式（~3200行）
+│   ├── js/store.js            # 门店端逻辑（~1600行）
+│   ├── js/admin.js            # 管理端逻辑（~1900行）
+│   ├── js/utils.js            # 公共工具（状态/设备ID/XSS防护）
+│   └── logo.jpg / icon-*     # 图标资源
+├── 📂 supabase/functions/     # Edge Functions（Deno/TS）
+│   ├── query-shortage-data/   # 核心业务（45个action，3150行）
+│   ├── scheduled-task/        # 定时任务（同步/RQZT缓存刷新）
+│   └── check-update/          # 客户端更新检查
+├── 📂 sql/                    # SQL 脚本（17个文件）
+│   ├── create_product_cache_rqzt.sql   # RQZT商品缓存表
+│   ├── fix_duplicates_before_upsert.sql # UPSERT前置清理
+│   ├── optimize_upsert_cache.sql       # 唯一约束DDL
+│   └── ...（建表/索引/存储过程脚本）
+├── 📂 vba/                    # VBA 脚本（Excel/Access用）
+├── 📂 dist/                   # Electron 打包输出（本地生成，不入库）
+├── 📂 .codebuddy/             # IDE 项目数据（不入库）
+├── ⚙️package.json             # Node.js/Electron 配置（v3.19.0）
+├── ⚙️preload.js               # Electron 预加载（IPC桥接）
+├── ⚙️electron-main.js         # Electron 主进程（窗口/自动更新）
+├── ⚙️manifest.json            # PWA 应用清单
+├── ⚙️_headers                 # Cloudflare Pages 缓存策略
+├── ⚙️_CHANGELOG.md            # 版本更新记录
+├── ⚙️README.md                # 完整项目文档
+└── ⚙️PROJECT_FILES_GUIDE.md   # 本文件
 ```
 
 ---
 
-## 📄 HTML 页面文件
+## 🔴 核心文件（日常开发必改）
 
-### 1. **index.html** - 项目入口页面
-- **作用**：项目的根页面，通常重定向到 login.html
-- **说明**：访问域名时的默认入口文件
+| 文件 | 说明 | 改什么 |
+|------|------|--------|
+| `login.html` | 登录页 | 门店列表、版本号、登录逻辑 |
+| `store.html` | 门店端页面 | 上报表单、历史记录表格、库存展示 |
+| `store.js` | 门店端逻辑 | 搜索/上报/库存/缓存、Fuse.js |
+| `admin.html` | 管理端页面 | 缺货汇总表、筛选器、已完成区 |
+| `admin.js` | 管理端逻辑 | 筛选/状态更新/同步/渲染/导出 |
+| `style.css` | 全局样式 | 布局/表格/徽章/主题/响应式 |
+| `utils.js` | 公共工具 | 状态定义/设备ID/XSS防护/防抖 |
+| `query-shortage-data/index.ts` | 核心Edge Function | 45个action：认证/商品/库存/同步/授权 |
+| `scheduled-task/index.ts` | 定时任务 | 自动同步/RQZT缓存刷新 |
+| `check-update/index.ts` | 更新检查 | 版本号/下载URL/更新日志 |
+| `electron-main.js` | 桌面主进程 | 版本号/路由/窗口/自动更新 |
+| `preload.js` | IPC桥接 | 安全API暴露给渲染进程 |
 
-### 2. **login.html** - 统一登录页面
-- **作用**：用户登录入口，支持多种登录方式
-- **功能**：
-  - 员工登录（手机号+设备码）
-  - 门店账号登录（用户名+密码）
-  - 管理员登录（用户名+密码）
+## 🟡 配置文件
 
-### 3. **store.html** - 门店端页面
-- **作用**：门店员工使用的主界面
-- **功能**：
-  - 商品搜索和缺货上报
-  - 查看库存、销售、在途数据
-  - 订单管理和状态跟踪
+| 文件 | 说明 |
+|------|------|
+| `package.json` | Electron 打包、依赖（v3.19.0） |
+| `_headers` | HTML不缓存/静态资源强缓存 |
+| `manifest.json` | PWA 配置 |
+| `.gitignore` | 排除 dist/sync_data/历史对话/等 |
 
-### 4. **admin.html** - 管理端页面
-- **作用**：管理员/总部使用的主界面
-- **功能**：
-  - 数据同步管理
-  - 订货状态管理
-  - 员工账号管理
-  - 门店管理
-  - 数据统计和导出
+## 🔵 部署镜像目录
 
----
-
-## 📂 static/ - 静态资源目录
-
-### 📂 static/css/
-- **style.css** - 全局样式文件
-  - 包含所有页面的样式定义
-  - 响应式布局
-  - 移动端适配
-
-### 📂 static/js/
-- **store.js** - 门店端业务逻辑
-  - 商品搜索功能
-  - 缺货上报
-  - 库存查询
-  - 本地数据缓存
-
-- **admin.js** - 管理端业务逻辑
-  - 数据同步功能
-  - 员工管理
-  - 订货状态管理
-  - 数据导出功能
-
-- **utils.js** - 通用工具函数
-  - 设备ID生成
-  - 数据格式化
-  - 网络请求封装
-  - localStorage 工具
-
-- **supabase-init.js** - Supabase 客户端初始化
-  - 初始化 Supabase 连接
-  - 配置认证信息
-
-- **fuse.min.js** - 轻量级模糊搜索库
-  - 用于商品搜索的模糊匹配
-
-### 📂 static/images/
-- **logo.jpg** - 公司 Logo
-- **icon-192.png** - PWA 图标（小）
-- **icon-512.png** - PWA 图标（大）
-
-### 📄 static/sw.js - Service Worker
-- **作用**：PWA 离线支持
-- **功能**：
-  - 缓存静态资源
-  - 支持离线访问
-  - 后台数据同步
+| 目录 | 说明 |
+|------|------|
+| `deploy/` | 与源文件同步的镜像目录，用于 Cloudflare Pages 部署时的备用引用 |
 
 ---
 
-## 📂 supabase/ - Supabase 云函数
+## 🗂️ SQL 脚本分类
 
-### 📂 supabase/functions/
-Supabase Edge Functions，用于处理后端逻辑
+| 类别 | 文件 |
+|------|------|
+| 建表 | `create_admin_users.sql`, `create_order_feedback_objects.sql`, `create_status_changelog.sql` |
+| 存储过程修复 | `fix_auto_detect_arrival.sql`, `fix_sync_spfxb_result.sql` |
+| 员工管理 | `batch_add_employees.sql`, `employee_pwa_upgrade.sql` |
+| 性能优化 | `create_product_cache_rqzt.sql`, `fix_duplicates_before_upsert.sql`, `optimize_upsert_cache.sql`, `optimization_v3.18.6.sql` |
+| 索引检查 | `check_spfxb_index.sql` |
 
-#### query-shortage-data/
-- **index.ts** - 核心业务逻辑
-  - 用户登录认证
-  - 商品数据查询
-  - 库存数据查询
-  - 订货状态管理
-  - SQL Server 数据库连接
+## 📂 vba/ 目录
 
-#### order-management/
-- **index.ts** - 订单管理功能
-  - 订单创建
-  - 订单查询
-  - 订单状态更新
-
-#### scheduled-task/
-- **index.ts** - 定时任务
-  - 数据自动同步
-  - 定时清理缓存
-
-#### check-update/
-- **index.ts** - 更新检查（Electron用）
-  - 检查应用更新
-  - 返回版本信息
-
-### 📂 supabase/.temp/
-- **cli-latest** - Supabase CLI 版本信息
-- **linked-project.json** - 项目链接配置
+存放 Excel/Access 中使用的 VBA 宏，用于生成分析报表、回写订货数量等。不随前端一起部署。
 
 ---
 
-## 📂 sql/ - SQL 脚本目录
+## 📝 注意事项
 
-存放用于业务数据库的 SQL 脚本
-
-### create_admin_users.sql
-- **作用**：创建管理员表结构
-- **说明**：用于创建 store_employees 和 admin_users 表
-
-### create_order_feedback_objects.sql
-- **作用**：创建订货反馈相关表
-- **说明**：用于订单状态跟踪和反馈
-
-### employee_pwa_upgrade.sql
-- **作用**：员工表升级脚本
-- **说明**：为员工表添加 PWA 相关字段
-
-### fix_admin_users_fk.sql
-- **作用**：修复外键关系
-- **说明**：修复 admin_users 表的外键约束
-
----
-
-## 📂 vba/ - VBA 脚本目录
-
-存放在业务系统（Access/Excel）中使用的 VBA 代码
-
-### 上传订货_ODBC.bas
-- **作用**：通过 ODBC 将订货数据上传到业务系统
-- **说明**：门店端使用 VBA 脚本上传订货数据
-
-### 商品分析表SPFXB_ODBC版.bas
-- **作用**：生成缺货分析报表（ODBC版）
-- **说明**：通过 ODBC 连接从业务系统获取数据
-
-### 商品分析表SPFXB_完整版.bas
-- **作用**：完整版商品分析报表
-- **说明**：包含所有功能的完整版 VBA 脚本
-
-### 回写实际订货.bas
-- **作用**：回写实际订货数量
-- **说明**：将实际订货数据写回业务系统
-
-### 回写订货数量.bas
-- **作用**：批量回写订货数量
-- **说明**：批量处理订货数据回写
-
-### ProgressBarForm.frm
-- **作用**：进度条窗体
-- **说明**：VBA 中的进度条 UI 组件
-
-### README.md
-- **作用**：VBA 脚本使用说明
-- **说明**：详细的使用指南和注意事项
-
----
-
-## 📂 dist/ - 打包输出目录
-
-Electron 打包工具的输出目录
-
-### 📂 dist/win-unpacked/
-- **作用**：未打包的 Windows 便携版
-- **包含**：
-  - WSZH-ShortageStore.exe - 主程序
-  - 所有依赖的 DLL 文件
-  - Chrome 运行时文件
-  - static/ - 应用资源
-
-### *.nsis.7z 文件
-- **作用**：NSIS 安装包压缩包
-- **说明**：用于分发的安装包
-
-### builder-*.yml
-- **作用**：electron-builder 配置文件
-- **说明**：打包过程的配置文件
-
----
-
-## 📂 backups/ - 备份目录
-
-### 📂 backups/v3.11_20260517_before_optimization/
-- **作用**：v3.11 版本备份
-- **包含**：优化前的代码版本
-
-### 📂 backups/v3.13_20260518_P0_P1_optimization/
-- **作用**：v3.13 版本备份
-- **包含**：P0/P1 优化后的代码版本
-
----
-
-## ⚙️ 配置文件
-
-### package.json
-- **作用**：Node.js 项目配置
-- **包含**：
-  - 项目依赖
-  - 打包配置
-  - Electron-builder 配置
-  - 脚本命令
-
-### package-lock.json
-- **作用**：npm 依赖锁定文件
-- **说明**：确保依赖版本一致
-
-### package-store.json
-- **作用**：Windows Store 配置（可选）
-
-### manifest.json
-- **作用**：PWA 应用清单
-- **包含**：
-  - 应用名称
-  - 图标
-  - 主题颜色
-  - 启动URL
-
-### _headers
-- **作用**：Cloudflare Pages HTTP 头配置
-- **说明**：配置 CORS、安全头等
-
-### .npmrc
-- **作用**：npm 配置文件
-- **说明**：配置 npm 镜像加速
-
-### electron-main.js
-- **作用**：Electron 主进程入口
-- **说明**：桌面应用的入口文件
-
-### preload.js
-- **作用**：Electron 预加载脚本
-- **说明**：安全地暴露 Node.js API 给渲染进程
-
-### sync_data.py
-- **作用**：Python 数据同步脚本
-- **说明**：用于定时同步数据到云端
-
----
-
-## 🔧 辅助工具
-
-### create_ppt.js
-- **作用**：生成 PowerPoint 报表
-- **说明**：自动生成数据分析 PPT
-
-### 打包门店端.bat
-- **作用**：Windows 批处理脚本
-- **说明**：一键打包 Electron 应用
-
-### 自动更新部署指南.md
-- **作用**：自动更新配置指南
-- **说明**：详细说明如何配置自动更新
-
-### 打包完成说明.md
-- **作用**：打包说明文档
-- **说明**：打包工具的使用说明
-
----
-
-## 📊 文件重要性分类
-
-### 🔴 核心文件（必须保留）
-```
-index.html
-login.html
-store.html
-admin.html
-static/
-manifest.json
-package.json
-```
-
-### 🟡 重要文件（建议保留）
-```
-supabase/functions/
-sql/
-_headers
-package-lock.json
-```
-
-### 🟢 可选文件（可删除）
-```
-vba/              # 如不使用 VBA 功能
-backups/          # 旧版本备份
-dist/             # 打包输出（可重新生成）
-```
-
-### ⚪ 其他文件
-```
-项目总结报告.md    # 项目文档
-完整历史分析报告.md
-修改完成说明.md
-```
-
----
-
-## 🚀 快速清理建议
-
-如果需要精简项目，可以删除以下文件：
-
-```bash
-# 删除备份和打包输出
-rd /s /q backups
-rd /s /q dist
-rd /s /q supabase\.temp
-
-# 删除 VBA（如果不使用）
-rd /s /q vba
-
-# 删除文档（可选）
-del *总结*.md
-del *说明*.md
-```
-
----
-
-## 📝 备注
-
-- **static/** 目录必须完整上传到 Cloudflare Pages
-- **supabase/** 目录的代码通过 Supabase CLI 单独部署
-- **vba/** 和 **sql/** 用于业务系统，不需要上传到云端
-- **dist/** 是打包输出，门店安装时使用，不需要上传到 Cloudflare Pages
+- **static/** 目录 HTML/JS/CSS 上传到 Cloudflare Pages 展示
+- **supabase/functions/** 通过 `npx supabase functions deploy` 单独部署
+- **sql/** 和 **vba/** 在 SSMS/Excel 中手动执行，不上传云端
+- **dist/** 是 Electron 打包输出（`npx electron-builder`），已入 `.gitignore`
+- **deploy/** 是源文件镜像目录，与源文件保持一致
