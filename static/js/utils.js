@@ -8,6 +8,22 @@ var SUPABASE_URL = "https://qswpgnnedqvuegwfbprd.supabase.co";
 var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzd3Bnbm5lZHF2dWVnd2ZicHJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3Mjc0NjEsImV4cCI6MjA5NDMwMzQ2MX0.mY_nlWoHc5UYDHB9jOif0zkYJ2OVx79KTgejcSGkhBI";
 var EDGE_FUNCTION_URL = SUPABASE_URL + "/functions/v1/query-shortage-data";
 
+// ========== 补货状态定义（统一入口，全局唯一）==========
+var ORDER_STATUSES = ['待处理', '配货中', '已订购', '已到货', '已完成', '待付款', '厂家断货'];
+var STATUS_BADGE_CLASS = {
+    '待处理': 'replenish-pending',
+    '配货中': 'replenish-in-transit', 
+    '已订购': 'replenish-ordered',
+    '已到货': 'replenish-arrived',
+    '已完成': 'replenish-completed',
+    '待付款': 'replenish-payment',
+    '厂家断货': 'replenish-outstock'
+};
+// 判断是否为完成状态（归入已完成折叠区）
+window.isCompletedStatus = function(status) {
+    return status === '已完成' || status === '厂家断货';
+};
+
 // ========== 设备指纹（统一实现）==========
 function getDeviceId() {
     var key = 'wszh_device_id_v2';  // v2: 修正同配置设备指纹相同的问题

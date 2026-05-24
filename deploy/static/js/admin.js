@@ -487,11 +487,7 @@ function getUrgencyBadge(level) {
     else cls += 'urgency-normal';
     return '<span class="' + cls + '">' + (level || '普通') + '</span>';
 }
-
-// 是否视为已完成（已完成 + 厂家断货）
-function isCompletedStatus(status) {
-    return status === '已完成' || status === '厂家断货';
-}
+// isCompletedStatus 已统一定义在 utils.js 中
 
 function getReplenishBadge(status) {
     var cls = 'replenish-badge ';
@@ -810,8 +806,7 @@ function renderSummaryPage() {
         var statusDisplay;
         if (canEdit) {
             var statusOptions = '';
-            var statuses = ['待处理', '配货中', '已订购', '已到货', '已完成', '待付款', '厂家断货'];
-            statuses.forEach(function(s) {
+            ORDER_STATUSES.forEach(function(s) {
                 statusOptions += '<option value="' + s + '"' + (p.replenish_status === s ? ' selected' : '') + '>' + s + '</option>';
             });
             statusDisplay = '<select class="status-select" data-status="' + p.replenish_status + '" data-product-code="' + safeText(p.product_code) + '" onchange="updateReplenishStatus(this)">' + statusOptions + '</select>';
@@ -899,8 +894,7 @@ function renderCompletedSection() {
         
         // 已完成区也允许改回其他状态
         var statusOptions = '';
-        var statuses = ['待处理', '配货中', '已订购', '已到货', '已完成', '待付款', '厂家断货'];
-        statuses.forEach(function(s) {
+        ORDER_STATUSES.forEach(function(s) {
             statusOptions += '<option value="' + s + '"' + (p.replenish_status === s ? ' selected' : '') + '>' + s + '</option>';
         });
         var statusDisplay = '<select class="status-select" data-status="' + p.replenish_status + '" data-product-code="' + safeText(p.product_code) + '" onchange="updateReplenishStatus(this)">' + statusOptions + '</select>';

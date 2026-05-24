@@ -1048,13 +1048,7 @@ serve(async (req) => {
             
             const records = resultSet.recordset || [];
             if (records.length > 0) {
-              // 清空旧缓存再全量插入
-              await supabase
-                .from("shortage_storestock_cache")
-                .delete()
-                .neq('product_code', '');
-              
-              // 分批插入
+              // 增量 UPSERT：有则更新，无则插入，消除 DELETE→INSERT 之间的数据空窗期
               const batchSize = 200;
               for (let i = 0; i < records.length; i += batchSize) {
                 const batch = records.slice(i, i + batchSize).map((r: any) => ({
@@ -1072,11 +1066,11 @@ serve(async (req) => {
                   last_updated: new Date().toISOString()
                 }));
                 
-                const { error: insertErr } = await supabase
+                const { error: upsertErr } = await supabase
                   .from("shortage_storestock_cache")
-                  .insert(batch);
+                  .upsert(batch, { onConflict: 'product_code,store_name' });
                 
-                if (!insertErr) supabaseSyncCount += batch.length;
+                if (!upsertErr) supabaseSyncCount += batch.length;
               }
             }
             console.log(`[sync_with_auto_status] Supabase缓存已更新，共 ${supabaseSyncCount} 条`);

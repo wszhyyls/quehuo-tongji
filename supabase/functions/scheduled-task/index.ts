@@ -194,7 +194,7 @@ async function syncPurchasePlan(): Promise<{ success: boolean; message: string; 
       
       const records = resultSet.recordset || [];
       if (records.length > 0) {
-        await supabase.from("shortage_storestock_cache").delete().neq('product_code', '');
+        // 增量 UPSERT，消除全量清空的空窗期
         const batchSize = 300;
         for (let i = 0; i < records.length; i += batchSize) {
           const batch = records.slice(i, i + batchSize).map((r: any) => ({
@@ -204,8 +204,9 @@ async function syncPurchasePlan(): Promise<{ success: boolean; message: string; 
             sales_30days: r.sales_30days, standard_stock: r.standard_stock,
             store_plan: r.store_plan, last_updated: new Date().toISOString()
           }));
-          const { error: insertErr } = await supabase.from("shortage_storestock_cache").insert(batch);
-          if (!insertErr) supabaseSynced += batch.length;
+          const { error: upsertErr } = await supabase.from("shortage_storestock_cache")
+            .upsert(batch, { onConflict: 'product_code,store_name' });
+          if (!upsertErr) supabaseSynced += batch.length;
         }
       }
       console.log(`[定时任务] Supabase缓存已更新 ${supabaseSynced} 条`);
