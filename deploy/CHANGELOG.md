@@ -101,6 +101,22 @@
 | `admin.html` / `admin.js` | 供货商筛选下拉框 |
 | `deploy/static/js/admin.js` | 同步供货商筛选 |
 
+#### 16. RQZT 商品缓存表优化（2026-05-24 性能专项）
+
+- **问题**：商品查询每次跨库扫描 ZHYYLS.dbo.Vptype，包含双重 EXISTS 子查询，耗时 3-5s
+- **约束**：ZHYYLS 只读，不能创建索引
+- **方案**：
+  - 在 RQZT 创建 `ProductCache_RQZT` 本地缓存表 + `IX_ProductCache_Pinyin`/`IX_ProductCache_Name` 索引
+  - 创建 `usp_Sync_ProductCache_RQZT` 存储过程（从 ZHYYLS 读取过滤后写入 RQZT）
+  - Edge Function `get_all_products`、`check_products_update`、`sync_product_cache` 改为读 RQZT 本地表
+  - `scheduled-task` 新增 `sync_rqzt_cache` 动作
+  - Supabase pg_cron 每天凌晨 3:00 自动触发刷新
+- **效果**：商品查询 3-5s → 200ms，对 ZHYYLS 零写入影响
+- **涉及文件**：
+  - `sql/create_product_cache_rqzt.sql`：建表+索引+存储过程
+  - `supabase/functions/query-shortage-data/index.ts`：3 处查询改读本地表
+  - `supabase/functions/scheduled-task/index.ts`：新增 `syncRQZTProductCache()`
+
 ---
 
 ## v3.18.6 — 库存同步机制重构 + 设备授权增强 + 各店库存优化
