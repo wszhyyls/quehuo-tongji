@@ -491,32 +491,40 @@
             el.textContent = msg; el.style.display = 'block';
         }
         function hideError() { document.getElementById('error').style.display = 'none'; }
-    </script>
-    <style>
-        @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+        
         // ========== 页面加载时检查版本更新 ==========
         (function checkVersionUpdate() {
             try {
-                var versionEl = document.querySelector('.version-info');
-                var currentVer = versionEl ? versionEl.textContent.replace('V','').trim() : '0.0.0';
+                var checkPromise;
+                if (window.electron && window.electron.ipcRenderer) {
+                    checkPromise = window.electron.ipcRenderer.invoke('get-app-version');
+                } else {
+                    var versionEl = document.querySelector('.version-info');
+                    checkPromise = Promise.resolve(versionEl ? versionEl.textContent.replace('V','').trim() : '0.0.0');
+                }
                 
-                fetch(SUPABASE_URL + '/functions/v1/check-update', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY },
-                    body: JSON.stringify({ version: currentVer })
-                }).then(function(r) { return r.json(); }).then(function(r) {
-                    if (r.success && r.data && r.data.updateAvailable) {
-                        var banner = document.getElementById('updateBanner');
-                        var msg = document.getElementById('updateBannerMsg');
-                        var btn = document.getElementById('updateBannerBtn');
-                        msg.textContent = '🔔 发现新版本 V' + r.data.version + '，建议更新后使用！';
-                        btn.dataset.url = r.data.downloadUrl;
-                        btn.textContent = '下载 V' + r.data.version;
-                        banner.style.display = 'block';
-                    }
+                checkPromise.then(function(currentVer) {
+                    return fetch(SUPABASE_URL + '/functions/v1/check-update', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY },
+                        body: JSON.stringify({ version: currentVer })
+                    }).then(function(r) { return r.json(); }).then(function(r) {
+                        if (r.success && r.data && r.data.updateAvailable) {
+                            var banner = document.getElementById('updateBanner');
+                            var msg = document.getElementById('updateBannerMsg');
+                            var btn = document.getElementById('updateBannerBtn');
+                            msg.textContent = '🔔 发现新版本 V' + r.data.version + '，建议更新后使用！（当前版本 V' + currentVer + '）';
+                            btn.dataset.url = r.data.downloadUrl;
+                            btn.textContent = '下载 V' + r.data.version;
+                            banner.style.display = 'block';
+                        }
+                    });
                 }).catch(function() {});
             } catch(e) {}
         })();
+    </script>
+    <style>
+        @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
         .login-card input, .login-card select { touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
         .login-select { width:100%; padding:12px 16px; font-size:16px; border:1px solid #ddd; border-radius:8px; background:#fff; color:#333; appearance:none; -webkit-appearance:none; cursor:pointer; }
         .login-input { width:100%; padding:12px 16px; font-size:16px; border:1px solid #ddd; border-radius:8px; box-sizing:border-box; }
