@@ -199,7 +199,7 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                  SQL Server（业务数据源）                             │
-│  服务器：121.229.175.49:1290  账套：RQZT                            │
+│  服务器：(内网地址)  端口：1290  账套：RQZT                          │
 │  ┌──────────────────┐  ┌───────────────────┐                       │
 │  │ RQZT.dbo.        │  │ ZHYYLS.dbo.       │                       │
 │  │ SPFXB_Result     │  │ Vptype（商品主表） │                       │
@@ -408,7 +408,7 @@ SPFXB_Result 更新为最新
 | `name` | TEXT | 姓名 |
 | `store_id` | TEXT | 所属门店 |
 | `store_name` | TEXT | 门店名称 |
-| `password` | TEXT | 密码（默认 `wszh123456`） |
+| `password` | TEXT | 密码（加密存储，默认值由环境变量配置） |
 | `is_active` | BOOLEAN | 是否启用 |
 
 #### `store_authorized_devices` 设备授权表
@@ -729,7 +729,7 @@ npx wrangler pages deploy . --project-name=wszhyy --branch=main
 | `SQL_SERVER_USER` | SQL Server 用户名 |
 | `SQL_SERVER_PASSWORD` | SQL Server 密码 |
 | `SQL_SERVER_DATABASE` | 数据库名称（RQZT） |
-| `DEFAULT_EMPLOYEE_PASSWORD` | 员工默认密码（wszh123456） |
+| `DEFAULT_EMPLOYEE_PASSWORD` | 员工默认密码（由环境变量配置，勿硬编码） |
 
 ### 8.3 配置文件
 
