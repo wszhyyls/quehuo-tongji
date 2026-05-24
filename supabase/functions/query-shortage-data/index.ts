@@ -430,91 +430,52 @@ serve(async (req) => {
           break;
         }
         
-        // 直接从 SQL Server 获取，绕过 Supabase 1000条限制
-        const poolZHYYLS = await getPool();
+        // 从 RQZT 本地缓存表获取商品（避免跨库全表扫描 ZHYYLS，3-5s → 200ms）
+        const poolRQZT = await getPool();
         try {
-          const productsResult = await poolZHYYLS.request()
+          const productsResult = await poolRQZT.request()
             .query(`SELECT
-                    LTRIM(RTRIM(ISNULL(a.USERCODE, ''))) as product_code,
-                    LTRIM(RTRIM(ISNULL(a.FullName, ''))) as product_name,
-                    LTRIM(RTRIM(ISNULL(a.Standard, ''))) as product_spec,
-                    LTRIM(RTRIM(ISNULL(b.FullName, ''))) as manufacturer,
-                    LTRIM(RTRIM(ISNULL(a.PYZJM, ''))) as pinyin_code
-                    FROM ZHYYLS.dbo.Vptype a WITH (NOLOCK)
-                    LEFT JOIN ZHYYLS.dbo.cstype b WITH (NOLOCK) ON a.area = b.rec
-                    WHERE a.leveal = '3'
-                      AND (
-                        EXISTS (
-                          SELECT 1 FROM ZHYYLS.dbo.Vsalebill s WITH (NOLOCK)
-                          JOIN ZHYYLS.dbo.Vbillindex i WITH (NOLOCK) ON s.billid = i.billid
-                          WHERE s.prec = a.rec
-                            AND i.billdate >= DATEADD(year, -1, GETDATE())
-                            AND i.BillType IN ('101', '102', '103', '104', '105')
-                        )
-                        OR EXISTS (
-                          SELECT 1 FROM ZHYYLS.dbo.GoodsStocks gs WITH (NOLOCK)
-                          WHERE gs.prec = a.rec
-                            AND gs.qty > 0
-                        )
-                      )
-                    ORDER BY a.USERCODE`);
+                    product_code,
+                    product_name,
+                    spec as product_spec,
+                    manufacturer,
+                    pinyin_code
+                    FROM dbo.ProductCache_RQZT WITH (NOLOCK)
+                    ORDER BY product_code`);
           
-          // 去重（以USERCODE为准）
-          const productMap = new Map();
-          productsResult.recordset.forEach(p => {
-            const code = p.product_code ? p.product_code.trim() : '';
-            if (code !== '' && !productMap.has(code)) {
-              productMap.set(code, {
-                product_code: code,
-                product_name: p.product_name || '',
-                product_spec: p.product_spec || '',
-                manufacturer: p.manufacturer || '',
-                pinyin_code: (p.pinyin_code || '').trim().toLowerCase(),
-              });
-            }
-          });
+          // 映射为统一格式
+          result = productsResult.recordset.map(p => ({
+            product_code: (p.product_code || '').trim(),
+            product_name: p.product_name || '',
+            product_spec: p.product_spec || '',
+            manufacturer: p.manufacturer || '',
+            pinyin_code: (p.pinyin_code || '').trim().toLowerCase(),
+          }));
           
-          result = Array.from(productMap.values());
           memCacheSet(productCacheKey, result); // 存入L2缓存
-          console.log(`✅ get_all_products 返回 ${result.length} 个商品（已缓存）`);
+          console.log(`✅ get_all_products 返回 ${result.length} 个商品（RQZT缓存表）`);
         } finally {
-          releasePool(poolZHYYLS);
+          releasePool(poolRQZT);
         }
         break;
       }
 
       // ========== 检查商品列表是否有更新 ==========
       case "check_products_update": {
-        // 返回当前商品总数和最后更新时间，用于前端判断是否需要更新
-        const poolZHYYLS = await getPool();
+        // 从 RQZT 缓存表查询商品总数（避免跨库全表扫描 ZHYYLS）
+        const poolRQZT = await getPool();
         try {
-          const countResult = await poolZHYYLS.request()
-            .query(`SELECT COUNT(DISTINCT a.USERCODE) as product_count
-                    FROM ZHYYLS.dbo.Vptype a WITH (NOLOCK)
-                    WHERE a.leveal = '3'
-                      AND (
-                        EXISTS (
-                          SELECT 1 FROM ZHYYLS.dbo.Vsalebill s WITH (NOLOCK)
-                          JOIN ZHYYLS.dbo.Vbillindex i WITH (NOLOCK) ON s.billid = i.billid
-                          WHERE s.prec = a.rec
-                            AND i.billdate >= DATEADD(year, -1, GETDATE())
-                            AND i.BillType IN ('101', '102', '103', '104', '105')
-                        )
-                        OR EXISTS (
-                          SELECT 1 FROM ZHYYLS.dbo.GoodsStocks gs WITH (NOLOCK)
-                          WHERE gs.prec = a.rec
-                            AND gs.qty > 0
-                        )
-                      )`);
+          const countResult = await poolRQZT.request()
+            .query(`SELECT COUNT(1) as product_count FROM dbo.ProductCache_RQZT WITH (NOLOCK)`);
           
           const currentCount = countResult.recordset[0]?.product_count || 0;
           result = {
             product_count: currentCount,
             last_update: new Date().toISOString()
           };
-          console.log(`✅ check_products_update 当前商品数: ${currentCount}`);
+          console.log(`✅ check_products_update 当前商品数: ${currentCount} (RQZT缓存表)`);
         } finally {
-          releasePool(poolZHYYLS);
+          releasePool(poolRQZT);
         }
         break;
       }
@@ -1194,52 +1155,31 @@ serve(async (req) => {
           
           // 修复：获取 USERCODE（商品条码，原业务系统使用的编码，如 0002100277）
           // product_cache 表只有 product_code 列，所以将 USERCODE 存入 product_code
-          // 优化：只同步"近1年有销售"或"有库存"的商品，大幅减少商品数量
+          // 从 RQZT 本地缓存表读取（数据已由 usp_Sync_ProductCache_RQZT 过滤好，避免跨库全表扫描）
           const productsResult = await poolZHYYLS.request()
             .query(`SELECT
-                    LTRIM(RTRIM(ISNULL(a.USERCODE, ''))) as USERCODE,
-                    LTRIM(RTRIM(ISNULL(a.typeId, ''))) as typeId,
-                    LTRIM(RTRIM(ISNULL(a.FullName, ''))) as 商品名称,
-                    LTRIM(RTRIM(ISNULL(a.Standard, ''))) as 规格,
-                    LTRIM(RTRIM(ISNULL(b.FullName, ''))) as 生产企业,
-                    LTRIM(RTRIM(ISNULL(a.PYZJM, ''))) as 拼音助记码
-                    FROM ZHYYLS.dbo.Vptype a WITH (NOLOCK)
-                    LEFT JOIN ZHYYLS.dbo.cstype b WITH (NOLOCK) ON a.area = b.rec
-                    WHERE a.leveal = '3'
-                      AND (
-                        -- 近1年有销售记录的商品（放宽BillType限制）
-                        EXISTS (
-                          SELECT 1 FROM ZHYYLS.dbo.Vsalebill s WITH (NOLOCK)
-                          JOIN ZHYYLS.dbo.Vbillindex i WITH (NOLOCK) ON s.billid = i.billid
-                          WHERE s.prec = a.rec
-                            AND i.billdate >= DATEADD(year, -1, GETDATE())
-                        )
-                        -- 或有库存的商品（任意门店）
-                        OR EXISTS (
-                          SELECT 1 FROM ZHYYLS.dbo.GoodsStocks gs WITH (NOLOCK)
-                          WHERE gs.prec = a.rec
-                            AND gs.qty > 0
-                        )
-                      )
-                    ORDER BY a.USERCODE`);
+                    product_code,
+                    product_name,
+                    spec as product_spec,
+                    manufacturer,
+                    pinyin_code
+                    FROM dbo.ProductCache_RQZT WITH (NOLOCK)
+                    ORDER BY product_code`);
           
-          console.log(`✅ 从 Vptype 获取到 ${productsResult.recordset.length} 个商品`);
+          console.log(`✅ 从 RQZT 缓存表获取到 ${productsResult.recordset.length} 个商品`);
           
-          // 构建商品列表：优先使用 USERCODE 存入 product_code（与原业务系统编码一致）
+          // 构建商品列表
           const productMap = new Map();
           productsResult.recordset.forEach(p => {
-            // 优先使用 USERCODE（商品条码），这是原业务系统使用的编码
-            const productCode = p.USERCODE && p.USERCODE.trim() !== '' 
-              ? p.USERCODE.trim() 
-              : (p.typeId ? p.typeId.trim() : '');
+            const productCode = (p.product_code || '').trim();
             
             if (productCode !== '' && !productMap.has(productCode)) {
               productMap.set(productCode, {
                 product_code: productCode,
-                product_name: p.商品名称 || '',
-                product_spec: p.规格 || '',
-                manufacturer: p.生产企业 || '',
-                pinyin_code: (p.拼音助记码 || '').trim().toLowerCase(),
+                product_name: p.product_name || '',
+                product_spec: p.product_spec || '',
+                manufacturer: p.manufacturer || '',
+                pinyin_code: (p.pinyin_code || '').trim().toLowerCase(),
               });
             }
           });
