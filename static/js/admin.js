@@ -504,7 +504,8 @@ function getReplenishBadge(status) {
 }
 
 // ========== Edge Function 调用（异常统一处理）==========
-async function callEdgeFunction(action, params) {
+async function callEdgeFunction(action, params, retryCount) {
+    retryCount = retryCount || 0;
     try {
         var resp = await fetch(EDGE_FUNCTION_URL, {
             method: 'POST',
@@ -513,6 +514,28 @@ async function callEdgeFunction(action, params) {
         });
         var respBody = await resp.json().catch(function() { return {}; });
         if (!resp.ok) {
+            // JWT过期时自动刷新token并重试一次
+            if ((resp.status === 401 || resp.status === 403) && retryCount === 0 && supabase) {
+                console.log('[AutoRelogin] 检测到token过期，尝试自动续期...');
+                try {
+                    var { data: sessionData, error: refreshError } = await supabase.auth.refreshSession();
+                    if (sessionData && sessionData.session) {
+                        token = sessionData.session.access_token;
+                        localStorage.setItem('token', token);
+                        console.log('[AutoRelogin] token续期成功，重试请求');
+                        return await callEdgeFunction(action, params, retryCount + 1);
+                    } else {
+                        console.warn('[AutoRelogin] 续期失败:', refreshError);
+                    }
+                } catch(e) {
+                    console.warn('[AutoRelogin] 续期异常:', e.message);
+                }
+                alert('登录已过期，请重新登录');
+                localStorage.removeItem('token');
+                localStorage.removeItem('user');
+                window.location.href = './login.html';
+                return { success: false, error: '登录已过期，请重新登录' };
+            }
             var errMsg = respBody.error || respBody.message || ('请求失败: ' + resp.status);
             throw new Error(errMsg);
         }
