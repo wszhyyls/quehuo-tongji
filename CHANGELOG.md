@@ -117,6 +117,34 @@
   - `supabase/functions/query-shortage-data/index.ts`：3 处查询改读本地表
   - `supabase/functions/scheduled-task/index.ts`：新增 `syncRQZTProductCache()`
 
+#### 17. 库存缓存增量 UPSERT（2026-05-24）
+
+- **问题**：`sync_with_auto_status` 和 `scheduled-task` 每次全量 `DELETE` + `INSERT`，存在 3-5 秒数据空窗期
+- **方案**：
+  - Supabase `shortage_storestock_cache` 表创建 `(product_code, store_name)` 唯一约束
+  - 清理历史重复数据（`sql/fix_duplicates_before_upsert.sql`）
+  - 两处 Edge Function 改为 `.upsert(batch, { onConflict })`，有则更新无则插入
+- **效果**：消除同步空窗期，门店查询始终有数据
+- **涉及文件**：
+  - `sql/optimize_upsert_cache.sql`：唯一约束 DDL
+  - `sql/fix_duplicates_before_upsert.sql`：清理重复+建约束
+  - `supabase/functions/query-shortage-data/index.ts`：`sync_with_auto_status` 改为 UPSERT
+  - `supabase/functions/scheduled-task/index.ts`：`syncPurchasePlan` 改为 UPSERT
+
+#### 18. 状态定义统一（2026-05-24）
+
+- **问题**：补货状态数组在 `admin.js` 中出现 2 次、`store.js` 中出现多次，`isCompletedStatus` 也重复定义
+- **方案**：`ORDER_STATUSES` + `STATUS_BADGE_CLASS` + `isCompletedStatus` 统一定义在 `utils.js`，全局引用
+- **效果**：新增状态只需改一处，消除 3 处重复代码
+- **涉及文件**：
+  - `static/js/utils.js`：新增状态常量 + 徽章映射
+  - `static/js/admin.js`：移除本地定义，引用全局变量
+
+#### 19. Git 仓库精简（2026-05-24）
+
+- 新增 `.gitignore` 排除规则：`build.err`、`历史对话内容/`、`sync_data.py`、`打包完成说明.md`
+- 从远端移除已跟踪的非代码文件
+
 ---
 
 ## v3.18.6 — 库存同步机制重构 + 设备授权增强 + 各店库存优化
