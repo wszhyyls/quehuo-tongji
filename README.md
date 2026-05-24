@@ -332,7 +332,7 @@ SPFXB_Result 更新为最新
 查看历史 → Supabase reports + SQL Server 补货状态
 ```
 
-### 4.3 管理端数据流
+### 4.6 管理端数据流
 
 ```
 登录 → 角色+权限识别
@@ -455,7 +455,7 @@ SPFXB_Result 更新为最新
 
 | 存储过程 | 数据库 | 用途 | 调用方式 |
 |------|------|------|------|
-| **`SPFXB`** | RQZT | **核心**：从 ZHYYLS 实时表取数 → 写入 SPFXB_Result。@RefreshRanking=1 全量(含排名)，=0 增量 | Excel VBA 手动 |
+| **`SPFXB`** | RQZT | **核心**：从 ZHYYLS 实时表取数 → 写入 SPFXB_Result。@RefreshRanking=1 全量(含排名)，=0 增量 | 系统内调用 + Excel VBA 均可 |
 | `SPFXB_RefreshDerived` | RQZT | 刷新派生字段（标准差、安全库存、门店计划） | 确认值更新后触发 |
 | `usp_Sync_AllShortageCache` | RQZT | 调度器：依次调用3个子过程（搬运数据，不刷新源） | 定时任务/管理员同步 |
 | `usp_Sync_ShortageStoreStockCache` | RQZT | 子过程1：只统计行数（实际无写入逻辑） | 被父过程调用 |
@@ -512,7 +512,7 @@ SPFXB_Result 更新为最新
 | Action | 输入 | 输出 | 说明 |
 |--------|------|------|------|
 | `search_product` | `keyword` | 商品数组 | 拼音码精确+模糊匹配，Supabase product_cache |
-| `get_all_products` | 无 | 商品数组 | 全量从 SQL Server ZHYYLS.dbo.Vptype 获取 |
+| `get_all_products` | 无 | 商品数组 | 全量从 RQZT dbo.ProductCache_RQZT 缓存表获取（200ms） |
 | `check_products_update` | 无 | `{product_count}` | 检测商品数量变化 |
 
 #### 库存查询
@@ -681,8 +681,8 @@ queryProductByCode(code, forceRefresh)
   │
 刷新库存按钮
   ├─ preloadStoreInventory(true, true)  // force_refresh + sync_first
-  │   ├─ usp_Sync_AllShortageCache
-  │   └─ 从 SQL Server 查询最新数据
+  │   ├─ EXEC SPFXB @RefreshRanking=0（增量刷新 SPFXB_Result）
+  │   └─ 从 SQL Server SPFXB_Result 查询最新数据
   │
 各店库存弹窗
   ├─ get_product_detail（所有门店该商品数据）
@@ -715,10 +715,7 @@ cd "g:\Trae项目\缺货统计系统"
 npx supabase functions deploy query-shortage-data --project-ref qswpgnnedqvuegwfbprd
 
 # 部署前端到 Cloudflare Pages
-npx wrangler pages deploy deploy --project-name=wszhyy --commit-dirty=true
-
-# 一键部署（包含上面两步）
-cmd /c "一键部署.bat"
+npx wrangler pages deploy . --project-name=wszhyy --branch=main
 ```
 
 ### 8.2 环境变量（Supabase Edge Functions）
@@ -761,12 +758,12 @@ cmd /c "一键部署.bat"
 | 版本检测 | `supabase/functions/check-update/index.ts` | 返回最新版本号、更新日志、下载URL |
 | 客户端检测 | `electron-main.js` 的 `checkForUpdates()` | 启动后3秒自动检测；`UPDATE_FILES_URL` 指向 .exe 存放目录 |
 | 安装包托管 | GitHub Releases | 存放 `WSZH-ShortageStore Setup 3.19.0.exe` + `latest.yml` |
-| 打包配置 | `package.json` `publish.url` | 指向 `https://wszhyy.pages.dev/releases/` |
+| 打包配置 | `package.json` `publish.url` | 指向 GitHub Releases（通过 Edge Function 动态获取） |
 
 **发布新版本流程**：
 ```bash
 # 1. 打包（生成 .exe + latest.yml）
-打包门店端.bat
+npx electron-builder --win --c.directories.output=dist
 
 # 2. 上传到 GitHub Release（使用 gh CLI）
 gh release upload v3.19.0 "dist\WSZH-ShortageStore Setup 3.19.0.exe" "dist\WSZH-ShortageStore Setup 3.19.0.exe.blockmap" "dist\latest.yml" --clobber
@@ -832,9 +829,7 @@ ALTER TABLE reports DISABLE ROW LEVEL SECURITY;
 ├── manifest.json                 # PWA 清单
 ├── CHANGELOG.md                  # 版本更新日志
 ├── README.md                     # 本文档
-├── 一键部署.bat                   # 一键部署脚本
-├── 推送到GitHub.bat               # Git 推送脚本
-├── 打包门店端.bat                 # Electron 打包
+├── PROJECT_FILES_GUIDE.md        # 文件速查手册
 │
 ├── static/
 │   ├── css/style.css             # 全局样式（5套主题）
@@ -863,11 +858,14 @@ ALTER TABLE reports DISABLE ROW LEVEL SECURITY;
 │   ├── admin.html
 │   └── static/
 │
-├── sql/                          # SQL 脚本
-│   ├── create_admin_users.sql    # 子账号表+权限+RLS
-│   ├── create_order_feedback_objects.sql  # 订货反馈表+存储过程
-│   ├── employee_pwa_upgrade.sql  # 员工+设备+同步日志
-│   └── fix_admin_users_fk.sql    # 修复外键
+├── sql/                          # SQL 脚本（共21个）
+│   ├── create_product_cache_rqzt.sql   # RQZT 商品缓存表+存储过程
+│   ├── optimize_upsert_cache.sql       # Supabase 库存缓存唯一约束
+│   ├── fix_duplicates_before_upsert.sql# 清理重复+建约束
+│   ├── check_spfxb_index.sql           # SPFXB_Result 索引检查
+│   ├── create_admin_users.sql          # 子账号表+权限+RLS
+│   ├── create_order_feedback_objects.sql # 订货反馈表+存储过程
+│   └── ...
 │
 └── vba/                          # Excel VBA 批量回写
     ├── 商品分析表SPFXB_完整版.bas
@@ -902,10 +900,7 @@ cd "缺货统计系统"
 npx supabase functions deploy query-shortage-data --project-ref qswpgnnedqvuegwfbprd
 
 # 修改前端后
-npx wrangler pages deploy deploy --project-name=wszhyy --commit-dirty=true
-
-# 或一键
-cmd /c "一键部署.bat"
+npx wrangler pages deploy . --project-name=wszhyy --branch=main
 ```
 
 ### 第五步：查看日志
@@ -928,7 +923,7 @@ cmd /c "一键部署.bat"
 | ⭐ | 请求合并减少接口调用 | 初始化从4次请求→1次 | 新增 Edge Function `initialize` action |
 | ⭐ | 接口登录防刷 | 防暴力破解 | `store_login` 增加失败计数锁 |
 | ⭐ | ANON_KEY 统一管理 | 安全性提升 | 从 `utils.js` 单一定义 |
-| ⭐⭐ | 代码拆分 Edge Function | 1100行→每个模块<200行 | 按 auth/inventory/sync/devices 拆分 |
+| ⭐⭐ | 代码拆分 Edge Function | 3154行→每个模块<300行 | 按 auth/inventory/sync/devices 拆分 |
 | ⭐⭐ | 手机号脱敏 | 隐私保护 | 中间4位显示 `****` |
 | ⭐⭐ | 同步采购计划增加进度提示 | 用户体验 | 按钮改「同步中…①商品 ②库存 ③状态」 |
 | ⭐⭐⭐ | 管理后台增加待处理角标自动更新 | 减少刷新 | 定时30秒轮询更新角标 |
