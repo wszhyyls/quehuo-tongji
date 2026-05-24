@@ -223,7 +223,39 @@ async function syncPurchasePlan(): Promise<{ success: boolean; message: string; 
   }
 }
 
-// 完整同步（商品缓存 + 采购计划）
+// 刷新 RQZT 商品缓存表（从 ZHYYLS 同步到 RQZT 本地）
+async function syncRQZTProductCache(): Promise<{ success: boolean; message: string; count?: number; time_ms?: number; error?: string }> {
+  console.log('[定时任务] 开始刷新 RQZT 商品缓存表...');
+  const pool = await getPool();
+  const startTime = Date.now();
+  
+  try {
+    await pool.request().execute('usp_Sync_ProductCache_RQZT');
+    const elapsed = Date.now() - startTime;
+    console.log(`[定时任务] RQZT 商品缓存刷新完成，耗时 ${elapsed}ms`);
+    return { success: true, message: 'RQZT商品缓存刷新完成', time_ms: elapsed };
+  } catch (err) {
+    console.error('[定时任务] RQZT 商品缓存刷新失败:', err);
+    return { success: false, message: 'RQZT商品缓存刷新失败', error: String(err) };
+  } finally {
+    releasePool(pool);
+  }
+}
+
+// 完整同步（RQZT缓存 + 商品缓存 + 采购计划）
+async function fullSync(): Promise<{ success: boolean; rqztSync: any; productSync: any; planSync: any }> {
+  console.log('[定时任务] 开始完整同步...');
+  const rqztResult = await syncRQZTProductCache();
+  const productResult = await syncProductCache();
+  const planResult = await syncPurchasePlan();
+  
+  return {
+    success: rqztResult.success && productResult.success && planResult.success,
+    rqztSync: rqztResult,
+    productSync: productResult,
+    planSync: planResult
+  };
+}
 async function fullSync(): Promise<{ success: boolean; productSync: any; planSync: any }> {
   console.log('[定时任务] 开始完整同步...');
   const productResult = await syncProductCache();
@@ -304,8 +336,14 @@ serve(async (req) => {
     
     switch (action) {
       case "full_sync": {
-        // 完整同步：商品缓存 + 采购计划
+        // 完整同步：RQZT缓存 + 商品缓存 + 采购计划
         result = await fullSync();
+        break;
+      }
+      
+      case "sync_rqzt_cache": {
+        // 仅刷新 RQZT 商品缓存表
+        result = await syncRQZTProductCache();
         break;
       }
       
@@ -336,7 +374,7 @@ serve(async (req) => {
       default:
         return new Response(JSON.stringify({ 
           error: `未知操作: ${action}`,
-          available_actions: ["full_sync", "sync_product", "sync_plan", "get_logs", "health"]
+          available_actions: ["full_sync", "sync_rqzt_cache", "sync_product", "sync_plan", "get_logs", "health"]
         }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
