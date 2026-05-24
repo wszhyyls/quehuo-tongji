@@ -516,7 +516,8 @@
                             var msg = document.getElementById('updateBannerMsg');
                             var btn = document.getElementById('updateBannerBtn');
                             msg.textContent = '🔔 发现新版本 V' + r.data.version + '，建议更新后使用！（当前版本 V' + currentVer + '）';
-                            btn.dataset.url = r.data.downloadUrl;
+                            // 直接使用固定下载链接，不依赖 Edge Function 缓存
+                            btn.dataset.url = 'https://github.com/wszhyyls/quehuo-tongji/releases/latest';
                             btn.textContent = '下载 V' + r.data.version;
                             banner.style.display = 'block';
                         }
