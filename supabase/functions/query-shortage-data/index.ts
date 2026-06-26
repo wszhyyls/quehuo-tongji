@@ -2779,10 +2779,8 @@ serve(async (req) => {
           }
         }
         
-        // 自动判断状态：在途>0 → 配货中，否则 → 待处理
-        const inTransit = Number(reportData.in_transit) || 0;
-        const autoStatus = inTransit > 0 ? "配货中" : "待处理";
-        (reportData as any).replenish_status = autoStatus;
+        // v4.0：门店上报初始状态统一为待处理（同步采购计划时自动检测是否已完成）
+        (reportData as any).replenish_status = "待处理";
         
         const { data: inserted, error } = await supabase
           .from("reports")
@@ -3056,6 +3054,178 @@ serve(async (req) => {
           .eq("id", id);
         if (error) throw error;
         result = { success: true, message: "已删除" };
+        break;
+      }
+
+      case "log_admin_action": {
+        // 管理员操作日志（静默记录，不阻塞主流程）
+        const { user: logUser, action: logAction, detail: logDetail } = params;
+        console.log(`[admin_log] ${logUser} - ${logAction} ${logDetail || ''}`);
+        result = { success: true };
+        break;
+      }
+
+      case "get_approvals": {
+        const { data: approvals, error } = await supabase
+          .from("report_approvals")
+          .select("*")
+          .order("created_at", { ascending: false });
+        if (error) throw error;
+        result = approvals || [];
+        break;
+      }
+
+      case "approve_report": {
+        const { product_code: apc, status: aps, reason: apr, operator: apo } = params;
+        const { error } = await supabase
+          .from("report_approvals")
+          .upsert({
+            product_code: apc,
+            status: aps,
+            reason: apr || '',
+            operator: apo || '管理员',
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'product_code' });
+        if (error) throw error;
+        result = { success: true, message: `已${aps}` };
+        break;
+      }
+
+      case "delete_new_product": {
+        const { product_code: dpc, operator: dpo } = params;
+        const { error } = await supabase
+          .from("reports")
+          .delete()
+          .eq("product_code", dpc)
+          .eq("order_type", "新品订购");
+        if (error) throw error;
+        result = { success: true, message: "已删除" };
+        break;
+      }
+
+      case "get_summary": {
+        // 管理后台汇总查询：reports + plan + supplierLookup
+        const { data: reports } = await supabase
+          .from("reports")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(500);
+        
+        const pool = await getPool();
+        let planRecords: any[] = [];
+        let supplierLookup: Record<string, string> = {};
+        
+        try {
+          const req = pool.request()
+            .input("关键字", sql.NVarChar, null)
+            .input("状态筛选", sql.NVarChar, null)
+            .input("仅缺货", sql.Bit, 1)
+            .input("Top", sql.Int, 500);
+          const pResult = await req.execute("usp_GetPurchasePlanWithFeedback");
+          planRecords = (pResult.recordsets?.[0] || pResult.recordset || []).map(r => ({
+            "商品编码": r.商品编码 || "",
+            "商品名称": r.商品名称 || "",
+            "规格": r.规格 || "",
+            "生产企业": r.生产企业 || "",
+            "库存数量": r.库存数量 || 0,
+            "在途数量": r.在途数量 || 0,
+            "门店库存汇总": r.门店库存汇总 || 0,
+            "配送中心库存数量": r.配送中心库存数量 || 0,
+            "前30天销售数量": r.前30天销售数量 || 0,
+            "前90天销售数量": r.前90天销售数量 || 0,
+            "月均销售数量": r.月均销售数量 || 0,
+            "标准库存数量": r.标准库存数量 || 0,
+            "门店计划": r.门店计划 || 0,
+            "建议订货数量": r.建议订货数量 || 0,
+            "标记": r.标记 || "",
+            "类别": r.类别 || "",
+            "门店名称": r.门店名称 || "",
+            "补货状态": r.补货状态 || "",
+            "实际订货数量": r.实际订货数量 || 0,
+            "供货商": r.供货商 || r.供应商 || "",
+            "仓库库存": r.仓库库存 || r.配送中心库存数量 || 0,
+          }));
+          
+          // 补充供货商信息（Vptype.comment，全量拉取+归一化匹配）
+          function normalizeCode(code: string) {
+            return (code || '').trim().toUpperCase().replace(/^0+/, '');
+          }
+          if (planRecords.length > 0) {
+            try {
+              const suppResult = await pool.request().query(
+                `SELECT LTRIM(RTRIM(ISNULL(usercode, ''))) as 商品编码, LTRIM(RTRIM(ISNULL(comment, ''))) as 供货商 FROM ZHYYLS.dbo.Vptype WHERE comment IS NOT NULL AND comment != ''`
+              );
+              if (suppResult.recordset) {
+                suppResult.recordset.forEach(raw => {
+                  const rawCode = (raw.商品编码 || '').trim().toUpperCase();
+                  const norm = normalizeCode(rawCode);
+                  if (norm && !supplierLookup[norm]) supplierLookup[norm] = raw.供货商 || '';
+                  if (rawCode && !supplierLookup[rawCode]) supplierLookup[rawCode] = raw.供货商 || '';
+                });
+              }
+              let matchedCount = 0;
+              planRecords = planRecords.map(r => {
+                const rawKey = (r["商品编码"] || '').trim().toUpperCase();
+                const normKey = normalizeCode(rawKey);
+                const sup = supplierLookup[normKey] || supplierLookup[rawKey] || '';
+                if (sup) matchedCount++;
+                return { ...r, 供货商: sup };
+              });
+              console.log(`[供货商] Vptype共 ${Object.keys(supplierLookup).length} 家有备注，成功匹配 ${matchedCount}/${planRecords.length} 条`);
+            } catch (e) {
+              console.error('获取供货商信息失败:', e);
+            }
+          }
+        } finally {
+          releasePool(pool);
+        }
+        
+        result = { reports: reports || [], plan: [planRecords], supplierLookup };
+        break;
+      }
+
+      case "check_order_status": {
+        // 校验异常：检测商品是否已订购/已配送
+        const { product_codes, order_dates, store_pos_names } = params;
+        if (!product_codes || !Array.isArray(product_codes) || product_codes.length === 0) {
+          result = { buyMap: {}, sendMap: {} };
+          break;
+        }
+        try {
+          const pool = await getPool();
+          try {
+            // 查询已订购记录
+            const buyRes = await pool.request().query(`
+              SELECT 商品编码, 补货状态, 订货时间
+              FROM dbo.Shortage_OrderFeedback WITH (NOLOCK)
+              WHERE 商品编码 IN (${product_codes.map(c => `'${c.replace(/'/g, "''")}'`).join(',')})
+            `);
+            const buyMap: Record<string, string> = {};
+            (buyRes.recordset || []).forEach((r: any) => {
+              buyMap[r.商品编码] = r.订货时间 || r.补货状态 || 'Y';
+            });
+
+            // 查询已配送记录（有在途数据 = 已配送）
+            const sendRes = await pool.request().query(`
+              SELECT 商品编码, SUM(ISNULL(在途数量, 0)) AS 总在途
+              FROM dbo.SPFXB_Result WITH (NOLOCK)
+              WHERE 商品编码 IN (${product_codes.map(c => `'${c.replace(/'/g, "''")}'`).join(',')})
+              GROUP BY 商品编码
+              HAVING SUM(ISNULL(在途数量, 0)) > 0
+            `);
+            const sendMap: Record<string, string> = {};
+            (sendRes.recordset || []).forEach((r: any) => {
+              sendMap[r.商品编码] = r.总在途 > 0 ? 'Y' : '';
+            });
+
+            result = { buyMap, sendMap };
+          } finally {
+            releasePool(pool);
+          }
+        } catch (e) {
+          console.error('check_order_status 查询失败:', e);
+          result = { buyMap: {}, sendMap: {} };
+        }
         break;
       }
 

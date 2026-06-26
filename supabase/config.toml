@@ -1,0 +1,4 @@
+project_id = "qswpgnnedqvuegwfbprd"
+
+[functions.query-shortage-data]
+enabled = true

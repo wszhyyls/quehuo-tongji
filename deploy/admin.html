@@ -10,11 +10,11 @@
     <meta name="theme-color" content="#667eea">
 
     <title>微山县众和医药连锁有限公司 药品订购系统 - 管理后台</title>
-    <link rel="stylesheet" href="./static/css/style.css?v=26">
+    <link rel="stylesheet" href="./static/css/style.css?v=35">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="./static/js/utils.js?v=24"></script>
+    <script src="./static/js/utils.js?v=30"></script>
 </head>
-<body>
+<body class="admin-page">
     <div class="app-header">
         <div class="header-left">
             <img src="./static/logo.jpg" class="company-logo" alt="LOGO">
@@ -34,6 +34,7 @@
         <div class="order-tabs admin-tabs">
             <button class="tab-btn active" data-tab="summary">缺货汇总<span class="tab-badge" id="shortageBadge"></span></button>
             <button class="tab-btn" data-tab="new">新品汇总<span class="tab-badge" id="newBadge"></span></button>
+            <button class="tab-btn" onclick="window.open('procurement.html','_self')" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-weight:600;">采购记录</button>
             <button class="tab-btn" data-tab="employees">员工管理</button>
             <button class="tab-btn" data-tab="devices">设备授权</button>
             <button class="tab-btn" data-tab="users">门店管理</button>
@@ -47,41 +48,69 @@
                 <div class="stat-card"><span class="stat-value" id="totalCount">0</span><span class="stat-label">上报总数</span></div>
                 <div class="stat-card"><span class="stat-value" id="productCount">0</span><span class="stat-label">缺货品种</span></div>
                 <div class="stat-card"><span class="stat-value" id="storeCount">0</span><span class="stat-label">上报门店</span></div>
-            </div>
-            
-            <!-- 自动刷新设置 -->
-            <div class="auto-refresh-bar">
-                <span>自动刷新：</span>
-                <select id="autoRefreshInterval">
-                    <option value="0">关闭</option>
-                    <option value="30">30秒</option>
-                    <option value="60" selected>1分钟</option>
-                    <option value="300">5分钟</option>
-                    <option value="600">10分钟</option>
-                </select>
-                <span id="refreshIndicator" class="refresh-indicator" style="display:none;">● 自动刷新中</span>
+                <div class="stat-card"><span class="stat-value" id="pendingCount">0</span><span class="stat-label">待处理</span></div>
+                <div class="stat-card"><span class="stat-value" id="arrivedCount">0</span><span class="stat-label">已到货</span></div>
+                <div class="stat-card"><span class="stat-value" id="todayCount">0</span><span class="stat-label">今日上报</span></div>
             </div>
             
             <div class="list-card">
                 <div class="list-header">
                     <h2>缺货订购汇总</h2>
-                    <button id="syncPlanBtn" class="btn-search" style="margin-right:6px;background:var(--accent);">同步采购计划</button>
-                    <select id="supplierFilter" class="filter-select-sm" style="margin-right:6px;" onchange="applyStatusFilter()">
-                        <option value="">全部供货商</option>
+                    <div class="filter-bar">
+                        <!-- 统一筛选入口 -->
+                        <div class="excel-filter" id="supplierFilterWrap">
+                            <button class="excel-filter-trigger" onclick="toggleExcelFilter(event)">
+                                <span id="supplierFilterText">筛选</span><span class="excel-filter-arrow">▼</span>
+                            </button>
+                            <div class="excel-filter-panel" id="supplierFilterPanel" style="min-width:280px;max-height:480px;">
+                                <!-- ① 关键字搜索 -->
+                                <input type="text" id="supplierSearchInput" placeholder="搜索供货商..." class="excel-filter-search" oninput="onSupplierKeywordChange()">
+                                <!-- ② 供货商多选列表 -->
+                                <div class="excel-filter-list" id="supplierDropdown" style="max-height:180px;"></div>
+                                <div class="excel-filter-actions" style="border-top:none;padding-top:0;">
+                                    <button class="excel-filter-btn ok" onclick="applySupplierFilter()">确定</button>
+                                    <button class="excel-filter-btn cancel" onclick="cancelSupplierFilter()">取消</button>
+                                </div>
+                                <!-- ③ 高级筛选折叠区 -->
+                                <div style="border-top:1px solid var(--input-border);padding:6px 10px;">
+                                    <div onclick="toggleAdvSection()" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text-muted);">
+                                        <span>高级筛选 <span id="advCondCount" style="color:var(--accent);font-weight:600;"></span></span>
+                                        <span id="advToggleIcon" style="font-size:10px;">▼</span>
+                                    </div>
+                                    <div id="advSection" style="display:none;margin-top:6px;">
+                                        <div id="advFilterRows"></div>
+                                        <div style="margin-top:4px;">
+                                            <button id="advAddBtn" class="excel-filter-btn" style="font-size:11px;" onclick="addAdvFilterRow()">+ 添加条件</button>
+                                            <span style="font-size:11px;color:var(--text-muted);margin-left:4px;">AND</span>
+                                        </div>
+                                        <div style="display:flex;gap:4px;margin-top:6px;justify-content:flex-end;">
+                                            <button class="excel-filter-btn cancel" onclick="clearAdvFilter()" style="font-size:11px;">清除</button>
+                                            <button class="excel-filter-btn ok" onclick="applyAdvFilter()" style="font-size:11px;">应用</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <select id="statusFilter" class="filter-select-sm" onchange="applyStatusFilter()">
+                            <option value="">全部状态</option>
+                            <option value="待处理">待处理</option><option value="已订购">已订购</option>
+                            <option value="已完成">已完成</option><option value="待付款">待付款</option>
+                            <option value="厂家断货">厂家断货</option>
+                        </select>
+                        <button id="syncPlanBtn" class="btn-fbar" style="background:var(--accent);" title="同步商品缓存 → 同步库存数据 → 自动检测状态变更（仓库有货→已完成、库存/在途满足→已完成）">一键同步</button>
+                        <button id="checkOrderBtn" class="btn-fbar" style="background:#e74c3c;color:#fff;" title="检测当前筛选商品的入库状态：标记未入库、未配送的异常商品">检测入库状态</button>
+                        <button id="refreshBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" title="重新加载缺货汇总数据，不触发同步流程">刷新订购数据</button>
+                    <span style="font-size:12px;color:var(--text-muted);">自动刷新:</span>
+                    <select id="autoRefreshInterval" class="filter-select-sm" style="width:auto;">
+                        <option value="0">关闭</option>
+                        <option value="30">30秒</option>
+                        <option value="60" selected>1分钟</option>
+                        <option value="300">5分钟</option>
+                        <option value="600">10分钟</option>
                     </select>
-                    <select id="statusFilter" class="filter-select-sm" style="margin-right:6px;" onchange="applyStatusFilter()">
-                        <option value="">全部状态</option>
-                        <option value="待处理">待处理</option>
-                        <option value="配货中">配货中</option>
-                        <option value="已订购">已订购</option>
-                        <option value="已到货">已到货</option>
-                        <option value="已完成">已完成</option>
-                        <option value="待付款">待付款</option>
-                        <option value="厂家断货">厂家断货</option>
-                    </select>
-                    <button id="refreshBtn" class="btn-search">刷新</button>
+                    <span id="refreshIndicator" class="refresh-indicator" style="display:none;font-size:11px;margin-left:4px;">●</span>
                 </div>
-                
+                </div>
                 <!-- 批量操作工具栏 -->
                 <div id="batchToolbar" class="batch-toolbar" style="display:none;">
                     <span>已选择 <strong id="selectedCount">0</strong> 项</span>
@@ -89,9 +118,9 @@
                     <button class="btn-batch btn-batch-clear" onclick="clearSelection()">清除选择</button>
                 </div>
                 
-                <div class="table-wrapper">
+                <div class="table-wrapper summary-table-container">
                     <table class="data-table" id="summaryTable">
-                        <thead><tr><th style="width:32px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"></th><th style="width:75px;">供货商</th><th style="width:80px;">编码</th><th style="width:170px;">商品名称</th><th style="width:60px;">规格</th><th style="width:55px;">紧急</th><th style="width:50px;">需求</th><th style="width:55px;">订货</th><th style="width:75px;">状态</th><th style="width:50px;">操作</th></tr></thead>
+                        <thead><tr><th style="width:26px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"></th><th style="width:68px;">供货商</th><th style="width:50px;">编码</th><th style="width:112px;">品名</th><th style="width:50px;">规格</th><th style="width:36px;">紧急</th><th style="width:36px;">需求</th><th style="width:64px;">状态</th><th style="width:42px;">操作</th><th style="width:46px;">入库</th><th style="width:46px;">配送</th></tr></thead>
                         <tbody id="summaryTbody"></tbody>
                     </table>
                 </div>
@@ -101,7 +130,12 @@
                     <span id="pageInfo" style="font-size:14px;color:var(--text-secondary);"></span>
                     <div class="pagination-btns">
                         <button id="prevPageBtn" class="btn-page" onclick="changePage(-1)">上一页</button>
+                        <div id="pageNumbers" style="display:flex;gap:4px;align-items:center;"></div>
                         <button id="nextPageBtn" class="btn-page" onclick="changePage(1)">下一页</button>
+                        <span style="font-size:13px;margin-left:8px;">跳至</span>
+                        <input type="number" id="pageJumpInput" style="width:42px;height:28px;text-align:center;border:1px solid var(--input-border);border-radius:4px;font-size:13px;" min="1" onkeydown="if(event.key==='Enter')jumpToPage()">
+                        <span style="font-size:13px;">页</span>
+                        <button class="btn-page" onclick="jumpToPage()">GO</button>
                     </div>
                 </div>
             </div>
@@ -115,7 +149,7 @@
                 <div id="completedBody" style="display:none;">
                     <div class="table-wrapper">
                         <table class="data-table">
-                            <thead><tr><th style="width:75px;">供货商</th><th style="width:80px;">编码</th><th>商品名称</th><th style="width:60px;">规格</th><th style="width:55px;">订货</th><th style="width:75px;">状态</th><th style="width:50px;">操作</th></tr></thead>
+                            <thead><tr><th style="width:65px;">供货商</th><th style="width:50px;">编码</th><th style="width:160px;">品名</th><th style="width:50px;">规格</th><th style="width:60px;">厂家</th><th style="width:40px;">订货</th><th style="width:60px;">状态</th><th style="width:42px;">操作</th></tr></thead>
                             <tbody id="completedTbody"></tbody>
                         </table>
                     </div>
@@ -128,12 +162,13 @@
             <div class="summary-stats">
                 <div class="stat-card"><span class="stat-value" id="newTotalCount">0</span><span class="stat-label">新品上报</span></div>
                 <div class="stat-card"><span class="stat-value" id="newProductCount">0</span><span class="stat-label">新品品种</span></div>
+                <div class="stat-card"><span class="stat-value" id="newTodayCount">0</span><span class="stat-label">今日上报</span></div>
             </div>
             <div class="list-card">
                 <div class="list-header"><h2>新品订购汇总</h2><button id="refreshNewBtn" class="btn-search">刷新</button></div>
                 <div class="table-wrapper">
                     <table class="data-table">
-                        <thead><tr><th>商品名称</th><th>规格</th><th>参考厂家</th><th>紧急程度</th><th>总需求</th><th>操作</th></tr></thead>
+                        <thead><tr><th>商品名称</th><th>规格</th><th>参考厂家</th><th>紧急程度</th><th>总需求</th><th>审批状态</th><th>操作</th><th>删除</th></tr></thead>
                         <tbody id="newGroupTbody"></tbody>
                     </table>
                 </div>
@@ -467,7 +502,7 @@
         </div>
     </div>
 
-    <script src="./static/js/admin.js?v=25"></script>
+    <script src="./static/js/admin.js?v=30"></script>
 
     <!-- ========== PWA Service Worker ========== -->
     <script>

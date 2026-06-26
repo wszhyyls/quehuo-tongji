@@ -402,10 +402,8 @@ function renderSummaryPage() {
         var origIdx = idxMap[p.product_code] !== undefined ? idxMap[p.product_code] : 0;
         var ft = escapeHtml((p.product_code||'')+' '+(p.product_name||'')+' '+(p.specification||'')+' '+(p.manufacturer||''));
         var displayName = p.product_name || p.product_code || '';
-        // 仅在编码/品名/规格列悬停时显示完整信息
-        var nc = '<td title="'+escapeHtml(ft)+'"><span class="history-name">'+safeText(displayName)+'</span></td>';
-        var codeTd = '<td title="'+escapeHtml(ft)+'">'+safeText(p.product_code)+'</td>';
-        var specTd = '<td title="'+escapeHtml(ft)+'">'+safeText(p.specification||'')+'</td>';
+        tr.setAttribute('title', ft);
+        var nc = '<td title="'+escapeHtml(p.product_name)+'"><span class="history-name">'+safeText(displayName)+'</span></td>';
         var sc = '<td style="white-space:nowrap;"><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:55px;text-align:left;" title="'+escapeHtml(p.supplier||'')+'">'+safeText(p.supplier||'-')+'</span></td>';
         // 入库/配送状态
         var buyStat = '-', sendStat = '-';
@@ -415,7 +413,7 @@ function renderSummaryPage() {
         if (orderStatusCache.sendMap) {
             sendStat = orderStatusCache.sendMap[p.product_code] ? '<span class="badge badge-ok">已配送</span>' : '<span class="badge badge-warn">未配送</span>';
         }
-        tr.innerHTML = cbHtml + sc + codeTd + nc + specTd + '<td>'+getUrgencyBadge('普通')+'</td><td><span class="type-badge type-shortage">'+safeText(p.total_demand)+'</span></td><td>'+statusDisplay+'</td><td><button class="btn-detail" onclick="showShortageDetail('+origIdx+')">明细</button></td><td style="font-size:12px;">'+buyStat+'</td><td style="font-size:12px;">'+sendStat+'</td>';
+        tr.innerHTML = cbHtml + sc + '<td>'+safeText(p.product_code)+'</td>'+nc+'<td>'+safeText(p.specification||'')+'</td><td>'+getUrgencyBadge('普通')+'</td><td><span class="type-badge type-shortage">'+safeText(p.total_demand)+'</span></td><td>'+statusDisplay+'</td><td><button class="btn-detail" onclick="showShortageDetail('+origIdx+')">明细</button></td><td style="font-size:12px;">'+buyStat+'</td><td style="font-size:12px;">'+sendStat+'</td>';
         tbody.appendChild(tr);
     });
 
@@ -477,7 +475,7 @@ function renderCompletedSection() {
         var tr = document.createElement('tr'), ft = escapeHtml((p.product_code||'')+' '+(p.product_name||'')+' '+(p.specification||'')+' '+(p.manufacturer||''));
         tr.setAttribute('title', ft);
         var so = ''; ORDER_STATUSES.forEach(function(s) { so += '<option value="'+s+'"'+(p.replenish_status===s?' selected':'')+'>'+s+'</option>'; });
-        tr.innerHTML = '<td style="white-space:nowrap;"><span style="max-width:55px;overflow:hidden;text-overflow:ellipsis;display:block;" title="'+escapeHtml(p.supplier||'')+'">'+safeText(p.supplier||'-')+'</span></td><td>'+safeText(p.product_code)+'</td><td style="white-space:nowrap;"><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;">'+safeText(p.product_name)+'</span></td><td>'+safeText(p.specification||'')+'</td><td style="max-width:55px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+escapeHtml(p.manufacturer||'')+'">'+safeText(p.manufacturer||'-')+'</td><td style="color:'+(p.replenish_manual>0?'#e74c3c':'#999')+';font-weight:bold;">'+(p.replenish_manual>0?safeText(p.replenish_manual):'-')+'</td><td><select class="status-select" data-status="'+p.replenish_status+'" data-product-code="'+safeText(p.product_code)+'" onchange="updateReplenishStatus(this)">'+so+'</select></td><td><button class="btn-detail" onclick="showShortageDetail('+origIdx+')">明细</button></td>';
+        tr.innerHTML = '<td style="white-space:nowrap;"><span style="max-width:75px;overflow:hidden;text-overflow:ellipsis;display:block;" title="'+escapeHtml(p.supplier||'')+'">'+safeText(p.supplier||'-')+'</span></td><td>'+safeText(p.product_code)+'</td><td style="white-space:nowrap;"><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:100%;">'+safeText(p.product_name)+'</span></td><td>'+safeText(p.specification||'')+'</td><td style="color:'+(p.replenish_manual>0?'#e74c3c':'#999')+';font-weight:bold;">'+(p.replenish_manual>0?safeText(p.replenish_manual):'-')+'</td><td><select class="status-select" data-status="'+p.replenish_status+'" data-product-code="'+safeText(p.product_code)+'" onchange="updateReplenishStatus(this)">'+so+'</select></td><td><button class="btn-detail" onclick="showShortageDetail('+origIdx+')">明细</button></td>';
         ct.appendChild(tr);
     });
     document.getElementById('completedBody').style.display = 'none';

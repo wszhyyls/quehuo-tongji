@@ -14,10 +14,10 @@
     <meta name="theme-color" content="#667eea">
     <!-- ============================ -->
 
-    <link rel="stylesheet" href="./static/css/style.css?v=28">
+    <link rel="stylesheet" href="./static/css/style.css?v=29">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="./static/js/fuse.min.js?v=1"></script>
-    <script src="./static/js/utils.js?v=26"></script>
+    <script src="./static/js/utils.js?v=28"></script>
 </head>
 <body>
     <!-- 预加载遮罩层 -->
@@ -49,6 +49,13 @@
     </div>
 
     <div class="app-container">
+        <!-- 门店公告栏 -->
+        <div id="storeAnnouncement">
+            <span>📢</span>
+            <span id="announcementText">正在加载公告...</span>
+            <span class="ann-close" onclick="document.getElementById('storeAnnouncement').style.display='none'" title="关闭">✕</span>
+        </div>
+
         <div class="store-name-bar">
             <h1 id="storeName" class="store-title">门店</h1>
         </div>
@@ -194,9 +201,7 @@
                     <select id="historyStatusFilter" class="filter-select-sm">
                         <option value="">全部状态</option>
                         <option value="待处理">待处理</option>
-                        <option value="配货中">配货中</option>
                         <option value="已订购">已订购</option>
-                        <option value="已到货">已到货</option>
                         <option value="已完成">已完成</option>
                         <option value="待付款">待付款</option>
                         <option value="厂家断货">厂家断货</option>
@@ -275,7 +280,7 @@
         </div>
     </div>
 
-    <script src="./static/js/store.js?v=28"></script>
+    <script src="./static/js/store.js?v=29"></script>
 
     <!-- ========== PWA Service Worker ========== -->
     <script>

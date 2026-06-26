@@ -63,6 +63,7 @@ GO
 -- =====================================================
 -- 2. 存储过程：usp_UpdateActualOrder
 -- 作用：VBA 写入实际订货数量，自动改为"已订购"状态
+-- v4.0：如果已完成则保持已完成
 -- =====================================================
 CREATE PROCEDURE [dbo].[usp_UpdateActualOrder]
     @商品编码           NVARCHAR(50),
@@ -71,6 +72,9 @@ CREATE PROCEDURE [dbo].[usp_UpdateActualOrder]
 AS
 BEGIN
     SET NOCOUNT ON;
+
+    DECLARE @当前状态 NVARCHAR(20);
+    SELECT @当前状态 = 补货状态 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 = @商品编码;
 
     IF @实际订货数量 <= 0
     BEGIN
@@ -83,22 +87,35 @@ BEGIN
     -- 检查是否已有记录
     IF EXISTS (SELECT 1 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 = @商品编码)
     BEGIN
-        UPDATE dbo.Shortage_OrderFeedback
-        SET 实际订货数量 = @实际订货数量,
-            补货状态 = '已订购',
-            订货时间 = GETDATE(),
-            操作人 = @操作人,
-            到货确认时间 = NULL,
-            备注 = ISNULL(备注, '') + ' | 更新订货:' + CAST(@实际订货数量 AS NVARCHAR) + ' ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
-        WHERE 商品编码 = @商品编码;
+        -- v4.0: 已完成的不降级，仅更新订货数量
+        IF @当前状态 = '已完成'
+        BEGIN
+            UPDATE dbo.Shortage_OrderFeedback
+            SET 实际订货数量 = @实际订货数量,
+                操作人 = @操作人,
+                备注 = ISNULL(备注, '') + ' | 更新订货(已完成):' + CAST(@实际订货数量 AS NVARCHAR) + ' ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+            WHERE 商品编码 = @商品编码;
+            SELECT 商品编码 = @商品编码, 结果 = '订货更新(已完成)', 补货状态 = '已完成', 实际订货数量 = @实际订货数量;
+        END
+        ELSE
+        BEGIN
+            UPDATE dbo.Shortage_OrderFeedback
+            SET 实际订货数量 = @实际订货数量,
+                补货状态 = '已订购',
+                订货时间 = GETDATE(),
+                操作人 = @操作人,
+                到货确认时间 = NULL,
+                备注 = ISNULL(备注, '') + ' | 更新订货:' + CAST(@实际订货数量 AS NVARCHAR) + ' ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+            WHERE 商品编码 = @商品编码;
+            SELECT 商品编码 = @商品编码, 结果 = '订货成功', 补货状态 = '已订购', 实际订货数量 = @实际订货数量;
+        END
     END
     ELSE
     BEGIN
         INSERT INTO dbo.Shortage_OrderFeedback (商品编码, 实际订货数量, 补货状态, 订货时间, 操作人)
         VALUES (@商品编码, @实际订货数量, '已订购', GETDATE(), @操作人);
+        SELECT 商品编码 = @商品编码, 结果 = '订货成功', 补货状态 = '已订购', 实际订货数量 = @实际订货数量;
     END
-
-    SELECT 商品编码 = @商品编码, 结果 = '订货成功', 补货状态 = '已订购', 实际订货数量 = @实际订货数量;
 END
 GO
 
@@ -107,7 +124,7 @@ GO
 
 -- =====================================================
 -- 3. 存储过程：usp_ConfirmArrival
--- 作用：手动标记商品已到货（VBA 或后台调用）
+-- 作用：手动标记商品已完成（VBA 或后台调用）
 -- =====================================================
 CREATE PROCEDURE [dbo].[usp_ConfirmArrival]
     @商品编码   NVARCHAR(50),
@@ -123,13 +140,13 @@ BEGIN
     END
 
     UPDATE dbo.Shortage_OrderFeedback
-    SET 补货状态 = '已到货',
+    SET 补货状态 = '已完成',
         到货确认时间 = GETDATE(),
         操作人 = @操作人,
-        备注 = ISNULL(备注, '') + ' | 确认到货 ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+        备注 = ISNULL(备注, '') + ' | 确认完成 ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
     WHERE 商品编码 = @商品编码;
 
-    SELECT 商品编码 = @商品编码, 结果 = '已确认到货', 补货状态 = '已到货';
+    SELECT 商品编码 = @商品编码, 结果 = '已确认完成', 补货状态 = '已完成';
 END
 GO
 
@@ -138,11 +155,11 @@ GO
 
 -- =====================================================
 -- 4. 存储过程：usp_UpdateActualOrderStatus
--- 作用：手工强制修改补货状态（后台管理员调用）
+-- 作用：手工强制修改补货状态（后台管理员调用）v4.0
 -- =====================================================
 CREATE PROCEDURE [dbo].[usp_UpdateActualOrderStatus]
     @商品编码   NVARCHAR(50),
-    @目标状态   NVARCHAR(20),  -- '待处理' / '已订购' / '已到货'
+    @目标状态   NVARCHAR(20),  -- '待处理' / '已订购' / '已完成' / '待付款' / '厂家断货'
     @操作人     NVARCHAR(50) = '管理员',
     @备注       NVARCHAR(200) = NULL
 AS
@@ -152,9 +169,9 @@ BEGIN
     DECLARE @有效状态 NVARCHAR(20);
     SET @目标状态 = LTRIM(RTRIM(@目标状态));
     
-    IF @目标状态 NOT IN ('待处理', '已订购', '已到货')
+    IF @目标状态 NOT IN ('待处理', '已订购', '已完成', '待付款', '厂家断货')
     BEGIN
-        SELECT 商品编码 = @商品编码, 结果 = '无效状态，必须是：待处理/已订购/已到货';
+        SELECT 商品编码 = @商品编码, 结果 = '无效状态，必须是：待处理/已订购/已完成/待付款/厂家断货';
         RETURN;
     END
 
@@ -181,7 +198,7 @@ GO
 
 -- =====================================================
 -- 5. 存储过程：usp_AutoDetectOrderStatus_Feedback
--- 作用：自动检测库存变化，将已订货商品标记为已到货
+-- 作用：自动检测库存变化，标记完成为已完成（v4.0）
 -- =====================================================
 CREATE PROCEDURE [dbo].[usp_AutoDetectOrderStatus_Feedback]
 AS
@@ -237,7 +254,7 @@ BEGIN
         f.到货确认时间,
         f.操作人,
         CASE
-            WHEN f.补货状态 = '已到货' THEN '已到货'
+            WHEN f.补货状态 = '已完成' THEN '已完成'
             WHEN f.补货状态 = '已订购' THEN '已订购'
             WHEN p.建议订货数量 > 0 THEN '待处理'
             ELSE '库存充足'
@@ -246,7 +263,7 @@ BEGIN
     LEFT JOIN dbo.Shortage_OrderFeedback f WITH (NOLOCK) ON p.商品编码 = f.商品编码
     WHERE (@关键字 IS NULL OR p.商品编码 LIKE '%' + @关键字 + '%' OR p.商品名称 LIKE '%' + @关键字 + '%')
       AND (@状态筛选 IS NULL OR ISNULL(f.补货状态, '待处理') = @状态筛选)
-      AND (@仅缺货 = 0 OR p.建议订货数量 > 0 OR f.补货状态 IN ('已订购', '已到货'))
+      AND (@仅缺货 = 0 OR p.建议订货数量 > 0 OR f.补货状态 IN ('已订购', '已完成'))
     ORDER BY p.建议订货数量 DESC, p.商品编码;
 END
 GO
@@ -267,7 +284,7 @@ PRINT '  1. 表: Shortage_OrderFeedback';
 PRINT '  2. 存储过程: usp_UpdateActualOrder (VBA写入订货数量)';
 PRINT '  3. 存储过程: usp_ConfirmArrival (手动确认到货)';
 PRINT '  4. 存储过程: usp_UpdateActualOrderStatus (手工改状态)';
-PRINT '  5. 存储过程: usp_AutoDetectOrderStatus_Feedback (自动检测到货)';
+PRINT '  5. 存储过程: usp_AutoDetectOrderStatus_Feedback (自动检测完成 v4.0)';
 PRINT '  6. 存储过程: usp_GetPurchasePlanWithFeedback (查询采购计划含状态)';
 PRINT '';
 PRINT 'VBA 使用示例：';
