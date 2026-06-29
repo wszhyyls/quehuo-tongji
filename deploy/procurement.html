@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>采购记录</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@14.6.0/dist/handsontable.full.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/handsontable@14.6.0/dist/handsontable.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/handsontable@14.6.0/dist/languages/zh-CN.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        * {box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI', 'Microsoft YaHei', sans-serif}
+        html,body {height:100%;overflow:hidden;background:#fff}
+        .excel-titlebar {height:30px;background:#217346;display:flex;align-items:center;justify-content:space-between;padding:0 8px;color:#fff;font-size:12px}
+        .titlebar-left,.titlebar-right {display:flex;align-items:center;gap:12px}
+        .window-control {width:12px;height:12px;border-radius:50%;display:inline-block}
+        .window-control.min {background:#ffc107}.window-control.max {background:#28a745}.window-control.close {background:#dc3545}
+        .quick-access-toolbar {height:22px;background:#217346;display:flex;align-items:center;padding:0 8px;gap:12px;border-bottom:1px solid #1e6039}
+        .qat-btn {background:transparent;border:none;color:#fff;font-size:11px;cursor:pointer;padding:2px 6px;border-radius:2px}
+        .qat-btn:hover {background:rgba(255,255,255,0.2)}
+        .go-back-btn {background:rgba(255,255,255,0.15)!important}
+        .excel-ribbon {background:#f3f2f1;border-bottom:1px solid #d4d4d4}
+        .ribbon-tabs {display:flex;gap:4px;padding:4px 8px 0;background:#217346}
+        .ribbon-tab {padding:6px 16px;border:none;background:transparent;color:#fff;cursor:pointer;font-size:12px;border-radius:4px 4px 0 0}
+        .ribbon-tab.active {background:#f3f2f1;color:#333}
+        .ribbon-content {display:none;padding:8px 16px;gap:24px;min-height:100px}
+        .ribbon-content.active {display:flex}
+        .ribbon-group {display:flex;flex-direction:column;gap:4px;border-right:1px solid #d4d4d4;padding-right:16px}
+        .ribbon-group:last-child {border-right:none}
+        .group-title {font-size:11px;color:#666;text-align:center;margin-top:4px}
+        .ribbon-btn {padding:6px 10px;border:none;background:transparent;border-radius:2px;cursor:pointer;font-size:12px;color:#333;display:flex;align-items:center;gap:4px}
+        .ribbon-btn:hover {background:#e1dfdd}.ribbon-btn.primary {background:#4472C4;color:#fff}.ribbon-btn.primary:hover {background:#365A9E}
+        .ribbon-btn.large {padding:12px 16px;font-size:12px}
+        .btn-group {display:flex;gap:4px}.btn-group-vertical {display:flex;flex-direction:column;gap:4px}
+        .excel-formula-bar {height:24px;background:#fff;border-bottom:1px solid #d4d4d4;display:flex;align-items:center;padding:0 8px;gap:8px}
+        .name-box {width:120px;padding:4px;border:1px solid #d4d4d4;border-radius:2px;font-size:11px}
+        .formula-input {flex:1;padding:4px;border:none;outline:none;font-size:11px}
+        .excel-worksheet {flex:1;overflow:hidden;background:#fff}
+        #hot-table {width:100%;height:100%}
+        /* 蓝白风格表格 */
+        .handsontable {font-family:'Segoe UI', 'Microsoft YaHei', sans-serif!important;font-size:11px!important;border:none!important;background:#fff!important}
+        .handsontable td,.handsontable th {border:1px solid #d4d4d4!important}
+        .handsontable th {background:#4472C4!important;color:#fff!important;font-weight:600!important;text-align:center!important;border-bottom:2px solid #d4d4d4!important}
+        .handsontable .colHeader,.handsontable .rowHeader {background:#4472C4!important;color:#fff!important;font-weight:500!important}
+        .handsontable tr:nth-child(even) td {background:#f0f5ff!important}
+        .handsontable tr:nth-child(odd) td {background:#fff!important}
+        .handsontable td.current {background:#e8f0fe!important;border:2px solid #1a73e8!important}
+        .handsontable td:hover {background:#f1f3f4!important}
+        .excel-statusbar {height:24px;background:#217346;display:flex;align-items:center;justify-content:space-between;padding:0 8px;color:#fff;font-size:11px}
+        .statusbar-left,.statusbar-right {display:flex;align-items:center;gap:12px}
+        .view-switch {display:flex;gap:4px}.view-btn {background:transparent;border:none;color:#fff;font-size:11px;cursor:pointer;padding:2px 6px}
+        .view-btn.active {background:rgba(255,255,255,0.3)}.zoom-slider {width:100px}
+        .loading-overlay {position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.3);display:none;align-items:center;justify-content:center;z-index:9999}
+        .loading-box {background:#fff;padding:24px 40px;border-radius:8px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.15);font-size:14px;color:#333}
+        .loading-spinner {width:32px;height:32px;border:3px solid #e0e0e0;border-top-color:#217346;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 12px}
+        @keyframes spin {to{transform:rotate(360deg)}}
+        select.font-select,select.font-size-select,select.number-format-select {padding:4px;border:1px solid #d4d4d4;border-radius:2px;font-size:11px}
+    </style>
+</head>
+<body>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-box"><div class="loading-spinner"></div><div>数据处理中，请稍候...</div></div>
+    </div>
+
+    <div class="excel-titlebar">
+        <div class="titlebar-left"><span>📊 采购记录</span></div>
+        <div class="titlebar-right"><span class="window-control min"></span><span class="window-control max"></span><span class="window-control close"></span></div>
+    </div>
+
+    <div class="quick-access-toolbar">
+        <button class="qat-btn" onclick="saveData()">💾 保存</button>
+        <button class="qat-btn" onclick="hot.getPlugin('undoRedo').undo()">↶ 撤销</button>
+        <button class="qat-btn" onclick="hot.getPlugin('undoRedo').redo()">↷ 恢复</button>
+        <button class="qat-btn go-back-btn" onclick="location.href='admin.html'">← 返回后台</button>
+    </div>
+
+    <div class="excel-ribbon">
+        <div class="ribbon-tabs">
+            <button class="ribbon-tab" onclick="switchRibbonTab(this)">文件</button>
+            <button class="ribbon-tab active" onclick="switchRibbonTab(this)">开始</button>
+            <button class="ribbon-tab" onclick="switchRibbonTab(this)">插入</button>
+            <button class="ribbon-tab" onclick="switchRibbonTab(this)">页面布局</button>
+            <button class="ribbon-tab" onclick="switchRibbonTab(this)">公式</button>
+            <button class="ribbon-tab" onclick="switchRibbonTab(this)">数据</button>
+            <button class="ribbon-tab" onclick="switchRibbonTab(this)">审阅</button>
+            <button class="ribbon-tab" onclick="switchRibbonTab(this)">视图</button>
+        </div>
+
+        <div class="ribbon-content"><div class="ribbon-group"><div class="group-title">文件操作</div><button class="ribbon-btn" onclick="importExcel()">📥 导入Excel</button><button class="ribbon-btn" onclick="exportExcel()">📤 导出Excel</button><button class="ribbon-btn" onclick="saveData()">💾 保存</button></div></div>
+
+        <div class="ribbon-content active">
+            <div class="ribbon-group">
+                <div class="group-title">剪贴板</div>
+                <div style="display:flex;gap:4px;align-items:flex-start;">
+                    <button class="ribbon-btn large primary" onclick="hot.getPlugin('contextMenu').executeCommand('paste')">📋 粘贴</button>
+                    <div class="btn-group-vertical">
+                        <button class="ribbon-btn" onclick="hot.getPlugin('contextMenu').executeCommand('cut')">✂️ 剪切</button>
+                        <button class="ribbon-btn" onclick="hot.getPlugin('contextMenu').executeCommand('copy')">📄 复制</button>
+                    </div>
+                    <button class="ribbon-btn">🖼️ 格式刷</button>
+                </div>
+            </div>
+            <div class="ribbon-group">
+                <div class="group-title">字体</div>
+                <div class="btn-group">
+                    <select class="font-select" style="width:120px"><option>等线</option><option>微软雅黑</option><option>宋体</option><option>黑体</option></select>
+                    <select class="font-size-select" style="width:60px"><option>11</option><option>12</option><option>14</option><option>16</option></select>
+                </div>
+                <div class="btn-group">
+                    <button class="ribbon-btn" onclick="toggleFontBold()" style="font-weight:bold">B</button>
+                    <button class="ribbon-btn" onclick="toggleFontItalic()" style="font-style:italic">I</button>
+                    <button class="ribbon-btn" onclick="toggleFontUnderline()" style="text-decoration:underline">U</button>
+                </div>
+            </div>
+            <div class="ribbon-group">
+                <div class="group-title">对齐方式</div>
+                <div class="btn-group">
+                    <button class="ribbon-btn" onclick="setAlignment('htLeft')">⬅ 左对齐</button>
+                    <button class="ribbon-btn" onclick="setAlignment('htCenter')">⬌ 居中</button>
+                    <button class="ribbon-btn" onclick="setAlignment('htRight')">➡ 右对齐</button>
+                </div>
+                <button class="ribbon-btn" onclick="toggleWrapText()">自动换行</button>
+            </div>
+            <div class="ribbon-group">
+                <div class="group-title">数字</div>
+                <select class="number-format-select" style="width:120px" onchange="setNumberFormat(this.value)">
+                    <option value="general">常规</option><option value="currency">货币格式</option><option value="percent">百分比格式</option><option value="number">数值格式</option>
+                </select>
+            </div>
+            <div class="ribbon-group">
+                <div class="group-title">单元格</div>
+                <div class="btn-group">
+                    <button class="ribbon-btn" onclick="insertRow()">➕ 插入行</button>
+                    <button class="ribbon-btn" onclick="deleteRow()">🗑️ 删除行</button>
+                </div>
+            </div>
+            <div class="ribbon-group">
+                <div class="group-title">编辑</div>
+                <div class="btn-group">
+                    <button class="ribbon-btn" onclick="openFilter()">🔍 筛选</button>
+                    <button class="ribbon-btn" onclick="clearFilter()">🔄 清除筛选</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="ribbon-content">
+            <div class="ribbon-group"><div class="group-title">行</div><button class="ribbon-btn" onclick="insertRow()">➕ 在上方插入</button><button class="ribbon-btn" onclick="addRow()">📝 新增记录</button></div>
+            <div class="ribbon-group"><div class="group-title">批注</div><button class="ribbon-btn" onclick="addComment()">📌 插入批注</button><button class="ribbon-btn" onclick="removeComment()">🗑️ 删除批注</button></div>
+        </div>
+
+        <div class="ribbon-content">
+            <div class="ribbon-group"><div class="group-title">页面设置</div><button class="ribbon-btn">📄 纸张大小</button><button class="ribbon-btn">📐 页边距</button></div>
+            <div class="ribbon-group"><div class="group-title">工作表选项</div><button class="ribbon-btn" onclick="toggleGridlines()">📊 网格线</button><button class="ribbon-btn" onclick="toggleHeaders()">📋 行号列标</button></div>
+        </div>
+
+        <div class="ribbon-content">
+            <div class="ribbon-group"><div class="group-title">函数库</div><button class="ribbon-btn">📊 插入函数</button><button class="ribbon-btn">📈 统计函数</button></div>
+        </div>
+
+        <div class="ribbon-content">
+            <div class="ribbon-group"><div class="group-title">获取数据</div><button class="ribbon-btn" onclick="importExcel()">📥 导入Excel</button><button class="ribbon-btn" onclick="exportExcel()">📤 导出Excel</button></div>
+            <div class="ribbon-group"><div class="group-title">排序</div><button class="ribbon-btn" onclick="sortAsc()">🔽 升序</button><button class="ribbon-btn" onclick="sortDesc()">🔼 降序</button></div>
+            <div class="ribbon-group"><div class="group-title">数据工具</div><button class="ribbon-btn" onclick="batchReconcile()">✓ 对账(选中)</button><button class="ribbon-btn" onclick="batchDelete()">🗑️ 删除(选中)</button><button class="ribbon-btn" onclick="cleanEmptyRow()">🧹 清理空行</button></div>
+        </div>
+
+        <div class="ribbon-content">
+            <div class="ribbon-group"><div class="group-title">批注</div><button class="ribbon-btn" onclick="addComment()">📌 插入批注</button><button class="ribbon-btn" onclick="removeComment()">🗑️ 删除批注</button></div>
+        </div>
+
+        <div class="ribbon-content">
+            <div class="ribbon-group"><div class="group-title">显示</div><button class="ribbon-btn" onclick="toggleGridlines()">📊 网格线</button><button class="ribbon-btn" onclick="toggleHeaders()">📋 行号列标</button><button class="ribbon-btn" onclick="toggleFormulaBar()">📝 编辑栏</button></div>
+            <div class="ribbon-group"><div class="group-title">窗口</div><button class="ribbon-btn" onclick="toggleFreezeRow()">📌 冻结首行</button></div>
+            <div class="ribbon-group"><div class="group-title">缩放</div><button class="ribbon-btn" onclick="setZoom(100)">🔍 100%</button></div>
+        </div>
+    </div>
+
+    <div class="excel-formula-bar">
+        <input type="text" class="name-box" id="cellNameBox" value="A1" readonly>
+        <input type="text" class="formula-input" id="formulaInput" placeholder="输入公式或数据">
+    </div>
+
+    <div class="excel-worksheet"><div id="hot-table"></div></div>
+
+    <div class="excel-statusbar">
+        <div class="statusbar-left"><span>就绪</span><span id="cellCount">0 条记录</span></div>
+        <div class="statusbar-right">
+            <div class="view-switch">
+                <button class="view-btn active">📊 普通</button><button class="view-btn">📄 页面布局</button><button class="view-btn">🖨️ 分页预览</button>
+            </div>
+            <input type="range" class="zoom-slider" min="50" max="200" value="100" onchange="setZoom(this.value)">
+            <span id="zoomValue">100%</span>
+        </div>
+    </div>
+
+    <script src="./static/js/procurement.js?v=8"></script>
+</body>
+</html>

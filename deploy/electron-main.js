@@ -4,7 +4,7 @@ const { autoUpdater } = require('electron-updater');
 
 // 配置
 const CONFIG = {
-  title: 'WSZH-ShortageStore v3.19.0',
+  title: 'WSZH-ShortageStore v5.5.0',
   width: 1400,
   height: 900,
   minWidth: 800,
@@ -20,7 +20,7 @@ const CONFIG = {
 
 // 更新服务器地址
 const UPDATE_CHECK_URL = 'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/check-update';
-const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v3.19.0/';  // GitHub Releases
+const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v5.5.0/';  // GitHub Releases
 
 let mainWindow = null;
 
@@ -53,20 +53,22 @@ function createSplashWindow() {
   return splashWindow;
 }
 
-// 创建主窗口
-function createWindow() {
+// 创建主窗口（async：先清缓存再加载）
+async function createWindow() {
   // 立即创建启动画面（不等待任何资源）
   const splashWindow = createSplashWindow();
 
-  // 清除 HTTP 缓存（页面内容，不含 localStorage）
+  // 清除 HTTP 缓存和 cookies（保留 localStorage 中的设备码）
   var { session } = require('electron');
-  session.defaultSession.clearCache().then(function() {
-    log('浏览器缓存已清除（不含 localStorage）');
-  }).catch(function(err) {
+  try {
+    await session.defaultSession.clearCache();
+    await session.defaultSession.clearStorageData({ storages: ['cookies', 'cachestorage'] });
+    log('缓存和cookies已清除（localStorage已保留）');
+  } catch(err) {
     log('清除缓存失败: ' + err.message);
-  });
+  }
 
-  // 立即创建主窗口（隐藏状态）
+  // 创建主窗口（隐藏状态）
   mainWindow = new BrowserWindow({
     ...CONFIG,
     show: false
@@ -89,10 +91,28 @@ function createWindow() {
       if (splashWindow && !splashWindow.isDestroyed()) {
         splashWindow.close();
       }
-    }, 800);  // 从200ms延长到800ms，给动画充足时间
+    }, 800);
   });
 
-  // 窗口关闭时退出应用
+  // 关闭窗口时弹出确认提示
+  mainWindow.on('close', (e) => {
+    e.preventDefault();
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'question',
+      buttons: ['取消', '退出'],
+      defaultId: 0,
+      cancelId: 0,
+      title: '确认退出',
+      message: '确定要退出缺货统计系统吗？',
+      detail: '退出后需重新登录。',
+      icon: path.join(__dirname, 'static', 'icon-192.png')
+    });
+    if (choice === 1) {
+      mainWindow.destroy();
+    }
+  });
+
+  // 窗口销毁后退出应用
   mainWindow.on('closed', () => {
     mainWindow = null;
     app.quit();

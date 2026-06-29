@@ -87,8 +87,8 @@ BEGIN
     -- 检查是否已有记录
     IF EXISTS (SELECT 1 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 = @商品编码)
     BEGIN
-        -- v4.0: 已完成的不降级，仅更新订货数量
-        IF @当前状态 = '已完成'
+        -- v4.2: 已完成/已到货的不降级，仅更新订货数量
+        IF @当前状态 IN ('已完成', '已到货')
         BEGIN
             UPDATE dbo.Shortage_OrderFeedback
             SET 实际订货数量 = @实际订货数量,
@@ -140,13 +140,13 @@ BEGIN
     END
 
     UPDATE dbo.Shortage_OrderFeedback
-    SET 补货状态 = '已完成',
+    SET 补货状态 = '已到货',
         到货确认时间 = GETDATE(),
         操作人 = @操作人,
-        备注 = ISNULL(备注, '') + ' | 确认完成 ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+        备注 = ISNULL(备注, '') + ' | 确认到货 ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
     WHERE 商品编码 = @商品编码;
 
-    SELECT 商品编码 = @商品编码, 结果 = '已确认完成', 补货状态 = '已完成';
+    SELECT 商品编码 = @商品编码, 结果 = '已确认到货', 补货状态 = '已到货';
 END
 GO
 
@@ -169,9 +169,9 @@ BEGIN
     DECLARE @有效状态 NVARCHAR(20);
     SET @目标状态 = LTRIM(RTRIM(@目标状态));
     
-    IF @目标状态 NOT IN ('待处理', '已订购', '已完成', '待付款', '厂家断货')
+    IF @目标状态 NOT IN ('待处理', '已订购', '已到货', '已完成', '待付款', '厂家断货')
     BEGIN
-        SELECT 商品编码 = @商品编码, 结果 = '无效状态，必须是：待处理/已订购/已完成/待付款/厂家断货';
+        SELECT 商品编码 = @商品编码, 结果 = '无效状态，必须是：待处理/已订购/已到货/已完成/待付款/厂家断货';
         RETURN;
     END
 
@@ -198,29 +198,44 @@ GO
 
 -- =====================================================
 -- 5. 存储过程：usp_AutoDetectOrderStatus_Feedback
--- 作用：自动检测库存变化，标记完成为已完成（v4.0）
+-- 作用：自动检测库存变化（v4.2：已到货=仓库有货待配送，已完成=在途/门店有货）
 -- =====================================================
 CREATE PROCEDURE [dbo].[usp_AutoDetectOrderStatus_Feedback]
 AS
 BEGIN
     SET NOCOUNT ON;
+    DECLARE @已完成Count INT = 0, @已到货Count INT = 0;
 
-    -- 找出已订购且门店库存 >= 标准库存的商品，标记为已到货
+    -- 步骤1：在途>0 或门店库存>0 → 已完成
     UPDATE f
-    SET f.补货状态 = '已到货',
-        f.到货确认时间 = GETDATE(),
-        f.备注 = ISNULL(f.备注, '') + ' | 自动检测到货 ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+    SET f.补货状态 = '已完成', f.到货确认时间 = GETDATE(),
+        f.备注 = ISNULL(f.备注, '') + ' | 自动完成(已在途或门店有货) ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
     FROM dbo.Shortage_OrderFeedback f
-    INNER JOIN dbo.Shortage_StoreStockCache s ON f.商品编码 = s.商品编码
-    WHERE f.补货状态 = '已订购'
-      AND s.库存数量 >= ISNULL(s.标准库存数量, 0)
-      AND s.标准库存数量 > 0;
+    INNER JOIN (
+        SELECT 商品编码, SUM(ISNULL(库存数量, 0)) AS 总库存, SUM(ISNULL(在途数量, 0)) AS 总在途
+        FROM dbo.SPFXB_Result WITH (NOLOCK) GROUP BY 商品编码
+    ) r ON f.商品编码 = r.商品编码
+    WHERE f.补货状态 NOT IN ('已完成', '已到货', '厂家断货')
+      AND (r.总在途 > 0 OR r.总库存 > 0);
+    SET @已完成Count = @@ROWCOUNT;
 
-    SELECT 处理数量 = @@ROWCOUNT, 操作 = '自动检测到货完成';
+    -- 步骤2：仓库有货但未配送 → 已到货
+    UPDATE f
+    SET f.补货状态 = '已到货', f.到货确认时间 = GETDATE(),
+        f.备注 = ISNULL(f.备注, '') + ' | 自动到货(仓库有货待配送) ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+    FROM dbo.Shortage_OrderFeedback f
+    INNER JOIN (
+        SELECT 商品编码, SUM(ISNULL(配送中心库存数量, 0)) AS 仓库库存
+        FROM dbo.SPFXB_Result WITH (NOLOCK) GROUP BY 商品编码
+    ) r ON f.商品编码 = r.商品编码
+    WHERE f.补货状态 NOT IN ('已完成', '已到货', '厂家断货') AND r.仓库库存 > 0;
+    SET @已到货Count = @@ROWCOUNT;
+
+    SELECT 已完成 = @已完成Count, 已到货 = @已到货Count, 操作 = '自动检测完成(v4.2)';
 END
 GO
 
-PRINT '>>> usp_AutoDetectOrderStatus_Feedback 创建完成';
+PRINT '>>> usp_AutoDetectOrderStatus_Feedback 创建完成(v4.2)';
 GO
 
 -- =====================================================
@@ -237,34 +252,66 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT TOP (@Top)
-        p.商品编码,
-        p.商品名称,
-        p.规格,
-        p.生产企业,
-        p.仓库库存数量,
-        p.标准库存汇总,
-        p.门店库存汇总,
-        p.在途汇总,
-        p.可调拨数量,
-        p.建议订货数量,
-        ISNULL(f.实际订货数量, 0) AS 实际订货数量,
-        ISNULL(f.补货状态, '待处理') AS 补货状态,
-        f.订货时间,
-        f.到货确认时间,
-        f.操作人,
-        CASE
-            WHEN f.补货状态 = '已完成' THEN '已完成'
-            WHEN f.补货状态 = '已订购' THEN '已订购'
-            WHEN p.建议订货数量 > 0 THEN '待处理'
-            ELSE '库存充足'
-        END AS 状态显示
-    FROM dbo.Shortage_PurchasePlanCache p WITH (NOLOCK)
-    LEFT JOIN dbo.Shortage_OrderFeedback f WITH (NOLOCK) ON p.商品编码 = f.商品编码
-    WHERE (@关键字 IS NULL OR p.商品编码 LIKE '%' + @关键字 + '%' OR p.商品名称 LIKE '%' + @关键字 + '%')
-      AND (@状态筛选 IS NULL OR ISNULL(f.补货状态, '待处理') = @状态筛选)
-      AND (@仅缺货 = 0 OR p.建议订货数量 > 0 OR f.补货状态 IN ('已订购', '已完成'))
-    ORDER BY p.建议订货数量 DESC, p.商品编码;
+    -- 主查询：PurchasePlanCache LEFT JOIN Feedback
+    -- 补充查询：Feedback 有但 PurchasePlanCache 没有的（已完成/已到货/已订购）
+    WITH Combined AS (
+        SELECT 
+            p.商品编码,
+            p.商品名称,
+            p.规格,
+            p.生产企业,
+            p.仓库库存数量,
+            p.标准库存汇总,
+            p.门店库存汇总,
+            p.在途汇总,
+            p.可调拨数量,
+            p.建议订货数量,
+            ISNULL(f.实际订货数量, 0) AS 实际订货数量,
+            ISNULL(f.补货状态, '待处理') AS 补货状态,
+            f.订货时间,
+            f.到货确认时间,
+            f.操作人,
+            CASE
+                WHEN f.补货状态 = '已完成' THEN '已完成'
+                WHEN f.补货状态 = '已到货' THEN '已到货'
+                WHEN f.补货状态 = '已订购' THEN '已订购'
+                WHEN p.建议订货数量 > 0 THEN '待处理'
+                ELSE '库存充足'
+            END AS 状态显示
+        FROM dbo.Shortage_PurchasePlanCache p WITH (NOLOCK)
+        LEFT JOIN dbo.Shortage_OrderFeedback f WITH (NOLOCK) ON p.商品编码 = f.商品编码
+        WHERE (@关键字 IS NULL OR p.商品编码 LIKE '%' + @关键字 + '%' OR p.商品名称 LIKE '%' + @关键字 + '%')
+          AND (@状态筛选 IS NULL OR ISNULL(f.补货状态, '待处理') = @状态筛选)
+          AND (@仅缺货 = 0 OR p.建议订货数量 > 0 OR f.补货状态 IN ('已订购', '已到货', '已完成'))
+        
+        UNION
+        
+        -- 补充：Feedback中有状态但不在PurchasePlanCache的商品（含已完成/已订购/已到货）
+        SELECT 
+            f.商品编码,
+            '' AS 商品名称,
+            '' AS 规格,
+            '' AS 生产企业,
+            0 AS 仓库库存数量,
+            0 AS 标准库存汇总,
+            0 AS 门店库存汇总,
+            0 AS 在途汇总,
+            0 AS 可调拨数量,
+            0 AS 建议订货数量,
+            ISNULL(f.实际订货数量, 0) AS 实际订货数量,
+            f.补货状态 AS 补货状态,
+            f.订货时间,
+            f.到货确认时间,
+            f.操作人,
+            f.补货状态 AS 状态显示
+        FROM dbo.Shortage_OrderFeedback f WITH (NOLOCK)
+        WHERE f.补货状态 IN ('已订购', '已到货', '已完成')
+          AND NOT EXISTS (SELECT 1 FROM dbo.Shortage_PurchasePlanCache p WITH (NOLOCK) WHERE p.商品编码 = f.商品编码)
+          AND (@关键字 IS NULL OR f.商品编码 LIKE '%' + @关键字 + '%')
+          AND (@状态筛选 IS NULL OR f.补货状态 = @状态筛选)
+    )
+    SELECT TOP (@Top) * FROM Combined
+    ORDER BY 建议订货数量 DESC, 商品编码;
 END
 GO
 

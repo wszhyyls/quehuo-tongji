@@ -94,11 +94,12 @@
                         <select id="statusFilter" class="filter-select-sm" onchange="applyStatusFilter()">
                             <option value="">全部状态</option>
                             <option value="待处理">待处理</option><option value="已订购">已订购</option>
+                            <option value="已到货">已到货</option>
                             <option value="已完成">已完成</option><option value="待付款">待付款</option>
                             <option value="厂家断货">厂家断货</option>
                         </select>
-                        <button id="syncPlanBtn" class="btn-fbar" style="background:var(--accent);" title="同步商品缓存 → 同步库存数据 → 自动检测状态变更（仓库有货→已完成、库存/在途满足→已完成）">一键同步</button>
-                        <button id="checkOrderBtn" class="btn-fbar" style="background:#e74c3c;color:#fff;" title="检测当前筛选商品的入库状态：标记未入库、未配送的异常商品">检测入库状态</button>
+                        <button id="syncPlanBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" title="同步商品缓存 → 同步库存数据 → 自动检测状态变更（仓库有货→已完成、库存/在途满足→已完成）">一键同步</button>
+                        <button id="checkOrderBtn" class="btn-fbar" style="background:#e74c3c;color:#fff;font-weight:600;" title="检测当前筛选商品的入库状态：标记未入库、未配送的异常商品">检测入库状态</button>
                         <button id="refreshBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" title="重新加载缺货汇总数据，不触发同步流程">刷新订购数据</button>
                     <span style="font-size:12px;color:var(--text-muted);">自动刷新:</span>
                     <select id="autoRefreshInterval" class="filter-select-sm" style="width:auto;">

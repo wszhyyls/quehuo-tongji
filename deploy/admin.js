@@ -153,7 +153,7 @@ async function fetchStatusChangeLog(productCode) {
         });
     } catch(e) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);">查询出错</td></tr>'; }
 }
-function getBadgeClass(status) { var m = { '待处理':'pending','已订购':'ordered','已完成':'completed','待付款':'payment','厂家断货':'outstock' }; return m[status] || 'text'; }
+function getBadgeClass(status) { var m = { '待处理':'pending','已订购':'ordered','已到货':'arrived','已完成':'completed','待付款':'payment','厂家断货':'outstock' }; return m[status] || 'text'; }
 
 // 订货管理弹窗
 document.getElementById('orderModalClose').addEventListener('click', function() { document.getElementById('orderModal').classList.remove('show'); });

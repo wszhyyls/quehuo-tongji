@@ -1,6 +1,143 @@
 # 版本升级记录 (CHANGELOG)
 
-> 适用版本：v3.19.0 | 更新日期：2026-05-24
+> 适用版本：v5.5.0 | 更新日期：2026-06-27
+
+---
+
+## v5.5.0 — 自动检测逻辑精准重构（ZHYYLS实时库存）
+
+**部署日期：2026-06-27**
+
+### 一、检测数据源升级（SPFXB_Result → ZHYYLS 直查）
+- **门店库存**: 从 `ZHYYLS.dbo.GoodsStocks`(qty) JOIN `Vptype`(usercode) 实时查询，不再使用 SPFXB_Result 快照
+- **在途数量**: 调用 `EXEC ZHYYLS.dbo.Gp_SendDoing` 存储过程，查最近30天配送在途
+- **仓库库存**: krec='3' 为配送中心仓库编码
+- **门店→krec映射**: 门店名提取数字前缀，"04第四药店"→"4"，"08第八药店"→"8"
+
+### 二、判定条件精准化
+- **检测范围**: `补货状态 NOT IN ('已完成', '厂家断货')`，TOP 50
+- **仓库优先**: 仓库库存 > 订货数量 → 已完成
+- **全部门店满足**: 多个门店报同一商品时，所有门店的库存/在途必须都 > 订货数量，任一门不满足则不完成
+- **判定符**: `>`（严格大于），不再是 `>=`
+
+### 三、连接稳定性修复
+- SQL Server 端口统一: `1290` → `1311`
+- 连接超时: `30s` → `60s`，请求超时: `60s` → `120s`
+- RQZT 跨库查询 ZHYYLS: 统一使用 `ZHYYLS.dbo.` 前缀，不再另建 ZHYYLS 连接池
+
+### 四、数据恢复功能
+- 新增 `rebuild_feedback_from_supabase` Edge Function action
+- 从 Supabase `reports` 表重建 `Shortage_OrderFeedback` 数据（265条）
+- `rebuild.mjs` 脚本支持一键恢复
+
+### 五、存储过程修复
+- `usp_AutoDetectOrderStatus_Feedback`: 已禁用（全局汇总会误标）
+- `usp_GetPurchasePlanWithFeedback`: UNION 补充 `'已完成'` 状态
+- `scheduled-task` 移除重复 `fullSync` 定义
+
+---
+
+## v3.20.0 — 全方位深度优化（30项）
+
+**部署日期：2026-05-24**
+
+### 一、代码重构（消除 ~180 行冗余代码）
+
+#### 1. 公共模块统一（utils.js 重写）
+- `STORE_CONFIG`：10个门店统一配置（ID/名称/设备上限），替代7处硬编码
+- `callEdgeFunction`：统合 API 调用（含 JWT 自动续期、网络重试、AbortController）
+- `callEdgeFunctionAbortable`：带取消功能的 API 调用
+- `getReplenishBadge` / `getUrgencyBadge`：全局统一（原 store.js / admin.js 各一份）
+- `showToast` / `showAlert` / `showConfirm`：统一弹窗/提示组件，支持按钮文案自定义
+- `setBtnLoading`：按钮 loading 状态管理
+- `friendlyErrorClient`：客户端错误二次过滤（技术错误→中文提示）
+- `window.onerror`：全局 JS 错误边界（异常不白屏）
+- `getStoreName` / `getStoreDeviceLimit`：门店快速查找函数
+
+#### 2. store.js 优化
+- 删除重复函数 ~80 行（callEdgeFunction / getReplenishBadge / getUrgencyBadge / showAlert / showConfirm）
+- `buildProductData` 工厂函数：消除 queryProductByCode 中 3 处重复 ~60 行
+- `STORE_ID_MAP` 硬编码 → 改用 STORE_CONFIG
+
+#### 3. admin.js 优化
+- 删除重复函数 ~60 行
+- `STORE_NAME_DISPLAY`（2处）+ `storeOptions` + `defaultStoreList` → 改用 STORE_CONFIG
+
+#### 4. scheduled-task 修复
+- 删除重复 `fullSync()` 定义
+- `syncProductCache` DELETE+INSERT → UPSERT（消除数据空窗期）
+
+### 二、性能优化
+
+| 优化项 | 效果 |
+|--------|------|
+| 缓存优先初始化 | 有 localStorage 缓存时 **0ms** 显示界面（后台静默更新） |
+| 搜索 250ms 防抖 + AbortController 取消 | 减少 **50%** 无效网络请求 |
+| 历史记录 30 秒内存缓存 | 切 Tab 不重复请求 |
+| get_purchase_plan 分页 | 默认 500 条（原 5000），支持 page/pageSize |
+| get_summary 请求合并 | reports + plan **2→1** 次请求，响应快 40% |
+| batch_update_status 批量标记 | N 次请求 → **1 次**，耗时减少 90% |
+| 防重加载锁 (isLoadingSummary) | 避免并发重复请求 |
+| Edge Function Keep-Warm | 每 5 分钟保活，消除冷启动延迟 |
+
+### 三、交互体验优化
+
+| 优化项 | 效果 |
+|--------|------|
+| 刷新库存分步进度 | "同步SPFXB..."→"查询数据..."→"更新展示..."→"刷新完成 ✓" |
+| 同步采购计划分步进度 | "(1/3)商品→(2/3)库存→(3/3)状态" |
+| 在途非阻断提醒 | 黄色提示条替代弹窗，减少一次交互 |
+| 按钮 loading 动画 | 旋转动画 + 完成变绿 `.btn-success` |
+| 缺货汇总表头固定 | 滚动时表头悬浮顶部 (sticky header) |
+| 退出确认弹窗 | 自定义按钮文案 "确定退出" / "留在页面" |
+| Toast 轻提示 | 顶部非阻断提示（上报成功/刷新完成/审批通知） |
+
+### 四、新功能
+
+| 功能 | 说明 |
+|------|------|
+| 门店公告栏 | 蓝色公告条，可关闭，支持 localStorage 缓存 + 服务端更新 |
+| 到货通知 | 门店端登录时自动检测到货商品，绿色横幅提示（15秒后消失） |
+| 新品审批/驳回 | 管理员审批/驳回新品订购（输入原因），门店端登录时自动收到审批结果 |
+| 管理员操作日志 | 批量标记、修改状态、授权设备、审批操作自动记录 |
+
+### 五、数据库新增
+
+| 对象 | 说明 |
+|------|------|
+| `login_fail_log` 表 | 登录失败持久化记录（防刷） |
+| `report_approvals` 表 | 新品审批回复（已审批/已驳回+原因+操作人） |
+| 10 个索引 | reports ×2、store_authorized_devices ×1、product_cache ×2、login_fail_log ×1、report_approvals ×2 |
+
+### 六、Edge Function 新增 Actions
+
+| Action | 用途 |
+|--------|------|
+| `get_summary` | 复合汇总（reports + plan + supplierLookup 合并为 1 次请求） |
+| `batch_update_status` | 批量标记补货状态 |
+| `get_approvals` | 获取所有新品审批记录 |
+| `approve_report` | 审批/驳回新品 |
+| `vba_sync` | VBA 回写后自动触发状态同步 |
+| `log_admin_action` | 管理员操作日志记录 |
+
+### 七、配置修复
+
+- `manifest.json` 版本号 3.17 → 3.19.0
+- CORS 白名单新增 `127.0.0.1` 支持本地测试
+- HTML 版本号统一更新（v=29 / v=27）
+- Keep-Warm 升级为 service_role 密钥 + 轻量 warm action
+
+### 八、累计量化
+
+| 指标 | 数值 |
+|------|------|
+| 删除冗余代码 | **~180 行** |
+| 新增功能代码 | **~300 行** |
+| 重复代码消除 | **5 处** → 统一到 utils.js |
+| 硬编码消除 | 门店列表 **7 处** → 1 处（STORE_CONFIG） |
+| 新增索引 | **10 个**数据库索引 |
+| ESF Actions | 43 → **50** 个 |
+| 部署组件 | 2 个 Edge Function + 1 个 SQL 脚本 |
 
 ---
 

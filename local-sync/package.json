@@ -1,0 +1,19 @@
+{
+  "name": "wszh-local-sync",
+  "version": "1.0.0",
+  "description": "本地数据同步脚本：SQL Server → Supabase 双向同步",
+  "type": "module",
+  "main": "sync.mjs",
+  "scripts": {
+    "sync": "node sync.mjs",
+    "sync:full": "node sync.mjs --full",
+    "sync:products": "node sync.mjs --products",
+    "sync:inventory": "node sync.mjs --inventory",
+    "sync:orders": "node sync.mjs --orders"
+  },
+  "dependencies": {
+    "mssql": "^10.0.1",
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1"
+  }
+}

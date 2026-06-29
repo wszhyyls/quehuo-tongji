@@ -12,7 +12,7 @@ import sql from "https://esm.sh/mssql@9";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const SQL_SERVER_HOST = Deno.env.get("SQL_SERVER_HOST")!;
-const SQL_SERVER_PORT = parseInt(Deno.env.get("SQL_SERVER_PORT") || "1290");
+const SQL_SERVER_PORT = parseInt(Deno.env.get("SQL_SERVER_PORT") || "1311");
 const SQL_SERVER_USER = Deno.env.get("SQL_SERVER_USER")!;
 const SQL_SERVER_PWD = Deno.env.get("SQL_SERVER_PASSWORD")!;
 const SQL_SERVER_DB = Deno.env.get("SQL_SERVER_DATABASE") || "RQZT";
@@ -23,8 +23,8 @@ const sqlConfig = {
   user: SQL_SERVER_USER,
   password: SQL_SERVER_PWD,
   database: SQL_SERVER_DB,
-  connectionTimeout: 30000,
-  requestTimeout: 60000,
+  connectionTimeout: 60000,
+  requestTimeout: 120000,
   options: {
     encrypt: false,
     trustServerCertificate: true,
@@ -94,6 +94,171 @@ function releasePool(pool: sql.ConnectionPool, dbName: string = SQL_SERVER_DB) {
   if (cache && cache.pool === pool) {
     cache.inUse = false;
     cache.lastUsed = Date.now();
+  }
+}
+
+// ========== v5.2 精准自动检测：按门店匹配库存，批量UPDATE ==========
+async function preciseAutoDetectStatus(
+  pool: sql.ConnectionPool,
+  supabaseClient: any
+): Promise<{ detected: number; details: string[] }> {
+  const details: string[] = [];
+  
+  try {
+    const feedbackResult = await pool.request().query(`
+      SELECT TOP 50 商品编码, 补货状态, ISNULL(实际订货数量, 0) as 订货数量
+      FROM dbo.Shortage_OrderFeedback WITH (NOLOCK)
+      WHERE 补货状态 NOT IN ('已完成', '厂家断货')
+      ORDER BY CASE 补货状态 WHEN '已订购' THEN 0 ELSE 1 END, 订货时间 DESC
+    `);
+    const orderedItems: any[] = feedbackResult.recordset || [];
+    if (orderedItems.length === 0) return { detected: 0, details: ['无待检测商品'] };
+    
+    const orderedCodes: string[] = orderedItems.map((r: any) => r.商品编码);
+    details.push(`${orderedCodes.length}个待检测: ${orderedCodes.slice(0, 10).join(', ')}${orderedCodes.length > 10 ? '...' : ''}`);
+    
+    // 从 Supabase 获取门店映射
+    const { data: reportRecords } = await supabaseClient
+      .from("reports")
+      .select("product_code, store_name")
+      .in("product_code", orderedCodes)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    
+    const productStoreMap: Record<string, string> = {};
+    for (const r of (reportRecords || [])) {
+      if (!productStoreMap[r.product_code] && r.store_name) productStoreMap[r.product_code] = r.store_name;
+    }
+    
+    const noStoreCodes = orderedCodes.filter(c => !productStoreMap[c]);
+    if (noStoreCodes.length > 0) {
+      details.push(`⚠ 未找到门店: ${noStoreCodes.slice(0, 10).join(', ')}${noStoreCodes.length > 10 ? `...共${noStoreCodes.length}个` : ''}`);
+    }
+    
+    const items: [string, string, number, string][] = [];
+    orderedItems.forEach((item: any) => {
+      const store = productStoreMap[item.商品编码];
+      if (store) items.push([item.商品编码, store, item.订货数量, item.补货状态]);
+    });
+    details.push(`有门店: ${items.length}个 ${items.slice(0, 5).map(([c,s,q,st]) => `${c}@${s}(${st}×${q})`).join(', ')}${items.length > 5 ? '...' : ''}`);
+    if (items.length === 0) return { detected: 0, details };
+    
+    // v5.4: RQZT跨库查 ZHYYLS 实时库存+在途（门店名→krec精确映射）
+    const storeMap: Record<string,string> = {
+      '02第二药店':'5','03第三药店':'6','04第四药店':'7','06常口店':'9',
+      '09第九药店':'11','17益丰店':'13','14第十四药店':'36','16凤凰山药店':'50',
+      '21富源店':'63','08第八药店':'66'
+    };
+    const storeToKrec = (n:string):string => storeMap[n] || '';
+    const stockLookup: Record<string, { 门店库存: number; 在途: number }> = {};
+    
+    for (const [code, store] of items) {
+      const krec = storeToKrec(store);
+      if (!krec) continue;
+      try {
+        const req = pool.request();
+        req.input("code", sql.NVarChar, code).input("krec", sql.NVarChar, krec);
+        const stockR = await req.query(`
+          SELECT ISNULL(SUM(gs.qty), 0) as 门店库存
+          FROM ZHYYLS.dbo.Vptype v JOIN ZHYYLS.dbo.GoodsStocks gs ON gs.prec = v.rec
+          WHERE v.usercode = @code AND gs.krec = @krec
+        `);
+        stockLookup[`${code}|||${store}`] = { 门店库存: (stockR.recordset?.[0] as any)?.门店库存 || 0, 在途: 0 };
+      } catch (_e) {}
+    }
+    
+    // 批量查在途
+    try {
+      const today = new Date().toISOString().substring(0,10);
+      const d30 = new Date(Date.now()-30*86400000).toISOString().substring(0,10);
+      const tr = await pool.request().query(`EXEC ZHYYLS.dbo.Gp_SendDoing 0,'','',0,0,0,'${d30}','${today}',0,0,0,2`);
+      if (tr.recordset?.length) {
+        const tm: Record<string,number>={}, recs:number[]=[];
+        for (const r of tr.recordset) { if(r.PRec&&r.posid&&r.Qty){ const k=`${r.posid}|||${r.PRec}`; tm[k]=(tm[k]||0)+Number(r.Qty); recs.push(r.PRec); } }
+        const pr=pool.request(); [...new Set(recs)].forEach((p,i)=>{pr.input(`p${i}`,sql.Int,p)});
+        const pm:Record<number,string>={};
+        const pi=[...new Set(recs)].map((_,i)=>`@p${i}`);
+        if(pi.length){ (await pr.query(`SELECT rec,usercode FROM ZHYYLS.dbo.vPtype WHERE rec IN(${pi.join(',')})`)).recordset?.forEach((r:any)=>{pm[r.rec]=r.usercode}); }
+        for(const [code,store] of items){let tq=0; const k=storeToKrec(store); if(k){ for(const[r,u]of Object.entries(pm)){if(u===code)tq+=tm[`${k}|||${r}`]||0}; if(stockLookup[`${code}|||${store}`])stockLookup[`${code}|||${store}`].在途=tq } }
+      }
+    } catch(_e){ details.push('⚠ 在途查询失败'); }
+    
+    const toComplete: string[] = [];
+    
+    // 按商品分组
+    const productGroups: Record<string, { stores: string[]; qty: number }> = {};
+    for (const [code, store, qty] of items) {
+      if (!productGroups[code]) productGroups[code] = { stores: [], qty };
+      productGroups[code].stores.push(store);
+    }
+    
+    for (const [code, group] of Object.entries(productGroups)) {
+      const stores = group.stores;
+      const qty = group.qty;
+      
+      // 仓库库存（krec 不在门店列表中即为仓库）
+      let warehouseStock = 0;
+      try {
+        const whR = await pool.request().input("code", sql.NVarChar, code).query(`
+          SELECT ISNULL(SUM(gs.qty),0) as 仓库库存
+          FROM ZHYYLS.dbo.Vptype v JOIN ZHYYLS.dbo.GoodsStocks gs ON gs.prec=v.rec
+          WHERE v.usercode=@code AND gs.krec = '3'
+        `);
+        warehouseStock = (whR.recordset?.[0] as any)?.仓库库存 || 0;
+      } catch (_) {}
+      
+      if (warehouseStock > qty) {
+        toComplete.push(code);
+        details.push(`✅ ${code} 仓库${warehouseStock}>订货${qty} → 已完成`);
+        continue;
+      }
+      
+      let allOk = true;
+      for (const store of stores) {
+        const row = stockLookup[`${code}|||${store}`];
+        if (!row || !(row.门店库存>qty||row.在途>qty)) { allOk = false; break; }
+      }
+      if (allOk && stores.length > 0) { toComplete.push(code); details.push(`✅ ${code} 全部门店满足 → 已完成`); }
+      else details.push(`❌ ${code} 不满足 订货=${qty}`);
+    }
+    
+    // 一次性批量UPDATE
+    if (toComplete.length > 0) {
+      const note = `自动完成(门店精准匹配) ${new Date().toISOString().substring(0, 16).replace('T', ' ')}`;
+      const updReq = pool.request();
+      updReq.input("备注", sql.NVarChar(500), note);
+      const inParams: string[] = [];
+      toComplete.forEach((code, i) => {
+        inParams.push(`@upc${i}`);
+        updReq.input(`upc${i}`, sql.NVarChar, code);
+      });
+      
+      const updateResult = await updReq.query(`
+        UPDATE dbo.Shortage_OrderFeedback
+        SET 补货状态 = '已完成', 到货确认时间 = GETDATE(),
+            备注 = ISNULL(备注, '') + ' | ' + @备注
+        OUTPUT INSERTED.商品编码
+        WHERE 商品编码 IN (${inParams.join(', ')}) AND 补货状态 NOT IN ('已完成', '厂家断货')
+      `);
+      const actual = (updateResult.recordset || []).length;
+      details.push(`SQL批量更新: ${actual}个`);
+      
+      // 同步更新 Supabase reports
+      try {
+        const { error: rptErr } = await supabaseClient
+          .from("reports")
+          .update({ replenish_status: '已完成' })
+          .in("product_code", toComplete);
+        if (rptErr) details.push(`⚠ Supabase同步失败: ${rptErr.message}`);
+        else details.push(`Supabase同步: ${toComplete.length}个`);
+      } catch (_e: any) { details.push(`⚠ Supabase异常: ${String(_e)}`); }
+      
+      return { detected: actual, details };
+    }
+    return { detected: 0, details };
+  } catch (err) {
+    console.error('[scheduled-task preciseAutoDetect] 错误:', err);
+    return { detected: 0, details: [String(err)] };
   }
 }
 
@@ -170,9 +335,9 @@ async function syncPurchasePlan(): Promise<{ success: boolean; message: string; 
     await pool.request().execute('usp_Sync_AllShortageCache');
     console.log('[定时任务] SPFXB_Result 同步完成');
     
-    // 自动检测订货状态
-    await pool.request().execute('usp_AutoDetectOrderStatus_Feedback');
-    console.log('[定时任务] 订货状态检测完成');
+    // v5.1: 禁用全局汇总自动检测，已完成状态需手动确认
+    // await pool.request().execute('usp_AutoDetectOrderStatus_Feedback');
+    console.log('[定时任务] 自动状态检测已禁用(已完成需手动确认)');
     
     // ========== 同步到 Supabase 缓存 ==========
     let supabaseSynced = 0;
@@ -214,7 +379,17 @@ async function syncPurchasePlan(): Promise<{ success: boolean; message: string; 
       console.error('[定时任务] Supabase缓存更新失败:', e);
     }
     
-    return { success: true, message: '采购计划同步完成', supabase_synced: supabaseSynced };
+    // v5.2: 按门店精确匹配的自动检测
+    let autoDetectCount = 0;
+    try {
+      const detectR = await preciseAutoDetectStatus(pool, supabase);
+      autoDetectCount = detectR.detected;
+      console.log(`[定时任务] 精准检测: ${autoDetectCount}个已完成`);
+    } catch (detectErr) {
+      console.error('[定时任务] 精准检测失败:', detectErr);
+    }
+    
+    return { success: true, message: `同步完成，${autoDetectCount}个已完成`, supabase_synced: supabaseSynced, auto_detected: autoDetectCount };
     
   } catch (err) {
     console.error('[定时任务] 采购计划同步失败:', err);
@@ -253,17 +428,6 @@ async function fullSync(): Promise<{ success: boolean; rqztSync: any; productSyn
   return {
     success: rqztResult.success && productResult.success && planResult.success,
     rqztSync: rqztResult,
-    productSync: productResult,
-    planSync: planResult
-  };
-}
-async function fullSync(): Promise<{ success: boolean; productSync: any; planSync: any }> {
-  console.log('[定时任务] 开始完整同步...');
-  const productResult = await syncProductCache();
-  const planResult = await syncPurchasePlan();
-  
-  return {
-    success: productResult.success && planResult.success,
     productSync: productResult,
     planSync: planResult
   };

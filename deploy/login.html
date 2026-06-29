@@ -10,8 +10,8 @@
     <link rel="apple-touch-icon" href="./static/icon-192.png">
     <meta name="theme-color" content="#667eea">
 
-    <link rel="stylesheet" href="./static/css/style.css?v=24">
-    <script src="./static/js/utils.js?v=24"></script>
+    <link rel="stylesheet" href="./static/css/style.css?v=29">
+    <script src="./static/js/utils.js?v=27"></script>
     <style>
         .login-mode-switch {
             display: flex;
@@ -134,7 +134,7 @@
                 <span style="display:inline-block;animation:spin 1s linear infinite;">&#8987;</span> 正在验证...
             </div>
             
-            <div class="version-info">V3.19.0</div>
+            <div class="version-info">V5.5.0</div>
         </div>
     </div>
 
@@ -495,10 +495,12 @@
         // ========== 页面加载时检查版本更新 ==========
         (function checkVersionUpdate() {
             try {
+                // 通过 Electron IPC 获取客户端真实版本号（非页面显示值）
                 var checkPromise;
                 if (window.electron && window.electron.ipcRenderer) {
                     checkPromise = window.electron.ipcRenderer.invoke('get-app-version');
                 } else {
+                    // 非 Electron 环境用页面显示版本（浏览器直接访问）
                     var versionEl = document.querySelector('.version-info');
                     checkPromise = Promise.resolve(versionEl ? versionEl.textContent.replace('V','').trim() : '0.0.0');
                 }

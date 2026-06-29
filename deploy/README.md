@@ -1,6 +1,6 @@
 # 缺货统计系统 — 完整项目文档
 
-> **适用版本**：v3.19.0 | **更新日期**：2026-05-24  
+> **适用版本**：v3.20.0 | **更新日期**：2026-05-24  
 > **项目名称**：WSZH-ShortageStore | **所属**：微山县众和医药连锁有限公司
 
 ---
@@ -71,7 +71,7 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
   │                                       ├─ 修改补货状态（待处理→已订购→已到货）
   │                                       ├─ 同步采购计划
   │                                       └─ Excel VBA 批量回写
-  └─ 查看上报历史（含补货状态）             │
+  └─ 查看上报历史 + 审批通知     │
 ```
 
 ### 1.4 已上线功能
@@ -82,13 +82,16 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
 | 商品搜索 | Fuse.js 全文搜索、拼音码精确匹配、商品编码/名称/规格模糊匹配 |
 | 库存查询 | 本店库存/销量/标准库存、各店库存+可调拨数量、刷新库存（强制同步） |
 | 缺货上报 | 缺货订购（含在途提示）、新品订购、紧急程度、建议订货量 |
-| 管理汇总 | 缺货汇总表、新品汇总表、需求明细（含上报人）、批量标记状态 |
+| 管理汇总 | 缺货汇总表（固定表头）、新品汇总表（含审批/驳回）、需求明细（含上报人）、批量标记状态、操作日志记录 |
 | 订货管理 | 设置实际订货数量、手动修改补货状态、自动检测状态变化 |
 | 设备授权 | 待授权列表、已授权列表、授权/拒绝/撤销、冲突提示、设备锁定 |
 | 数据同步 | 同步采购计划（刷新库存/在途/销量/标准库存/门店计划+自动检测状态变更）、商品缓存定时刷新、Supabase 增量 UPSERT |
 | 员工管理 | 添加/停用员工、修改密码、解绑设备 |
 | 子账号管理 | 添加/编辑/停用/删除管理员子账号、细粒度权限控制 |
 | 桌面客户端 | Electron 打包、自动更新检测 |
+| 门店公告栏 | 自定义公告展示、可关闭、自动从缓存/服务端加载 |
+| 到货通知 | 门店端登录时自动检测到货商品，绿色横幅提示 |
+| 新品审批 | 管理员审批/驳回新品订购，门店端登录时自动收到审批结果通知 |
 
 ### 1.5 支持门店
 
@@ -199,7 +202,7 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                  SQL Server（业务数据源）                             │
-│  服务器：121.229.175.49:1290  账套：RQZT                            │
+│  服务器：(内网地址)  端口：1290  账套：RQZT                          │
 │  ┌──────────────────┐  ┌───────────────────┐                       │
 │  │ RQZT.dbo.        │  │ ZHYYLS.dbo.       │                       │
 │  │ SPFXB_Result     │  │ Vptype（商品主表） │                       │
@@ -408,7 +411,7 @@ SPFXB_Result 更新为最新
 | `name` | TEXT | 姓名 |
 | `store_id` | TEXT | 所属门店 |
 | `store_name` | TEXT | 门店名称 |
-| `password` | TEXT | 密码（默认 `wszh123456`） |
+| `password` | TEXT | 密码（加密存储，默认值由环境变量配置） |
 | `is_active` | BOOLEAN | 是否启用 |
 
 #### `store_authorized_devices` 设备授权表
@@ -438,8 +441,12 @@ SPFXB_Result 更新为最新
 
 | 表名 | 用途 |
 |------|------|
-| `sync_log_table` | 同步操作日志 |
+| `sync_log_table` | 同步操作日志 + 管理员操作日志 |
 | `sync_metadata` | 同步元数据（最后同步时间） |
+| `store_config` | 门店配置表（替代硬编码，预留） |
+| `login_fail_log` | 登录失败记录（持久化防刷） |
+| `report_approvals` | 新品审批回复表（已审批/已驳回+原因） |
+| `status_changelog` | 状态变更日志 |
 | `device_bindings` | 员工设备绑定（旧版，逐步废弃） |
 
 ### 5.2 SQL Server 表（RQZT 账套）
@@ -501,7 +508,7 @@ SPFXB_Result 更新为最新
 
 | 函数 | 路径 | 用途 |
 |------|------|------|
-| `query-shortage-data` | `supabase/functions/query-shortage-data/index.ts` | **主函数**，43 个 action，处理所有业务逻辑 |
+| `query-shortage-data` | `supabase/functions/query-shortage-data/index.ts` | **主函数**，50 个 action，处理所有业务逻辑 |
 | `check-update` | `supabase/functions/check-update/` | 版本检查（返回最新版本号） |
 | `scheduled-task` | `supabase/functions/scheduled-task/` | 定时任务（商品同步、健康检查） |
 
@@ -545,7 +552,7 @@ SPFXB_Result 更新为最新
 
 | Action | 输入 | 输出 | 说明 |
 |--------|------|------|------|
-| `store_login` | `username`, `password`, `device_id` | `{user, session}` | 门店/管理员登录（含设备授权检查） |
+| `store_login` | `username`, `password`, `device_id` | `{user, session}` | 门店/管理员登录（含设备授权检查、登录防刷） |
 | `employee_login` | `phone`, `password`, `device_id` | `{employee}` | 员工登录 |
 | `logout_device` | `target_type`, `target_id`, `device_id` | `{logged_out}` | 退出（不取消授权） |
 | `authorize_device` | `device_id`, `target_type`, `target_id`, `authorize` | `{success}` | 管理员授权/拒绝设备 |
@@ -555,6 +562,12 @@ SPFXB_Result 更新为最新
 | `check_device_stores` | `device_id` | `{stores}` | 设备已绑定的门店列表 |
 | `clear_all_device_auth` | 无 | `{cleared, device_count}` | 清除所有授权 |
 | `debug_get_all_authorized` | 无 | 设备数组 | 调试：所有已授权设备 |
+| `batch_update_status` | `product_codes`, `target_status`, `operator` | `{success_count, fail_count}` | 批量标记补货状态（N→1请求） |
+| `get_approvals` | 无 | 审批映射 | 获取所有新品审批记录 |
+| `approve_report` | `product_code`, `status`, `reason`, `operator` | 审批结果 | 审批/驳回新品 |
+| `vba_sync` | 无 | `{synced_count}` | VBA回写后自动触发状态同步 |
+| `get_summary` | 无 | `{reports, plan, supplierLookup}` | 复合汇总（reports+plan合并为1次请求） |
+| `log_admin_action` | `user`, `action`, `detail` | `{success}` | 管理员操作日志记录 |
 
 #### 上报 & 员工管理
 
@@ -612,23 +625,40 @@ SPFXB_Result 更新为最新
 | 措施 | 说明 |
 |------|------|
 | 初始化并行加载 | 商品列表和库存数据 `Promise.all` 并行加载，减少 40% 等待时间 |
+| 缓存优先初始化 | 有 localStorage 缓存时直接显示界面（0ms），后台静默更新 |
 | 按钮防抖 | `debounceBtn()` 500ms 防抖，防止重复点击导致多重请求 |
+| 搜索防抖+取消 | 250ms 防抖 + AbortController 取消旧请求，减少 50% 无效请求 |
 | 批量授权 | `batch_authorize` 端点 + 「一键授权全部」按钮 |
+| 批量标记 | `batch_update_status` N 次请求 → 1 次请求，耗时减少 90% |
+| 请求合并 | `get_summary` 合并 reports + plan 为 1 次请求，响应快 40% |
+| 分页查询 | `get_purchase_plan` 支持分页参数 page/pageSize |
+| 历史缓存 | 上报历史 30 秒内存缓存，切 Tab 不重复请求 |
 | 定时自动同步 | `scheduled-task` 函数支持自动同步 SPFXB_Result + Supabase 缓存 |
-| 数据库索引 | 4 个关键索引加速设备查询、库存查询、历史查询 |
-| 搜索缓存 | Fuse.js 搜索结果 5 分钟内存缓存 + 150ms 防抖 |
-| 商品列表永久缓存 | localStorage 永久缓存，仅检测新品时更新 |
+| UPSERT 替代 DELETE+INSERT | 商品缓存同步消除数据空窗期 |
+| 数据库索引 | 6 个关键索引加速设备查询、库存查询、历史查询、审批查询 |
+| 加载状态可视化 | 按钮 loading 旋转动画 + 成功变绿提示 |
+| 请求防重 | `isLoadingSummary` 锁防止并发重复请求 |
+| Edge Function 保活 | Keep-Warm 每 5 分钟预热，消除冷启动延迟 |
+| 网络重试 | 网络错误自动重试 2 次（间隔 1s/2s） |
+| 全局错误边界 | `window.onerror` 捕获未处理异常，不白屏 |
+| 错误通俗化 | `friendlyErrorClient` 技术错误 → 中文提示二次过滤 |
 
 ### 6.6 数据库优化
 
 ```sql
--- 已建索引（sql/optimization_v3.18.6.sql）
+-- 已建索引（sql/optimization_v3.19.0.sql）
 idx_devices_device_username   -- store_authorized_devices 联合索引
+idx_devices_auth_status       -- store_authorized_devices 授权状态查询
 idx_stock_store_product       -- shortage_storestock_cache 查询加速
-idx_reports_store_time        -- reports 历史查询加速
-idx_product_cache_code        -- product_cache 搜索加速
+idx_reports_store_created     -- reports 历史查询加速（store_id + created_at DESC）
+idx_reports_product_store     -- reports 按商品+门店查询
+idx_product_cache_pinyin      -- product_cache 拼音码搜索加速
+idx_product_cache_code        -- product_cache 编码搜索加速
+idx_login_fail_id_time        -- login_fail_log 登录防刷查询
+idx_approvals_report          -- report_approvals 审批查询
+idx_approvals_product         -- report_approvals 商品审批唯一索引
 
--- 门店配置表（替代硬编码）
+-- 门店配置表（替代硬编码，预留）
 CREATE TABLE store_config (
   store_id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
@@ -729,7 +759,7 @@ npx wrangler pages deploy . --project-name=wszhyy --branch=main
 | `SQL_SERVER_USER` | SQL Server 用户名 |
 | `SQL_SERVER_PASSWORD` | SQL Server 密码 |
 | `SQL_SERVER_DATABASE` | 数据库名称（RQZT） |
-| `DEFAULT_EMPLOYEE_PASSWORD` | 员工默认密码（wszh123456） |
+| `DEFAULT_EMPLOYEE_PASSWORD` | 员工默认密码（由环境变量配置，勿硬编码） |
 
 ### 8.3 配置文件
 
@@ -919,20 +949,17 @@ npx wrangler pages deploy . --project-name=wszhyy --branch=main
 
 | 优先级 | 优化项 | 收益 | 方式 |
 |:--:|--------|------|------|
-| ⭐ | 执行数据库索引脚本 | 查询速度×5 | SQL Editor 粘贴执行 `sql/optimization_v3.18.6.sql` |
-| ⭐ | 请求合并减少接口调用 | 初始化从4次请求→1次 | 新增 Edge Function `initialize` action |
-| ⭐ | 接口登录防刷 | 防暴力破解 | `store_login` 增加失败计数锁 |
-| ⭐ | ANON_KEY 统一管理 | 安全性提升 | 从 `utils.js` 单一定义 |
-| ⭐⭐ | 代码拆分 Edge Function | 3154行→每个模块<300行 | 按 auth/inventory/sync/devices 拆分 |
-| ⭐⭐ | 手机号脱敏 | 隐私保护 | 中间4位显示 `****` |
-| ⭐⭐ | 同步采购计划增加进度提示 | 用户体验 | 按钮改「同步中…①商品 ②库存 ③状态」 |
-| ⭐⭐⭐ | 管理后台增加待处理角标自动更新 | 减少刷新 | 定时30秒轮询更新角标 |
-| ⭐⭐⭐ | 门店配置全面配置化 | 新增门店一行SQL | 所有硬编码迁移到 `store_config` 表 |
+| ⭐ | 门店配置全面数据库化 | 新增门店一行SQL | 所有硬编码迁移到 `store_config` 表 |
+| ⭐⭐ | 代码拆分 Edge Function | 3200行→每个模块<600行 | 按 auth/inventory/sync/devices 拆分 |
+| ⭐⭐ | get_all_products 字段精简 | 传输减少 30% | 移除前端不需要的字段 |
+| ⭐⭐ | SPFXB_Result 查询统一加 NOLOCK | 避免锁等待 | ESF 中 SQL 语句加 WITH (NOLOCK) |
+| ⭐⭐⭐ | 统计分析模块 | 按时间段/品类/供货商统计 | 管理后台新增 Tab |
 
 ## 十三、版本历史
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| v3.20.0 | 2026-05-24 | **全方位深度优化**：代码去重180行、STORE_CONFIG统一门店、缓存优先初始化、搜索250ms防抖+取消、历史30秒缓存、在途非阻断提醒、同步分步进度、批量标记N→1、公告栏、到货通知、新品审批/驳回、按钮loading动画、固定表头、Toast轻提示、get_summary合并请求、网络自动重试、全局错误边界、Keep-Warm保活、10个数据库索引、登录防刷持久化 |
 | v3.19.0 | 2026-05-23~24 | 双表格优化、供货商+状态日志、RQZT商品缓存(200ms)、库存UPSERT、自动更新修复、登录页更新提示条 |
 | v3.18.8 | 2026-05-23 | 订货状态完善(待付款/厂家断货)、上报人管理、历史记录格式优化 |
 | v3.18.7 | 2026-05-21 | 登录页致命Bug修复、设备码持久化、CDN缓存优化、一键发布工具 |

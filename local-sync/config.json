@@ -1,0 +1,24 @@
+{
+  "sqlServer": {
+    "host": "121.229.175.49",
+    "port": 1311,
+    "user": "zhyy03",
+    "password": "wszh@123_wszh",
+    "useWindowsAuth": false,
+    "database": "RQZT",
+    "zhDatabase": "ZHYYLS"
+  },
+  "supabase": {
+    "url": "https://qswpgnnedqvuegwfbprd.supabase.co",
+    "serviceKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzd3Bnbm5lZHF2dWVnd2ZicHJkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODcyNzQ2MSwiZXhwIjoyMDk0MzAzNDYxfQ.gkgIKEqBXtUMz9op1Q9nUnvIZVA4KOsdycQoAAigE4U"
+  },
+  "sync": {
+    "intervalSeconds": 60,
+    "batchSize": 100,
+    "autoDetectStatus": true,
+    "syncProducts": true,
+    "syncInventory": true,
+    "syncOrders": true,
+    "syncStatusLog": true
+  }
+}

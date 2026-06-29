@@ -1,0 +1,18 @@
+{
+  "name": "arch-refactor",
+  "leadAgentId": "91faff2a4d8142c69e94b60d6d00b3bf",
+  "workspacePath": "g:/Trae项目/缺货统计系统",
+  "createdAt": "2026-06-18T07:08:30.969Z",
+  "options": {
+    "workspacePath": "g:/Trae项目/缺货统计系统",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@arch-refactor",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    }
+  ],
+  "isAutoTeam": false
+}

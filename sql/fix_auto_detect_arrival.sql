@@ -16,31 +16,14 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    DECLARE @仓库完成Count INT = 0, @库存完成Count INT = 0;
+    DECLARE @已完成Count INT = 0, @已到货Count INT = 0;
 
-    -- ===== 步骤1（优先）：仓库库存>0 → 已完成 =====
-    -- 排除手工标记：待付款、厂家断货 不自动覆盖
+    -- ===== 步骤1（优先）：已在配送中(在途>0)或门店有库存 → 已完成 =====
+    -- 仅厂家断货不自动覆盖
     UPDATE f
     SET f.补货状态 = '已完成',
         f.到货确认时间 = GETDATE(),
-        f.备注 = ISNULL(f.备注, '') + ' | 自动完成(仓库有货) ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
-    FROM dbo.Shortage_OrderFeedback f
-    INNER JOIN (
-        SELECT 商品编码, SUM(ISNULL(配送中心库存数量, 0)) AS 仓库库存
-        FROM dbo.SPFXB_Result WITH (NOLOCK)
-        GROUP BY 商品编码
-    ) r ON f.商品编码 = r.商品编码
-    WHERE f.补货状态 NOT IN ('已完成', '待付款', '厂家断货')
-      AND r.仓库库存 > 0;
-
-    SET @仓库完成Count = @@ROWCOUNT;
-
-    -- ===== 步骤2：门店库存≥实际订货数量 OR 在途≥实际订货数量 → 已完成 =====
-    -- 排除在步骤1已完成的和手工标记状态
-    UPDATE f
-    SET f.补货状态 = '已完成',
-        f.到货确认时间 = GETDATE(),
-        f.备注 = ISNULL(f.备注, '') + ' | 自动完成(库存/在途满足) ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+        f.备注 = ISNULL(f.备注, '') + ' | 自动完成(已在途或门店有货) ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
     FROM dbo.Shortage_OrderFeedback f
     INNER JOIN (
         SELECT 
@@ -50,19 +33,33 @@ BEGIN
         FROM dbo.SPFXB_Result WITH (NOLOCK)
         GROUP BY 商品编码
     ) r ON f.商品编码 = r.商品编码
-    WHERE f.补货状态 NOT IN ('已完成', '待付款', '厂家断货')
-      AND f.实际订货数量 > 0
-      AND (r.总库存 >= f.实际订货数量 OR r.总在途 >= f.实际订货数量);
+    WHERE f.补货状态 NOT IN ('已完成', '已到货', '厂家断货')
+      AND (r.总在途 > 0 OR r.总库存 > 0);
+    SET @已完成Count = @@ROWCOUNT;
 
-    SET @库存完成Count = @@ROWCOUNT;
+    -- ===== 步骤2：仓库有货但未配送 → 已到货 =====
+    -- 提醒采购员：货到了仓库，需要安排配送到门店
+    UPDATE f
+    SET f.补货状态 = '已到货',
+        f.到货确认时间 = GETDATE(),
+        f.备注 = ISNULL(f.备注, '') + ' | 自动到货(仓库有货待配送) ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+    FROM dbo.Shortage_OrderFeedback f
+    INNER JOIN (
+        SELECT 商品编码, SUM(ISNULL(配送中心库存数量, 0)) AS 仓库库存
+        FROM dbo.SPFXB_Result WITH (NOLOCK)
+        GROUP BY 商品编码
+    ) r ON f.商品编码 = r.商品编码
+    WHERE f.补货状态 NOT IN ('已完成', '已到货', '厂家断货')
+      AND r.仓库库存 > 0;
+    SET @已到货Count = @@ROWCOUNT;
 
-    SELECT 仓库完成 = @仓库完成Count, 库存完成 = @库存完成Count, 操作 = '自动检测状态完成(v4.0)';
+    SELECT 已完成 = @已完成Count, 已到货 = @已到货Count, 操作 = '自动检测状态完成(v4.2)';
 END
 GO
 
-PRINT '>>> usp_AutoDetectOrderStatus_Feedback 已修复(v4.0)';
-PRINT '>>> 状态流：待处理 → 已订购（VBA上传订货）→ 已完成（仓库有货 OR 库存/在途满足）';
-PRINT '>>> 已移除 配货中、已到货 状态';
+PRINT '>>> usp_AutoDetectOrderStatus_Feedback 已修复(v4.2)';
+PRINT '>>> 状态流：待处理 → 已订购 → 已到货(仓库有货待配送) → 已完成(在途/门店有货)';
+PRINT '>>> 仅保留厂家断货为人工保护状态';
 GO
 
 -- =====================================================

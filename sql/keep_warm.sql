@@ -16,7 +16,7 @@ SELECT cron.schedule(
   '*/5 * * * *',
   $$
   SELECT net.http_post(
-    'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/query-shortage-data',
+    'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/query-shortage-data'::text,
     '{"action":"get_all_products"}'::jsonb,
     '{"Content-Type":"application/json","Authorization":"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzd3Bnbm5lZHF2dWVnd2ZicHJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3Mjc0NjEsImV4cCI6MjA5NDMwMzQ2MX0.mY_nlWoHc5UYDHB9jOif0zkYJ2OVx79KTgejcSGkhBI"}'::jsonb
   );

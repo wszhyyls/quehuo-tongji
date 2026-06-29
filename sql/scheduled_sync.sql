@@ -15,14 +15,15 @@ CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 
 -- 创建定时任务：每30分钟同步一次 SPFXB_Result
+-- 兼容低版本 pg_net：只用三参数
 SELECT cron.schedule(
   'sync-spfxb-result',
   '*/30 * * * *',
   $$
   SELECT net.http_post(
-    url := 'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/scheduled-task',
-    headers := '{"Content-Type":"application/json","Authorization":"Bearer YOUR_SERVICE_ROLE_KEY"}'::jsonb,
-    body := '{"action":"full_sync"}'::jsonb
+    'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/scheduled-task'::text,
+    '{"Content-Type":"application/json","Authorization":"Bearer YOUR_SERVICE_ROLE_KEY"}'::jsonb,
+    '{"action":"full_sync"}'::jsonb
   );
   $$
 );

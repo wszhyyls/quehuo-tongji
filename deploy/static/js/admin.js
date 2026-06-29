@@ -19,7 +19,7 @@ var currentPage = 1, pageSize = 20;
 var filteredData = [], completedData = [], currentFilterStatus = '';
 var isLoadingSummary = false; // 防重加载锁
 var selectedSuppliers = []; // 供货商多选列表
-var orderStatusCache = {}; // 订购入库/配送状态缓存 { buyMap:{}, sendMap:{} }
+var orderStatusCache = {}; // 入库/配送状态缓存 { buyMap:{}, sendMap:{}, stuckMap:{} }
 // 从 localStorage 恢复缓存（校验结构完整性）
 (function() {
     try {
@@ -30,6 +30,7 @@ var orderStatusCache = {}; // 订购入库/配送状态缓存 { buyMap:{}, sendM
                 orderStatusCache = parsed;
                 if (!orderStatusCache.buyMap) orderStatusCache.buyMap = {};
                 if (!orderStatusCache.sendMap) orderStatusCache.sendMap = {};
+                if (!orderStatusCache.stuckMap) orderStatusCache.stuckMap = {};
             }
         }
     } catch(e) {}
@@ -153,7 +154,7 @@ async function fetchStatusChangeLog(productCode) {
         });
     } catch(e) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);">查询出错</td></tr>'; }
 }
-function getBadgeClass(status) { var m = { '待处理':'pending','已订购':'ordered','已完成':'completed','待付款':'payment','厂家断货':'outstock' }; return m[status] || 'text'; }
+function getBadgeClass(status) { var m = { '待处理':'pending','已订购':'ordered','已到货':'arrived','已完成':'completed','待付款':'payment','厂家断货':'outstock' }; return m[status] || 'text'; }
 
 // 订货管理弹窗
 document.getElementById('orderModalClose').addEventListener('click', function() { document.getElementById('orderModal').classList.remove('show'); });
@@ -186,52 +187,57 @@ document.getElementById('syncPlanBtn').addEventListener('click', async function(
         localStorage.setItem('lastSyncTime', now);
         btn.title = '同步商品缓存 → 同步库存数据 → 自动检测状态变更\n上次同步：' + new Date(now).toLocaleString('zh-CN');
         showToast('同步完成！商品' + (pr.data?.synced||0) + '个，已自动检测状态', 'success');
-        loadSummary();
+        // 清前端缓存
+        localStorage.removeItem('orderStatusCache');
+        localStorage.removeItem('summaryData');
+        await loadSummary();
+        // 自动执行入库检测
+        await autoCheckOrderStatus();
     } catch(e) { showAlert('同步异常：' + e.message); btn.classList.remove('btn-loading'); }
     finally { setTimeout(function() { restore(); btn.classList.remove('btn-success'); }, 1500); }
 });
 
-// ========== 校验异常按钮 ==========
-document.getElementById('checkOrderBtn').addEventListener('click', async function() {
+// ========== 检测入库状态（提取核心逻辑供一键同步自动调用）==========
+async function autoCheckOrderStatus(silent) {
     var items = (summaryData && summaryData.shortage_by_product) || [];
-    if (items.length === 0) { showAlert('请先加载数据'); return; }
-    // 检测当前筛选后的所有商品
+    if (items.length === 0) return;
     var checkItems = filteredData.length > 0 ? filteredData : items;
     var codes = checkItems.map(function(p) { return p.product_code; });
-    // 构建订购日期映射 + 门店映射
+    if (codes.length === 0) return;
     var orderDates = {}, storePosNames = {};
     var storeNameById = {};
     STORE_CONFIG.forEach(function(s) { storeNameById[s.id] = s.name; });
     checkItems.forEach(function(p) {
-        if (p.latest_report_time) {
-            orderDates[p.product_code] = p.latest_report_time.slice(0, 10);
-        }
-        // 收集上报门店的PosName
+        if (p.latest_report_time) orderDates[p.product_code] = p.latest_report_time.slice(0, 10);
         var names = [];
-        for (var sid in p.stores) {
-            var sn = storeNameById[sid] || '';
-            if (sn && names.indexOf(sn) < 0) names.push(sn);
-        }
+        for (var sid in p.stores) { var sn = storeNameById[sid] || ''; if (sn && names.indexOf(sn) < 0) names.push(sn); }
         if (names.length > 0) storePosNames[p.product_code] = names;
     });
-    if (codes.length === 0) { showAlert('没有商品可检测'); return; }
-    var btn = this, restore = setBtnLoading(btn, '检测中...');
-    btn.classList.add('btn-loading');
     try {
         var resp = await callEdgeFunction('check_order_status', { product_codes: codes, order_dates: orderDates, store_pos_names: storePosNames });
-        if (!resp.success) { showAlert('检测失败：' + (resp.error || '未知')); return; }
+        if (!resp.success) return;
         orderStatusCache = resp.data;
         localStorage.setItem('orderStatusCache', JSON.stringify(orderStatusCache));
-        renderSummaryPage(); // 刷新显示
-        // 统计异常
-        var noBuy = codes.filter(function(c) { return !(resp.data.buyMap || {})[c]; });
-        var noSend = codes.filter(function(c) { return !(resp.data.sendMap || {})[c]; });
-        if (noBuy.length > 0 || noSend.length > 0) {
-            showAlert('校验异常汇总：\n\n未入库：' + noBuy.length + ' 个商品\n未配送：' + noSend.length + ' 个商品\n\n请查看表格中的红色【未入库】【未配送】标记');
-        } else {
-            showToast('全部正常！已订购商品均已入库并配送', 'success');
+        renderSummaryPage();
+        if (!silent) {
+            var noStock = codes.filter(function(c) { return !(resp.data.buyMap || {})[c]; });
+            var stuck = codes.filter(function(c) { return (resp.data.stuckMap || {})[c]; });
+            if (noStock.length > 0 || stuck.length > 0) {
+                showAlert('检测汇总：\n\n仓库未入库：' + noStock.length + ' 个商品（配送中心无库存）\n已入库未配送：' + stuck.length + ' 个商品（仓库有货但未发往门店）\n\n请查看表格中的红色标记');
+            } else {
+                showToast('全部正常！所有商品均已入库并配送中', 'success');
+            }
         }
-    } catch(e) { showAlert('检测异常：' + (e.message || '')); }
+    } catch(e) { if (!silent) showAlert('检测异常：' + (e.message || '')); }
+}
+
+// ========== 检测入库状态按钮 ==========
+document.getElementById('checkOrderBtn').addEventListener('click', async function() {
+    var items = (summaryData && summaryData.shortage_by_product) || [];
+    if (items.length === 0) { showAlert('请先加载数据'); return; }
+    var btn = this, restore = setBtnLoading(btn, '检测中...');
+    btn.classList.add('btn-loading');
+    try { await autoCheckOrderStatus(false); }
     finally { btn.classList.remove('btn-loading'); restore(); }
 });
 
@@ -340,12 +346,14 @@ async function loadSummary() {
         supplierList.forEach(function(s) {
             dropdown.innerHTML += '<div class="excel-filter-option" data-supplier="' + escapeHtml(s) + '"><label><input type="checkbox" class="excel-check" onchange="toggleSupplierItemCheckbox(this)"> ' + escapeHtml(s) + '</label></div>';
         });
-        selectedSuppliers = [];
+        // 保留已有的供货商筛选（刷新数据时不清空），过滤掉新数据中不存在的供货商
+        if (selectedSuppliers.length > 0) {
+            selectedSuppliers = selectedSuppliers.filter(function(s) { return suppliers[s]; });
+        }
         updateSupplierDisplay();
 
         filteredData = activeData; currentPage = 1; currentFilterStatus = '';
         document.getElementById('statusFilter').value = '';
-        selectedSuppliers = []; updateSupplierDisplay(); updateSupplierCheckmarks();
         renderSummaryPage(); renderCompletedSection();
         renderNewProductsTable();
 
@@ -410,7 +418,16 @@ function renderSummaryPage() {
         // 入库/配送状态
         var buyStat = '-', sendStat = '-';
         if (orderStatusCache.buyMap) {
-            buyStat = orderStatusCache.buyMap[p.product_code] ? '<span class="badge badge-ok">已入库</span>' : '<span class="badge badge-warn">未入库</span>';
+            if (orderStatusCache.buyMap[p.product_code]) {
+                // 已入库：再看是否卡住未配送
+                if (orderStatusCache.stuckMap && orderStatusCache.stuckMap[p.product_code]) {
+                    buyStat = '<span class="badge badge-warn">已入库✘未配送</span>';
+                } else {
+                    buyStat = '<span class="badge badge-ok">已入库</span>';
+                }
+            } else {
+                buyStat = '<span class="badge badge-warn">未入库</span>';
+            }
         }
         if (orderStatusCache.sendMap) {
             sendStat = orderStatusCache.sendMap[p.product_code] ? '<span class="badge badge-ok">已配送</span>' : '<span class="badge badge-warn">未配送</span>';
