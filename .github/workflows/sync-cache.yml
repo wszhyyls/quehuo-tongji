@@ -15,7 +15,7 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
             -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
-            -d '{"secret":"wszh_sync_2026"}' \
+            -d '{"secret":"${{ secrets.SYNC_CACHE_SECRET }}"}' \
             --max-time 120)
           
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
