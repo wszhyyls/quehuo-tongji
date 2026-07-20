@@ -1,4 +1,8 @@
+# Supabase 项目配置
+# v5.8.1+: sync-cache 独立函数禁用 JWT，由内部 secret 鉴权
+# 其他函数 (query-shortage-data) 保持默认 verify_jwt = true
+
 project_id = "qswpgnnedqvuegwfbprd"
 
-[functions.query-shortage-data]
-enabled = true
+[functions.sync-cache]
+verify_jwt = false

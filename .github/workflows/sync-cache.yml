@@ -1,0 +1,29 @@
+name: Sync SendBill Cache (每 10 分钟)
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 调用 sync-cache Edge Function
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/sync-cache" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -d '{"secret":"wszh_sync_2026"}' \
+            --max-time 120)
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ 同步成功: $BODY"
+          else
+            echo "❌ 失败 (HTTP $HTTP_CODE): $BODY"
+            exit 1
+          fi
