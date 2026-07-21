@@ -658,8 +658,10 @@ async function preciseAutoDetectStatus(
     }
 
     const arrivedPairs = completedPairs.filter(p => p.status === '已到货');
+    const completedCount = completedPairs.filter(p => p.status === '已完成').length;
+    const arrivedCount = arrivedPairs.length;
 
-    return { detected: updatedCount, details, arrivedPairs };
+    return { detected: updatedCount, details, arrivedPairs, completedCount, arrivedCount };
   } catch (err) {
     console.error("[preciseAutoDetect] 错误:", err);
     return { detected: 0, details: [String(err)] };
@@ -1858,13 +1860,17 @@ serve(async (req) => {
 
           // ② 自动检测状态
           let autoDetectCount = 0;
+          let completedPairCount = 0;
+          let arrivedPairCount = 0;
           let autoDetectDetails: string[] = [];
           let detectR: any = null; // 修复 ReferenceError：提升到 try 外声明，供后续通知使用
           try {
             detectR = await preciseAutoDetectStatus(pool, supabase);
             autoDetectCount = detectR.detected || 0;
+            completedPairCount = detectR.completedCount || 0;
+            arrivedPairCount = detectR.arrivedCount || 0;
             autoDetectDetails = detectR.details || [];
-            console.log(`[sync_with_auto_status] 精准检测: ${autoDetectCount}个已完成`);
+            console.log(`[sync_with_auto_status] 精准检测: ${completedPairCount}个已完成, ${arrivedPairCount}个已到货 (SP更新${autoDetectCount}条)`);
             for (const d of autoDetectDetails) {
               console.log(`  → ${d}`);
             }
@@ -1873,7 +1879,7 @@ serve(async (req) => {
             autoDetectDetails = [String(detectErr)];
           }
           
-          result = { success: true, message: `商品${syncedProducts}个, ${autoDetectCount}个已完成`, synced_products: syncedProducts, auto_detected: autoDetectCount, detect_details: autoDetectDetails };
+          result = { success: true, message: `已完成${completedPairCount} 已到货${arrivedPairCount}`, synced_products: syncedProducts, auto_detected: autoDetectCount, detect_details: autoDetectDetails };
 
           // ③ 给"已到货"的门店发送通知（去重：每个 store+product 只保留最新一条）
           const arrivedPairs = (detectR && detectR.arrivedPairs) || [];
