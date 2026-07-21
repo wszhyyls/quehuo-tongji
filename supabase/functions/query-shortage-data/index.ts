@@ -610,6 +610,53 @@ async function preciseAutoDetectStatus(
       console.warn('[Revert] 智能回退检查失败:', e);
     }
 
+    // 8.6 智能回退"已完成"：如果同一 (商品, 门店) 已有更新的 report，则把旧的"已完成"回退为"待处理"
+    // 场景：门店在标记"已完成"后又重新上报了需求（如 1160036 的 03第三药店 8:54 被自动标完成，但 03第三药店 又再次上报需求 10）
+    try {
+      const { data: completedItems } = await supabaseClient
+        .from("reports")
+        .select("id, product_code, store_id, status_changed_at")
+        .eq("replenish_status", "已完成")
+        .eq("order_type", "缺货订购")
+        .eq("status_remark", "自动")
+        .limit(500);
+      if (completedItems && completedItems.length > 0) {
+        let revertedCompleted = 0;
+        for (const item of completedItems) {
+          if (!item.product_code || !item.store_id || !item.status_changed_at) continue;
+          // 查找同一 (product, store) 在 status_changed_at 之后创建的新 report
+          const { data: newerReports, error: newerErr } = await supabaseClient
+            .from("reports")
+            .select("id")
+            .eq("product_code", item.product_code)
+            .eq("store_id", item.store_id)
+            .eq("order_type", "缺货订购")
+            .gt("created_at", item.status_changed_at)
+            .limit(1);
+          if (newerErr) continue;
+          if (newerReports && newerReports.length > 0) {
+            // 把旧的"已完成"回退为"待处理"
+            await supabaseClient.from("reports")
+              .update({
+                replenish_status: "待处理",
+                status_remark: "自动回退（同门店已重新上报）",
+                status_changed_at: new Date().toISOString(),
+                status_changed_by: "系统自动"
+              })
+              .eq("id", item.id);
+            revertedCompleted++;
+          }
+        }
+        if (revertedCompleted > 0) {
+          details.push(`已完成回退：${revertedCompleted} 条（同门店有更新上报）`);
+          console.log(`[Revert] ${revertedCompleted} 已完成 → 待处理（已重新上报）`);
+        }
+      }
+    } catch (e) {
+      console.warn('[Revert] 已完成回退检查失败:', e);
+      details.push(`已完成回退异常: ${String(e)}`);
+    }
+
     const arrivedPairs = completedPairs.filter(p => p.status === '已到货');
 
     return { detected: updatedCount, details, arrivedPairs };
