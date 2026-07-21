@@ -10,8 +10,8 @@
     <link rel="apple-touch-icon" href="./static/icon-192.png">
     <meta name="theme-color" content="#667eea">
 
-    <link rel="stylesheet" href="./static/css/style.css?v=29">
-    <script src="./static/js/utils.js?v=27"></script>
+    <link rel="stylesheet" href="./static/css/style.css?v=600">
+    <script src="./static/js/utils.js?v=600"></script>
     <style>
         .login-mode-switch {
             display: flex;
@@ -55,7 +55,9 @@
     <!-- 版本更新提示条 -->
     <div id="updateBanner" style="display:none;position:fixed;top:0;left:0;right:0;background:linear-gradient(135deg,#ff6b35,#f7931e);color:#fff;text-align:center;padding:12px 16px;font-size:14px;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,0.3);">
         <span id="updateBannerMsg">🔄 有新版本可用！建议更新后使用。</span>
-        <button id="updateBannerBtn" onclick="window.location.href=this.dataset.url" style="margin-left:12px;padding:4px 16px;background:#fff;color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;">立即下载</button>
+        <a id="directDownloadLink" href="#" download style="margin-left:12px;padding:4px 16px;background:#fff;color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址1</a>
+        <a id="directDownloadLink2" href="#" target="_blank" style="margin-left:6px;padding:4px 16px;background:rgba(255,255,255,0.85);color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址2</a>
+        <a id="directDownloadLink3" href="#" target="_blank" style="margin-left:6px;padding:4px 16px;background:rgba(255,255,255,0.85);color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">页面下载</a>
         <button onclick="this.parentElement.style.display='none'" style="margin-left:8px;background:none;border:none;color:rgba(255,255,255,0.7);cursor:pointer;font-size:18px;">&times;</button>
     </div>
     <div class="login-container">
@@ -134,7 +136,7 @@
                 <span style="display:inline-block;animation:spin 1s linear infinite;">&#8987;</span> 正在验证...
             </div>
             
-            <div class="version-info">V5.5.0</div>
+            <div class="version-info">V5.8.1</div>
         </div>
     </div>
 
@@ -471,6 +473,8 @@
 
                 showLoading(false);
                 var adminRoles = ['admin', 'super_admin'];
+                // 标记本次为"新登录"，store.html 收到后会自动弹通知中心
+                sessionStorage.setItem('fresh_login', '1');
                 window.location.href = adminRoles.indexOf(loginData.user.role) >= 0 ? './admin.html' : './store.html';
             } catch (err) {
                 showLoading(false);
@@ -492,6 +496,10 @@
         }
         function hideError() { document.getElementById('error').style.display = 'none'; }
         
+        // ========== 下载更新 ==========
+        // 直接用 <a> 标签下载，由 Electron will-download 事件接管
+        // 不再需要 downloadUpdate() 函数
+
         // ========== 页面加载时检查版本更新 ==========
         (function checkVersionUpdate() {
             try {
@@ -514,11 +522,29 @@
                         if (r.success && r.data && r.data.updateAvailable) {
                             var banner = document.getElementById('updateBanner');
                             var msg = document.getElementById('updateBannerMsg');
-                            var btn = document.getElementById('updateBannerBtn');
-                            msg.textContent = '🔔 发现新版本 V' + r.data.version + '，建议更新后使用！（当前版本 V' + currentVer + '）';
-                            // 直接使用固定下载链接，不依赖 Edge Function 缓存
-                            btn.dataset.url = 'https://github.com/wszhyyls/quehuo-tongji/releases/latest';
-                            btn.textContent = '下载 V' + r.data.version;
+                            msg.textContent = '🔔 发现新版本 V' + r.data.version + '，请下载更新！（当前 V' + currentVer + '）';
+                            // 优先使用服务端返回的直链（Cloudflare Pages Function 代理，绕开 GitHub CDN 阻塞）
+                            var directUrl = r.data.downloadUrl;
+                            var backupUrl = r.data.downloadUrl2;
+                            var pageUrl = r.data.downloadUrl3;
+                            var fileName = r.data.fileName || ('WSZH-ShortageStore-Setup-' + r.data.version + '.exe');
+                            // 下载地址1：CF 代理（主，自动下载）
+                            var btn = document.getElementById('directDownloadLink');
+                            if (btn && directUrl) {
+                                btn.href = directUrl;
+                                btn.download = fileName;
+                            }
+                            // 下载地址2：GitHub 原始直链（备1，自动下载）
+                            var btn2 = document.getElementById('directDownloadLink2');
+                            if (btn2 && backupUrl) {
+                                btn2.href = backupUrl;
+                                btn2.download = fileName;
+                            }
+                            // 下载地址3：GitHub 页面（最稳定，弹窗手动点）
+                            var btn3 = document.getElementById('directDownloadLink3');
+                            if (btn3 && pageUrl) {
+                                btn3.href = pageUrl;
+                            }
                             banner.style.display = 'block';
                         }
                     });
@@ -551,18 +577,23 @@
         }
     </style>
 
-    <!-- ========== PWA Service Worker ========== -->
+    <!-- ========== PWA Service Worker (v5.8.1+ 完全禁用) ========== -->
     <script>
       if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('./static/sw.js')
-            .then((registration) => {
-              console.log('✅ Service Worker registered:', registration.scope);
-            })
-            .catch((error) => {
-              console.log('❌ Service Worker registration failed:', error);
-            });
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          regs.forEach(function(reg) {
+            console.log('[Cleanup] Unregistering SW:', reg.scope);
+            reg.unregister();
+          });
         });
+        if (window.caches) {
+          caches.keys().then(function(names) {
+            names.forEach(function(name) {
+              console.log('[Cleanup] Deleting cache:', name);
+              caches.delete(name);
+            });
+          });
+        }
       }
     </script>
 </body>

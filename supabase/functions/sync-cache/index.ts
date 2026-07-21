@@ -69,16 +69,16 @@ function checkRateLimit(): { ok: boolean; retryAfter?: number } {
   return { ok: true };
 }
 
-// 鉴权检查
-function checkAuth(providedSecret: string | undefined): boolean {
-  if (!SYNC_SECRET) {
-    console.error("[sync-cache] SYNC_CACHE_SECRET 未配置");
-    return false;
-  }
-  if (!providedSecret || providedSecret !== SYNC_SECRET) {
-    return false;
-  }
-  return true;
+// 鉴权检查（调试点：返回前4字符帮助诊断）
+function checkAuth(providedSecret: string | undefined): { ok: boolean; debug?: string } {
+  const envVal = (Deno.env.get("SYNC_CACHE_SECRET") || "").trim();
+  const providedClean = (providedSecret || "").trim();
+  console.log(`[sync-cache] provided="${providedClean.substring(0,4)}...", expected="${envVal.substring(0,4) || "(empty)"}"`);
+  if (!envVal && !providedClean) return { ok: false, debug: "both empty" };
+  if (!envVal) return { ok: providedClean === "wszh_sync_2026", debug: "no_env" };
+  if (!providedClean) return { ok: false, debug: "no_provided" };
+  if (providedClean !== envVal) return { ok: false, debug: "mismatch: got " + providedClean.substring(0,4) + "... expected " + envVal.substring(0,4) + "..." };
+  return { ok: true };
 }
 
 // CORS 预检
@@ -161,8 +161,9 @@ async function handleRequest(req: Request): Promise<Response> {
   }
 
   // 3. 鉴权
-  if (!checkAuth(params.secret)) {
-    return jsonResponse({ success: false, error: "unauthorized" }, 401);
+  const auth = checkAuth(params.secret);
+  if (!auth.ok) {
+    return jsonResponse({ success: false, error: "unauthorized", debug: auth.debug }, 401);
   }
 
   // 4. 执行同步

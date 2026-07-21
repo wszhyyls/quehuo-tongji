@@ -19,7 +19,7 @@
 在 VBA 编辑器中打开 `回写实际订货.bas`，修改以下常量：
 
 ```vba
-Private Const SERVER_NAME As String = "121.229.175.49,1290"
+Private Const SERVER_NAME As String = "221.6.168.13,1290"
 Private Const DATABASE_NAME As String = "RQZT"
 Private Const DB_USER As String = "zhyy02"
 Private Const DB_PASSWORD As String = "你的密码"   ' <-- 修改为实际密码
@@ -83,7 +83,7 @@ EXEC dbo.usp_UpdateActualOrder
 ## 前提条件
 
 1. **SQL Server 对象已创建**：需要先执行 `create_order_feedback_objects.sql`
-2. **网络连通**：运行 Excel 的电脑需要能访问 `121.229.175.49,1290`
+2. **网络连通**：运行 Excel 的电脑需要能访问 `221.6.168.13,1290`
 3. **ADODB 支持**：Excel 默认支持，如提示"无法创建对象"，尝试：
    - `工具 → 引用 → 勾选 Microsoft ActiveX Data Objects 6.x Library`
 

@@ -1,6 +1,156 @@
 # 版本升级记录 (CHANGELOG)
 
-> 适用版本：v5.5.0 | 更新日期：2026-06-27
+> 适用版本：v5.8.1 | 更新日期：2026-07-17
+
+---
+
+## v5.8.1 — 加载卡死修复 + 强制更新（2026-07-17）
+
+### 一、关键 Bug 修复
+| Bug | 修复 |
+|-----|------|
+| 门店端加载一直卡在 0% | `callEdgeFunction` 增加 **30 秒超时**，Edge Function 卡死不再永久等待 |
+| 内联 15 秒超时保护（store.html） | 即使 store.js 完全失败也能弹出"刷新/跳过"按钮 |
+| 8 秒后显示"跳过加载"按钮 | 主动让用户跳过卡住的加载（v5.8.0 缺失此功能） |
+
+### 二、版本号强制升级
+- `package.json` / `splash.html` / `login.html` / `manifest.json` / `check-update` / `electron-main.js` 全部同步到 **v5.8.1**
+- **强制 v5.8.0 客户端升级**：check-update 检测到差异后会提示用户更新
+
+### 三、桌面快捷方式
+- NSIS `shortcutName` 设置为 **"众和医药缺货订购系统"**（不再带版本号）
+
+---
+
+## v5.8.0 — 门店历史表格优化 + Bug 修复（2026-07-17）
+
+### 一、门店历史上报记录表格调整
+
+| 变更 | 说明 |
+|------|------|
+| **取消「类型」列** | 门店端历史都是缺货订购，类型列无意义 |
+| **取消「紧急」列** | 简化表格，紧急度信息冗余 |
+| **新增「已配送」列** | 异步调用 `get_realtime_transit` 查询自最早上报日期起的累计配送量 |
+| **新增「仓库库存」列** | 异步调用 `get_warehouse_stock` 查询当前配送中心库存 |
+| **绿色高亮** | 已配送/仓库库存 > 0 时显示绿色 `#27ae60`，= 0 时显示灰色 |
+
+### 二、Bug 修复
+
+| Bug | 修复 |
+|-----|------|
+| 需求明细「已配送」列一直显示"查询中…" | `refreshTransitData` 增加兜底：接口失败 / 无数据 / 异常均显示 0 |
+| 后台管理显示「待处理」但门店显示「已完成」| `get_my_reports` 改为以 Supabase 为准，智能回退后不被 SQL Server 旧值覆盖 |
+| 各店库存弹窗表头与内容不对齐 | 设置显式列宽 + td 与 th 对齐方式一致 |
+
+### 三、文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `static/js/store.js` | `renderHistoryPage` 移除类型/紧急列 + `enrichHistoryRows` 异步填充两列 |
+| `store.html` | 表格头调整（4列 → 6列） |
+| `static/css/style.css` | 各店库存表格对齐规则 |
+| `static/js/admin.js` | `refreshTransitData` 0 兜底 |
+| `supabase/functions/query-shortage-data/index.ts` | `get_my_reports` 以 Supabase 为准 |
+
+---
+
+## v5.7.0 — 门店通知中心 + Bug 修复 + 环境变量修正（2026-07-14）
+
+### 一、门店通知中心（新功能）
+
+**触发逻辑**：
+- 管理端"一键同步"自动检测到商品状态变为"已到货"时，写入 `store_notifications` 表
+- **仅推送给上报了该商品的门店**（精准推送，不打扰无关门店）
+
+**门店端展示**：
+- 🔔 铃铛按钮 + 红色未读数徽章（脉动动画），位于顶部标题栏
+- 📬 通知中心弹窗：消息列表 + 时间戳 + 已读/未读状态
+- 打开弹窗即全部标为已读，支持"全部已读"按钮
+- **Supabase Realtime 实时订阅**：管理端同步后门店端 0 延迟弹通知（兜底 60s 轮询）
+- **所有员工互通**：同一门店共用账号，任一员工登录都能看到通知
+
+**新增接口**：
+| 接口 | 用途 |
+|------|------|
+| `get_store_notifications` | 拉取门店通知 + 未读数 |
+| `mark_notification_read` | 标记已读（单条/全部） |
+| `store_notifications` 表 | id / store_id / product_code / message / is_read / created_at |
+
+### 二、Bug 修复
+
+| Bug | 修复 |
+|-----|------|
+| `ReferenceError: detectR is not defined` | `const detectR` 块级作用域，改为 `let` 在 try 外声明 |
+| 连接错误被误报为"系统繁忙" | `friendlyError` 改为大小写不敏感匹配 |
+| `SQL_SERVER_HOST` 配错 | `221.6.160.13` → `221.6.168.13` + 默认IP兜底 |
+| "已到货"误入已完成列表 | `isCompletedStatus` 移除"已到货" |
+| 启动日志缺失 | 新增 `[配置] SQL Server: host:port/db, User: xxx` |
+
+### 三、文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `supabase/functions/query-shortage-data/index.ts` | detectR修复、friendlyError优化、IP兜底、通知API |
+| `static/js/store.js` | 通知中心(铃铛+弹窗+Realtime)、`getEffectiveStoreId()` |
+| `store.html` | 铃铛按钮 + 通知弹窗 |
+| `static/css/style.css` | 铃铛/徽章/弹窗样式 |
+| `static/js/utils.js` | `isCompletedStatus` 移除"已到货" |
+| `store_notifications`(Supabase) | 新建表 + Realtime |
+
+---
+
+## v5.6.0 — 按门店自动判定：已完成 / 已到货（2026-07-13）
+
+### 一、双层自动判定体系（SP 重构）
+
+**判定顺序**：先门店（C3）→ 后仓库（C1/C2）
+
+| 条件 | 判定结果 | 逻辑 | 数据来源 |
+|------|----------|------|----------|
+| **C3** | 已完成 | 门店库存 ≥ 需求 **或** 上报日期后配送 ≥ 需求 | `GoodsStocks` krec=门店 + `vBuySendSumDetail` |
+| **C1** | 已到货 | 仓库库存 ≥ **剩余未完成门店的总需求** | `GoodsStocks` krec=3 |
+| **C2** | 已到货 | 上报日期后采购入库 ≥ 剩余未完成门店的总需求 | `vBuySendSumDetail` BillType=34 |
+
+**关键变化**：
+- `sp_RQZT_AutoComplete` 返回 `(product_code, store_name, status)` 三元组（按门店）
+- 配送查询从 `Gp_SendDoing` → `vBuySendSumDetail` + `SendBill_His`，严格按**上报日期后**过滤
+- 排除门店间调拨（`Comment NOT LIKE '%调货出库单%'`）
+- C1/C2 只针对 C3 未覆盖的剩余门店（避免仓库满足覆盖门店已配送的情况）
+
+### 二、一键同步精简
+
+- ❌ 删除 `usp_Sync_AllShortageCache`（不再依赖 RQZT 采购计划同步，省资源）
+- ❌ 删除 `SPFXB_Result → shortage_storestock_cache` 同步（需求明细直查 ZHYYLS）
+- ✅ 只保留 `preciseAutoDetectStatus`：写入 staging → 调用 SP → 按门店更新 Supabase reports
+- 检测范围改为从 Supabase `reports` 表直接筛选（避免 Feedback 表"已完成"遗漏新上报门店）
+
+### 三、前端优化
+
+| 改动 | 说明 |
+|------|------|
+| 删除"入库/配送"列 | 状态由"已到货/已完成"判定 |
+| 新增"仓库库存"列 | 配送中心 krec=3 实时数据，异步刷新 |
+| 状态新增"已到货" | 仓库可满足但门店未满足时显示 |
+| 已完成列表翻页 | 每页 20 条，快速页码，默认展开 |
+| 供货商编码匹配 | 同时查原始编码 + 去前导零编码 |
+| 连接超时优化 | `connectionTimeout: 15s`, `requestTimeout: 30s` |
+
+### 四、Edge Function 新增接口
+
+| 接口 | 用途 |
+|------|------|
+| `get_realtime_stock` | 按商品+门店查实时库存/已配送 |
+| `get_warehouse_stock` | 按商品查配送中心库存 |
+| `get_suppliers` | 按商品查 Vptype.comment 供货商 |
+
+### 五、文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `supabase/functions/query-shortage-data/index.ts` | SP 调用、判定逻辑、新接口、连接/超时优化 |
+| `static/js/admin.js` | 完成列表翻页、仓库库存列、一键同步简化 |
+| `static/js/utils.js` | `isCompletedStatus` 增加已到货 |
+| `admin.html` | 列头调整、完成列表翻页容器 |
 
 ---
 

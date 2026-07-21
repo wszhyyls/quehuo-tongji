@@ -1,6 +1,6 @@
 {
   "name": "wszh-shortage-store",
-  "version": "5.5.0",
+  "version": "5.8.1",
   "description": "微山县众和医药连锁有限公司 - 门店缺货上报客户端",
   "main": "electron-main.js",
   "scripts": {
@@ -22,7 +22,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "众和医药缺货订购系统"
     },
     "files": [
       "electron-main.js",

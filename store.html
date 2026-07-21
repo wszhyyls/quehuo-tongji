@@ -8,16 +8,17 @@
     <!-- ========== PWA 支持 ========== -->
     <link rel="manifest" href="./manifest.json">
     <link rel="apple-touch-icon" href="./static/icon-192.png">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="缺货上报">
     <meta name="theme-color" content="#667eea">
     <!-- ============================ -->
 
-    <link rel="stylesheet" href="./static/css/style.css?v=29">
+    <link rel="stylesheet" href="./static/css/style.css?v=600">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="./static/js/fuse.min.js?v=1"></script>
-    <script src="./static/js/utils.js?v=28"></script>
+    <script src="./static/js/utils.js?v=600"></script>
 </head>
 <body>
     <!-- 预加载遮罩层 -->
@@ -39,6 +40,10 @@
             <span class="company-name">微山县众和医药连锁有限公司</span>
         </div>
         <div class="header-right">
+            <button id="notifBtn" class="btn-notif" title="通知中心" aria-label="通知中心">
+                <span class="notif-icon">🔔</span>
+                <span id="notifBadge" class="notif-badge" style="display:none;">0</span>
+            </button>
             <button id="themeBtn" class="btn-theme" title="切换主题">切换主题</button>
             <button id="logoutBtn" class="btn-logout">退出登录</button>
         </div>
@@ -219,21 +224,24 @@
                 <table id="historyList" class="data-table">
                     <thead>
                         <tr>
-                            <th style="width:85px;white-space:nowrap;">日期</th>
-                            <th style="width:55px;text-align:center;white-space:nowrap;">类型</th>
-                            <th style="width:80px;white-space:nowrap;">商品编码</th>
-                            <th style="width:140px;white-space:nowrap;">品名</th>
+                            <th style="width:80px;white-space:nowrap;">日期</th>
+                            <th style="width:75px;white-space:nowrap;">商品编码</th>
+                            <th style="width:130px;white-space:nowrap;">品名</th>
                             <th style="width:60px;white-space:nowrap;">规格</th>
-                            <th style="width:55px;white-space:nowrap;">紧急</th>
-                            <th style="width:50px;white-space:nowrap;">需求</th>
-                            <th style="width:90px;white-space:nowrap;">补货</th>
-                            <th id="reporterHeader" style="width:68px;white-space:nowrap;">上报人</th>
+                            <th style="width:45px;white-space:nowrap;">需求</th>
+                            <th style="width:75px;white-space:nowrap;">仓库库存</th>
+                            <th style="width:80px;white-space:nowrap;">补货</th>
+                            <th id="reporterHeader" style="width:60px;white-space:nowrap;">上报人</th>
                         </tr>
                     </thead>
                     <tbody id="historyTbody"></tbody>
                 </table>
-                <div id="historyLoadMore" class="load-more-container" style="display:none;">
-                    <button id="loadMoreBtn" class="btn-search btn-load-more">加载更多</button>
+                <div id="historyPagination" class="pagination-bar" style="display:none;">
+                    <span id="historyPageInfo" style="margin-right:12px;">第 1 / 1 页（共 0 条）</span>
+                    <button class="btn-pagenum" onclick="changeHistoryPage(-1)" disabled>◀ 上一页</button>
+                    <span id="historyPageNumbers"></span>
+                    <button class="btn-pagenum" onclick="changeHistoryPage(1)" disabled>下一页 ▶</button>
+                    <span style="margin-left:16px;">跳至 <input id="historyPageJumpInput" type="number" min="1" value="1" style="width:50px;padding:2px 6px;font-size:12px;border-radius:4px;border:1px solid var(--input-border);"> 页 <button class="btn-pagenum" onclick="goToHistoryPage()">GO</button></span>
                 </div>
                 <div id="historyEmpty" class="search-empty" style="display:none;">暂无符合条件的记录</div>
             </div>
@@ -269,9 +277,9 @@
                 <table class="stock-table stock-compact-table">
                     <thead>
                         <tr>
-                            <th>门店/仓库</th>
-                            <th>库存</th>
-                            <th>可调拨</th>
+                            <th style="width:50%;text-align:left;padding-left:14px;">门店/仓库</th>
+                            <th style="width:25%;">库存</th>
+                            <th style="width:25%;">可调拨</th>
                         </tr>
                     </thead>
                     <tbody id="stockTbody"></tbody>
@@ -281,20 +289,44 @@
         </div>
     </div>
 
-    <script src="./static/js/store.js?v=29"></script>
+    <!-- ========== 通知中心弹窗 ========== -->
+    <div id="notifModal" class="modal">
+        <div class="modal-content notif-modal-content">
+            <div class="notif-modal-header">
+                <h3>通知中心 — 已到货商品</h3>
+                <button id="notifModalClose" class="btn-modal-close">×</button>
+            </div>
+            <div class="notif-modal-body" id="notifList">
+                <div class="notif-empty">暂无通知</div>
+            </div>
+            <div class="notif-modal-footer">
+                <button id="notifMarkAllBtn" class="btn-secondary-sm">全部标记为已读</button>
+                <span class="notif-tip">到货通知会通过弹窗提醒您</span>
+            </div>
+        </div>
+    </div>
 
-    <!-- ========== PWA Service Worker ========== -->
+    <script src="./static/js/store.js?v=600"></script>
+
+    <!-- ========== PWA Service Worker (v5.8.1+ 完全禁用：旧 SW 缓存的旧 JS 与新代码不兼容) ========== -->
     <script>
       if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('./static/sw.js')
-            .then((registration) => {
-              console.log('✅ Service Worker registered:', registration.scope);
-            })
-            .catch((error) => {
-              console.log('❌ Service Worker registration failed:', error);
-            });
+        // 1. 强制清理所有旧的 Service Worker 和缓存（每次刷新都清）
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          regs.forEach(function(reg) {
+            console.log('[Cleanup] Unregistering SW:', reg.scope);
+            reg.unregister();
+          });
         });
+        if (window.caches) {
+          caches.keys().then(function(names) {
+            names.forEach(function(name) {
+              console.log('[Cleanup] Deleting cache:', name);
+              caches.delete(name);
+            });
+          });
+        }
+        // 2. 不再注册新的 SW（避免缓存干扰正常加载；如需 PWA 离线功能后续可重新设计）
       }
     </script>
     <style>

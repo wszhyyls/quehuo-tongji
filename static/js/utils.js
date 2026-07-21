@@ -34,6 +34,10 @@ function getStoreDeviceLimit(storeId) {
 
 // ========== 补货状态定义（全局唯一）v4.2==========
 var ORDER_STATUSES = ['待处理', '已订购', '已到货', '已完成', '待付款', '厂家断货'];
+window.isCompletedStatus = function(status) {
+    // "已到货" 不算完成（仓库有货但还没到门店，仍需关注）
+    return status === '已完成' || status === '厂家断货';
+};
 var STATUS_BADGE_CLASS = {
     '待处理': 'replenish-pending',
     '配货中': 'replenish-in-transit', 
@@ -42,10 +46,6 @@ var STATUS_BADGE_CLASS = {
     '已完成': 'replenish-completed',
     '待付款': 'replenish-payment',
     '厂家断货': 'replenish-outstock'
-};
-
-window.isCompletedStatus = function(status) {
-    return status === '已完成' || status === '厂家断货';
 };
 
 // 获取补货状态徽章HTML（全局统一）
@@ -255,13 +255,29 @@ var _edgeAbortController = null;
 function callEdgeFunction(action, params, options) {
     options = options || {};
     var retryCount = options.retryCount || 0;
-    var maxRetries = options.maxRetries || 0;
+    var maxRetries = options.maxRetries !== undefined ? options.maxRetries : 1; // v5.8.1+ 默认重试 1 次（冷启动超时自动重试）
     var signal = options.signal || null;
+    var timeoutMs = options.timeout || 60000; // 默认 60 秒超时（v5.8.1+ 兼容冷启动）
     var token = localStorage.getItem('token');
 
     // 如果传了 signal 但未传入 options.signal，从 AbortController 获取
     if (!signal && options.abortable !== false) {
         // 不为每个请求都创建 AbortController，由调用方传入
+    }
+
+    // 自动注入超时（如果调用方没传 signal 的话）
+    var internalController = null;
+    var finalSignal = signal;
+    if (!signal) {
+        internalController = new AbortController();
+        finalSignal = internalController.signal;
+        setTimeout(function() {
+            if (internalController) {
+                // v5.8.1+ 改为 LOG 而非 WARN：超时是预期的（冷启动），会自动重试，不应惊扰用户
+                console.log('[callEdgeFunction] ' + action + ' 首次响应慢（>' + timeoutMs + 'ms），自动重试');
+                try { internalController.abort(); } catch(e) {}
+            }
+        }, timeoutMs);
     }
 
     return fetch(EDGE_FUNCTION_URL, {
@@ -271,7 +287,7 @@ function callEdgeFunction(action, params, options) {
             'Authorization': 'Bearer ' + token
         },
         body: JSON.stringify({ action: action, params: params }),
-        signal: signal
+        signal: finalSignal
     }).then(function(resp) {
         if (!resp.ok) {
             // JWT过期自动续期
@@ -308,19 +324,27 @@ function callEdgeFunction(action, params, options) {
         }
         return resp.json();
     }).catch(function(err) {
-        // 网络错误自动重试
-        if (retryCount < maxRetries && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.name === 'AbortError')) {
-            if (err.name === 'AbortError') {
-                console.log('[callEdgeFunction] 请求被取消: ' + action);
-                return { success: false, error: '请求已取消' };
-            }
-            var delay = (retryCount + 1) * 1000;
-            console.log('[callEdgeFunction] 网络错误，' + delay + 'ms后重试(' + (retryCount+1) + '/' + maxRetries + ')');
-            return new Promise(function(resolve) {
-                setTimeout(function() {
-                    resolve(callEdgeFunction(action, params, { retryCount: retryCount + 1, maxRetries: maxRetries, signal: signal }));
-                }, delay);
+        // v5.8.1+ 超时/网络错误自动重试（冷启动期间第一次 30s 超时，第二次 60s 必成功）
+        if (retryCount < maxRetries && (
+            err.message.includes('Failed to fetch') || 
+            err.message.includes('NetworkError') || 
+            err.name === 'AbortError'
+        )) {
+            // 超时重试：用更长 timeout（第 N+1 次比第 N 次多 30s）
+            var retryTimeout = timeoutMs + (retryCount + 1) * 30000;
+            // v5.8.1+ 重试用 DEBUG 级别（不在控制台显示），减少噪音
+            // console.debug('[AutoRetry] ' + action + ' ' + (err.name === 'AbortError' ? '超时' : '失败') +
+            //     '，' + retryTimeout + 'ms 后重试（第' + (retryCount+1) + '次）');
+            return callEdgeFunction(action, params, { 
+                retryCount: retryCount + 1, 
+                maxRetries: maxRetries,
+                timeout: retryTimeout
             });
+        }
+        if (err.name === 'AbortError') {
+            // 重试用尽仍失败 - 这才是真正需要警告的场景
+            console.warn('[callEdgeFunction] ' + action + ' 重试 ' + maxRetries + ' 次后仍超时');
+            return { success: false, error: '请求超时，已放弃重试' };
         }
         logError('Edge Function调用失败', err);
         return { success: false, error: err.message, _connTimeout: err._connTimeout || false };

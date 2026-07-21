@@ -1,7 +1,70 @@
 # 缺货统计系统 — 完整项目文档
 
-> **适用版本**：v3.20.0 | **更新日期**：2026-05-24  
+> **适用版本**：v5.8.0 | **更新日期**：2026-07-17  
 > **项目名称**：WSZH-ShortageStore | **所属**：微山县众和医药连锁有限公司
+
+---
+
+## 🔥 v5.8.0 核心升级（2026-07-17）
+
+### 门店历史上报记录表格优化
+| 变更 | 说明 |
+|------|------|
+| 取消「类型」列 | 门店端都是缺货订购，无意义 |
+| 取消「紧急」列 | 信息冗余 |
+| 新增「已配送」列 | 异步调用 `get_realtime_transit`，按最早上报日期累计 |
+| 新增「仓库库存」列 | 异步调用 `get_warehouse_stock`，实时 SQL Server 查询 |
+| 翻页功能 | 同后台缺货汇总的翻页控件（页码/上下页/跳转），每页 20 条 |
+| 绿色高亮 | 已配送/仓库库存 > 0 时显示 `#27ae60`，= 0 显示灰色 |
+
+### Bug 修复
+| Bug | 修复 |
+|-----|------|
+| 需求明细「已配送」列一直显示"查询中…" | `refreshTransitData` 增加 0 兜底（接口失败/无数据/异常均显示 0） |
+| 后台显示「待处理」但门店显示「已完成」| `get_my_reports` 改为以 Supabase 为准，智能回退不被 SQL Server 旧值覆盖 |
+| 各店库存弹窗表头与内容不对齐 | 设置显式列宽 + td 与 th 对齐一致 |
+
+---
+
+## 🔥 v5.7.0 核心升级（2026-07-14）
+
+### 门店通知中心（新功能）
+- 🔔 铃铛按钮 + 红色未读数徽章（脉动动画）
+- 📬 通知中心弹窗：消息列表 + 时间戳 + 已读/未读状态
+- **Supabase Realtime 实时订阅**：管理端同步后 0 延迟推送到门店
+- **所有员工互通**：同一门店任一员工都能看到通知
+- 触发逻辑：一键同步检测到"已到货" → 写入 `store_notifications` → 仅推送给上报该商品的门店
+
+### Bug 修复
+- `ReferenceError: detectR is not defined`（`let` 声明位置错误）
+- 连接错误被误报为"系统繁忙"（`friendlyError` 大小写不敏感）
+- `SQL_SERVER_HOST` 配错（`221.6.160.13` → `221.6.168.13` + 默认IP兜底）
+- "已到货"误入已完成列表（`isCompletedStatus` 移除"已到货"）
+
+---
+
+## 🔥 v5.6.0 核心升级（2026-07-13）
+
+### 按门店自动判定：已完成 / 已到货
+| 项目 | v5.5 旧版 | v5.6 新版 |
+|------|----------|----------|
+| 判定粒度 | 按商品整体 | **按门店单独判定** |
+| 判定顺序 | 仓库优先 → 门店 | **门店优先 → 仓库补判** |
+| 状态 | 已完成 / 待处理 | **已完成 / 已到货 / 待处理** |
+| 配送查询 | `Gp_SendDoing`(30天) | `vBuySendSumDetail`(上报日期后) |
+| 一键同步 | RQZT同步 + 自动检测 | **仅自动检测**（省资源） |
+| 前端列 | 入库/配送 | **仓库库存** |
+
+### 判定条件
+| 条件 | 结果 | 逻辑 |
+|------|------|------|
+| C3 | 已完成 | 门店库存 ≥ 需求 **或** 上报日期后配送 ≥ 需求 |
+| C1 | 已到货 | 仓库库存 ≥ 剩余未完成门店总需求 |
+| C2 | 已到货 | 上报日期后采购入库 ≥ 剩余未完成门店总需求 |
+
+- 先 C3 门店判定（满足即完成，不再参与仓库判定）
+- 后 C1/C2 对剩余门店判定（仓库/采购可覆盖 → 已到货）
+- 全部不满足 → 待处理
 
 ---
 
@@ -12,10 +75,15 @@
 **核心架构**：
 ```
 门店客户端 (Electron/login.html → store.html) 
-    ↓ Edge Function (query-shortage-data: 45个action, 3150行)
-    ↓ SQL Server RQZT (读写) + ZHYYLS (只读源数据) + Supabase (缓存/认证)
-管理后台 (admin.html)
+    ↓ Edge Function (query-shortage-data: 70+action, ~4656行)
+    ↓ SQL Server RQZT (读写/SP) + ZHYYLS (只读: GoodsStocks+Vptype+vBuySendSumDetail) + Supabase (reports/认证/通知)
+管理后台 (admin.html) → 一键同步 → 按门店自动判定：已完成 / 已到货 → 写 store_notifications
+    ↓ Supabase Realtime
+门店端通知中心（v5.7） ← 实时推送
 ```
+- **一键同步**：商品缓存同步 + `preciseAutoDetectStatus` + 智能回退（仓库=0→待处理）→ 写 `store_notifications` → Realtime 推送门店
+- **判定顺序**：门店满足（已完成）→ 剩余门店仓库/采购满足（已到货）→ 其他（待处理）→ 仓库=0 时回退
+- **状态主数据源**：`reports.replenish_status`（Supabase），不回退时 SQL Server 作为兜底
 
 **修改文件指南**：
 - 改前端 → `login.html` / `store.html` + `static/js/store.js` / `admin.html` + `static/js/admin.js`
@@ -69,7 +137,8 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
   │                                       ├─ 查看各门店缺货汇总
   │                                       ├─ 订货管理（设置实际订货数量）
   │                                       ├─ 修改补货状态（待处理→已订购→已到货）
-  │                                       ├─ 同步采购计划
+  │                                       ├─ 一键同步（自动判定+智能回退）
+  │  ◀──────── 通知中心 (Realtime) ────────┤  ├─ 推送"已到货"通知
   │                                       └─ Excel VBA 批量回写
   └─ 查看上报历史 + 审批通知     │
 ```
@@ -91,7 +160,12 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
 | 桌面客户端 | Electron 打包、自动更新检测 |
 | 门店公告栏 | 自定义公告展示、可关闭、自动从缓存/服务端加载 |
 | 到货通知 | 门店端登录时自动检测到货商品，绿色横幅提示 |
-| 新品审批 | 管理员审批/驳回新品订购，门店端登录时自动收到审批结果通知 |
+| 通知中心 | 铃铛按钮 + 弹窗 + Supabase Realtime 实时推送（v5.7），全员互通 |
+| 需求明细 | 后台管理查看各门店上报明细，含实时配送/库存/在途数据（v3.19） |
+| 状态变更日志 | 按商品查询历史状态变更记录（v3.19） |
+| 智能回退 | "已到货"商品仓库库存=0时自动回退"待处理"（v5.7） |
+| 门店历史翻页 | 正式翻页控件（同后台缺货汇总），每页 20 条（v5.8） |
+| 实时配送列 | 门店历史记录"已配送"列实时从 SQL Server 查询（v5.8） |
 
 ### 1.5 支持门店
 
@@ -224,10 +298,11 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
 | **后端计算** | Supabase Edge Functions (Deno) | `query-shortage-data` 主函数 |
 | **后端依赖** | `mssql@9`（SQL Server 连接） | `@supabase/supabase-js@2` |
 | **认证** | Supabase Auth (JWT) | 邮箱注册，设备绑定 |
-| **缓存数据库** | Supabase PostgreSQL | 商品缓存、库存缓存、日志 |
+| **缓存数据库** | Supabase PostgreSQL | 商品缓存、库存缓存、日志、通知表 |
 | **业务数据库** | SQL Server | RQZT 账套，存储过程 |
 | **桌面客户端** | Electron | Windows 打包 |
 | **VBA** | Excel VBA + ADODB | 批量回写订货数量 |
+| **实时通信** | Supabase Realtime | 通知中心实时推送 |
 
 ### 3.3 关键设计决策
 
@@ -240,6 +315,8 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
 | 商品搜索 | Fuse.js 前端内存搜索 | 毫秒级，无网络延迟 |
 | 库存加载 | Supabase 缓存优先 → SQL Server 降级 | 速度 + 可靠性 |
 | 后端计算 | Edge Functions (Deno) | 无服务器，按需扩展 |
+| 状态主数据源 | Supabase `reports.replenish_status` | 智能回退能即时生效，不被 SQL Server 旧值覆盖 |
+| 实时通知 | Supabase Realtime (postgres_changes) | 0 延迟推送，省轮询流量 |
 
 ---
 
@@ -437,6 +514,20 @@ SPFXB_Result 更新为最新
 | `permissions` | JSONB | 权限配置 |
 | `is_active` | BOOLEAN | 是否启用 |
 
+#### `store_notifications` 门店到货通知表（v5.7）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `store_id` | TEXT | 门店编码 |
+| `product_code` | TEXT | 商品编码 |
+| `product_name` | TEXT | 商品名称 |
+| `message` | TEXT | 通知内容 |
+| `is_read` | BOOLEAN | 是否已读 |
+| `created_at` | TIMESTAMPTZ | 创建时间 |
+
+> 唯一索引：`UNIQUE INDEX (store_id, product_code)`（v5.7 加上去重）  
+> 实时订阅：`postgres_changes` INSERT 事件 → 门店端 0 延迟接收
+
 #### 其他 Supabase 表
 
 | 表名 | 用途 |
@@ -447,6 +538,8 @@ SPFXB_Result 更新为最新
 | `login_fail_log` | 登录失败记录（持久化防刷） |
 | `report_approvals` | 新品审批回复表（已审批/已驳回+原因） |
 | `status_changelog` | 状态变更日志 |
+| `store_notifications` | 门店到货通知表（v5.7） |
+| `status_change_log` | 状态变更日志（v5.8，区别于 SQL Server 的 StatusChangeLog） |
 | `device_bindings` | 员工设备绑定（旧版，逐步废弃） |
 
 ### 5.2 SQL Server 表（RQZT 账套）
@@ -568,6 +661,16 @@ SPFXB_Result 更新为最新
 | `vba_sync` | 无 | `{synced_count}` | VBA回写后自动触发状态同步 |
 | `get_summary` | 无 | `{reports, plan, supplierLookup}` | 复合汇总（reports+plan合并为1次请求） |
 | `log_admin_action` | `user`, `action`, `detail` | `{success}` | 管理员操作日志记录 |
+| `get_suppliers` | `product_codes` | `{supplierLookup}` | 批量查询供货商（ZHYYLS Vptype.comment） |
+| `get_warehouse_stock` | `product_codes` | `{warehouseStockMap}` | 批量查询仓库库存（配送中心） |
+| `get_realtime_stock` | `product_codes` | `{realtimeStockMap, realtimeTransitMap}` | 批量查询门店实时库存/在途 |
+| `get_realtime_transit` | `product_code`, `items[{store_name, since}]` | `{transitMap}` | 单商品多门店配送量（需求明细用） |
+| `get_status_change_log` | `top?`, `log_product_code?` | 日志数组 | 状态变更日志 |
+| `get_store_notifications` | `store_id` | `{notifications, unread_count}` | 门店通知列表（v5.7） |
+| `mark_notification_read` | `store_id`, `all?`, `id?` | `{success}` | 标记通知已读（v5.7） |
+| `revert_false_completed` | 无 | `{checked, reverted, kept}` | 撤销误判的"已完成"商品 |
+| `delete_new_product` | `product_code`, `operator` | `{success}` | 删除新品订购汇总 |
+| `backfill_status_time` | 无 | `{backfilled}` | 回填状态变更时间 |
 
 #### 上报 & 员工管理
 
@@ -755,7 +858,7 @@ npx wrangler pages deploy . --project-name=wszhyy --branch=main
 | `SUPABASE_URL` | Supabase 项目 URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase Service Role Key |
 | `SQL_SERVER_HOST` | SQL Server 地址 |
-| `SQL_SERVER_PORT` | SQL Server 端口（1290） |
+| `SQL_SERVER_PORT` | SQL Server 端口（1311） |
 | `SQL_SERVER_USER` | SQL Server 用户名 |
 | `SQL_SERVER_PASSWORD` | SQL Server 密码 |
 | `SQL_SERVER_DATABASE` | 数据库名称（RQZT） |
@@ -950,15 +1053,20 @@ npx wrangler pages deploy . --project-name=wszhyy --branch=main
 | 优先级 | 优化项 | 收益 | 方式 |
 |:--:|--------|------|------|
 | ⭐ | 门店配置全面数据库化 | 新增门店一行SQL | 所有硬编码迁移到 `store_config` 表 |
-| ⭐⭐ | 代码拆分 Edge Function | 3200行→每个模块<600行 | 按 auth/inventory/sync/devices 拆分 |
+| ⭐ | Edge Function 拆分 | 4656行→每个模块<800行 | 按 auth/inventory/sync/notifications 拆分 |
+| ⭐⭐ | get_realtime_transit 按 since 分组返回 | 修复"所有行同值"问题 | SQL 按 (product_code, since) 分组 |
+| ⭐⭐ | store_notifications 自动清理 | 避免表无限增长 | 7天前已读记录定时清理 |
 | ⭐⭐ | get_all_products 字段精简 | 传输减少 30% | 移除前端不需要的字段 |
-| ⭐⭐ | SPFXB_Result 查询统一加 NOLOCK | 避免锁等待 | ESF 中 SQL 语句加 WITH (NOLOCK) |
-| ⭐⭐⭐ | 统计分析模块 | 按时间段/品类/供货商统计 | 管理后台新增 Tab |
+| ⭐⭐ | 后台统计图表 | 数据可视化 | ECharts 集成 |
+| ⭐⭐⭐ | 历史记录导出 Excel | 方便存档 | SheetJS 集成 |
 
 ## 十三、版本历史
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v5.8.0** | **2026-07-17** | **门店历史表优化**：移除"类型/紧急"列，新增"已配送/仓库库存"列（异步查询 SQL Server），引入正式翻页控件；修复需求明细"已配送"一直显示"查询中…"、后台/门店状态不一致、各店库存弹窗表头不对齐 |
+| **v5.7.0** | **2026-07-14** | **门店通知中心**：铃铛按钮 + 弹窗 + Supabase Realtime 实时推送 + 全员互通；修复 detectR 块级作用域、SQL_SERVER_HOST 配错（221.6.160.13→221.6.168.13）、"已到货"误入已完成列表 |
+| **v5.6.0** | **2026-07-13** | **按门店自动判定**：C1/C2/C3 拆解（门店优先→仓库补判），状态枚举扩充为"已完成/已到货/待处理"，配送查询从 Gp_SendDoing 改为 vBuySendSumDetail（上报日期后），一键同步仅做自动检测 |
 | v3.20.0 | 2026-05-24 | **全方位深度优化**：代码去重180行、STORE_CONFIG统一门店、缓存优先初始化、搜索250ms防抖+取消、历史30秒缓存、在途非阻断提醒、同步分步进度、批量标记N→1、公告栏、到货通知、新品审批/驳回、按钮loading动画、固定表头、Toast轻提示、get_summary合并请求、网络自动重试、全局错误边界、Keep-Warm保活、10个数据库索引、登录防刷持久化 |
 | v3.19.0 | 2026-05-23~24 | 双表格优化、供货商+状态日志、RQZT商品缓存(200ms)、库存UPSERT、自动更新修复、登录页更新提示条 |
 | v3.18.8 | 2026-05-23 | 订货状态完善(待付款/厂家断货)、上报人管理、历史记录格式优化 |

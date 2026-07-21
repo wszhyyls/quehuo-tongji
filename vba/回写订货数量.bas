@@ -8,7 +8,7 @@ Option Explicit
 ' -----------------------------------------------------------
 ' 数据库连接参数（根据实际情况修改）
 ' -----------------------------------------------------------
-Private Const SERVER_NAME As String = "121.229.175.49,1290"
+Private Const SERVER_NAME As String = "221.6.168.13,1290"
 Private Const DATABASE_NAME As String = "RQZT"
 Private Const DB_USER As String = "000000"
 Private Const DB_PASSWORD As String = "1000000"

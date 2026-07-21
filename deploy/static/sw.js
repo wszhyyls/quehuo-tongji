@@ -1,5 +1,5 @@
 // Service Worker for 缺货统计系统 PWA
-const CACHE_NAME = 'shortage-tool-v4.2';
+const CACHE_NAME = 'shortage-tool-v5.8.1';
 const STATIC_ASSETS = [
   '/',
   '/login.html',
@@ -64,40 +64,38 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 对于同源请求，使用缓存优先策略
+  // JS/CSS/HTML 文件：网络优先（v5.8.1+ 修复：避免缓存旧版导致 SyntaxError）
+  if (url.pathname.match(/\.(js|css|html)$/) || url.pathname === '/' || url.pathname.endsWith('.html')) {
+    event.respondWith(
+      fetch(request, { cache: 'no-cache' })
+        .then((response) => {
+          if (response.ok) {
+            const clonedResponse = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clonedResponse));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request).then(r => r || new Response('Offline', { status: 503 })))
+    );
+    return;
+  }
+
+  // 其他资源：缓存优先
   if (url.origin === location.origin) {
     event.respondWith(
       caches.match(request)
         .then((cachedResponse) => {
-          if (cachedResponse) {
-            // 返回缓存，同时在后台更新缓存
-            event.waitUntil(
-              fetch(request)
-                .then((response) => {
-                  if (response.ok) {
-                    caches.open(CACHE_NAME)
-                      .then((cache) => cache.put(request, response));
-                  }
-                })
-                .catch(() => {})
-            );
-            return cachedResponse;
-          }
-
-          // 没有缓存，发起网络请求
-          return fetch(request)
-            .then((response) => {
-              if (response.ok) {
-                const clonedResponse = response.clone();
-                caches.open(CACHE_NAME)
-                  .then((cache) => cache.put(request, clonedResponse));
-              }
-              return response;
-            });
+          if (cachedResponse) return cachedResponse;
+          return fetch(request).then((response) => {
+            if (response.ok) {
+              const clonedResponse = response.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put(request, clonedResponse));
+            }
+            return response;
+          });
         })
     );
   } else {
-    // 其他请求直接放行
     event.respondWith(fetch(request));
   }
 });

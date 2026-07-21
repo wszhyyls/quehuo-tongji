@@ -8,7 +8,7 @@ Option Explicit
 ' -----------------------------------------------------------
 ' 数据库连接参数
 ' -----------------------------------------------------------
-Private Const SERVER As String = "121.229.175.49,1290"
+Private Const SERVER As String = "221.6.168.13,1290"
 Private Const DB As String = "RQZT"
 Private Const USER As String = "zhyy02"
 Private Const PWD As String = "你的密码"   ' <-- 改成你的密码

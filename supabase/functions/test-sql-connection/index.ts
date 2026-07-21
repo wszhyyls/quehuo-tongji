@@ -3,7 +3,7 @@ import { serve } from "https://deno.land/std@0.192.0/http/server.ts";
 import sql from "https://esm.sh/mssql@9";
 
 const SQL_CONFIG = {
-  server: "121.229.175.49",
+  server: "221.6.168.13",
   port: 1311,
   user: Deno.env.get("SQL_SERVER_USER")!,
   password: Deno.env.get("SQL_SERVER_PASSWORD")!,
