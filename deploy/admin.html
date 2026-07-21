@@ -345,9 +345,15 @@
                 <button id="detailModalClose" class="btn-modal-close">×</button>
             </div>
             <div id="detailProductInfo" style="padding:10px 16px;font-size:14px;color:var(--text-secondary);border-bottom:1px solid var(--input-border);background:linear-gradient(135deg,#667eea18,#764ba218);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div style="padding:8px 16px;background:#f8f9fa;border-bottom:1px solid #e0e0e0;display:flex;align-items:center;gap:12px;font-size:12px;">
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#555;">
+                    <input type="checkbox" id="detailHideCompleted" onchange="toggleHideCompleted()">
+                    <span>只看未完成门店（已配送≥需求会自动隐藏）</span>
+                </label>
+            </div>
             <div class="stock-modal-body" style="padding:0;">
                 <table class="stock-table stock-compact-table" id="detailTable" style="font-size:13px;table-layout:fixed;width:100%;">
-                    <thead><tr><th style="width:85px;">日期</th><th style="width:105px;">门店</th><th style="width:50px;">库存</th><th style="width:50px;">已配送</th><th style="width:50px;">需求</th><th style="width:70px;">上报人</th></tr></thead>
+                    <thead><tr><th style="width:75px;">日期</th><th style="width:90px;">门店</th><th style="width:45px;">库存</th><th style="width:55px;">已配送</th><th style="width:60px;">状态</th><th style="width:45px;">需求</th><th style="width:65px;">上报人</th></tr></thead>
                     <tbody id="detailTbody"></tbody>
                 </table>
             </div>

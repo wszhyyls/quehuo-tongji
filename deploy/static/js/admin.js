@@ -160,7 +160,9 @@ async function refreshTransitData(productCode, stores) {
                 cell.textContent = 0;
                 cell.style.color = '#999';
                 cell.style.fontWeight = '600';
+                cell.setAttribute('data-transit', '0');
             });
+            updateDetailStatusCells();
             return;
         }
         var map = resp.data.transitMap;
@@ -174,12 +176,16 @@ async function refreshTransitData(productCode, stores) {
                 cell.textContent = 0;
                 cell.style.color = '#999';
                 cell.style.fontWeight = '600';
+                cell.setAttribute('data-transit', '0');
             } else {
                 cell.textContent = val;
                 cell.style.color = val > 0 ? '#27ae60' : '#999';
                 cell.style.fontWeight = '600';
+                cell.setAttribute('data-transit', String(val));
             }
         });
+        // 同步刷新"完成状态"列与过滤
+        updateDetailStatusCells();
     } catch(e) {
         console.warn('实时配送查询失败', e);
         // 查询异常：所有单元格显示 0
@@ -187,8 +193,51 @@ async function refreshTransitData(productCode, stores) {
             cell.textContent = 0;
             cell.style.color = '#999';
             cell.style.fontWeight = '600';
+            cell.setAttribute('data-transit', '0');
         });
+        updateDetailStatusCells();
     }
+}
+
+// 根据"已配送"和"需求"实时计算每行的"完成状态"和行高亮
+function updateDetailStatusCells() {
+    var rows = document.querySelectorAll('#detailTbody tr');
+    rows.forEach(function(row) {
+        var transitCell = row.querySelector('td.real-transit');
+        var demandCell = row.querySelector('td.detail-demand');
+        var statusCell = row.querySelector('td.detail-status');
+        if (!transitCell || !demandCell || !statusCell) return;
+        var transit = parseInt(transitCell.getAttribute('data-transit') || '0') || 0;
+        var demand = parseInt(demandCell.getAttribute('data-demand') || '0') || 0;
+        var rowBg = '';
+        if (demand > 0 && transit >= demand) {
+            statusCell.innerHTML = '<span style="color:#27ae60;font-weight:700;">✓ 已完成</span>';
+            rowBg = '#e8f5e9';
+            row.setAttribute('data-row-status', 'completed');
+        } else if (transit > 0 && transit < demand) {
+            statusCell.innerHTML = '<span style="color:#ef6c00;font-weight:600;">⚠ 部分</span>';
+            rowBg = '#fff3e0';
+            row.setAttribute('data-row-status', 'partial');
+        } else {
+            statusCell.innerHTML = '<span style="color:#999;">未配送</span>';
+            row.setAttribute('data-row-status', 'pending');
+        }
+        row.style.background = rowBg;
+    });
+    // 应用过滤
+    applyHideCompletedFilter();
+}
+
+// 切换"只看未完成"过滤
+window.toggleHideCompleted = function() { applyHideCompletedFilter(); };
+function applyHideCompletedFilter() {
+    var cb = document.getElementById('detailHideCompleted');
+    if (!cb) return;
+    var rows = document.querySelectorAll('#detailTbody tr');
+    rows.forEach(function(row) {
+        var status = row.getAttribute('data-row-status');
+        row.style.display = (cb.checked && status === 'completed') ? 'none' : '';
+    });
 }
 
 // ========== 状态变更日志 ==========
@@ -490,7 +539,7 @@ async function loadSummary() {
                 // 已完成列表：按 (商品编码, 门店) 独立显示
                 var mapKey = completed ? (key + '||' + (r.store_id || r.store_name || '')) : key;
                 if (!target[mapKey]) {
-                    target[mapKey] = { product_code:r.product_code, product_name:pname, specification:(pi&&pi.规格)||r.specification, manufacturer:(pi&&pi.生产企业)||r.manufacturer, supplier:sup, total_demand:0, replenish_status:rs, replenish_manual:(pi&&pi.实际订货数量)||0, dc_stock:(pi&&pi.仓库库存)||0, stores:{}, latest_report_time:'', status_changed_at:r.status_changed_at || '', status_remark:r.status_remark || '', status_changed_by:r.status_changed_by || '' };
+                    target[mapKey] = { product_code:r.product_code, store_id:r.store_id, product_name:pname, specification:(pi&&pi.规格)||r.specification, manufacturer:(pi&&pi.生产企业)||r.manufacturer, supplier:sup, total_demand:0, replenish_status:rs, replenish_manual:(pi&&pi.实际订货数量)||0, dc_stock:(pi&&pi.仓库库存)||0, stores:{}, latest_report_time:'', status_changed_at:r.status_changed_at || '', status_remark:r.status_remark || '', status_changed_by:r.status_changed_by || '' };
                 }
                 var rt = r.created_at || '';
                 if (rt > (target[mapKey].latest_report_time||'')) target[mapKey].latest_report_time = rt;
@@ -1082,7 +1131,9 @@ window.showShortageDetail = function(idx, fromCompleted) {
     function gsn(rid) { var mi = phoneToStore[rid]||rid; return sns[mi]||rid; }
     var sa = []; for (var sid in p.stores) { var s = p.stores[sid]; sa.push({ sid:sid, name:gsn(sid), stock:s.stock, transit:s.transit, demand:s.demand, report_time:s.report_time||'', reporter:s.reporter||'' }); }
     sa.sort(function(a,b) { return (b.report_time||'').localeCompare(a.report_time||''); });
-    sa.forEach(function(s) { tbody.innerHTML += '<tr><td style="font-size:12px;color:#555;">'+safeText(s.report_time?new Date(s.report_time).toLocaleDateString('zh-CN'):'-')+'</td><td style="font-size:13px;">'+safeText(s.name)+'</td><td>'+safeText(s.stock)+'</td><td class="real-transit" data-store="'+safeText(s.name)+'" style="color:#999;">查询中…</td><td style="font-weight:600;color:var(--primary);">'+safeText(s.demand)+'</td><td style="font-size:12px;color:var(--text-muted);">'+safeText(s.reporter||'-')+'</td></tr>'; });
+    sa.forEach(function(s) { tbody.innerHTML += '<tr><td style="font-size:12px;color:#555;">'+safeText(s.report_time?new Date(s.report_time).toLocaleDateString('zh-CN'):'-')+'</td><td style="font-size:13px;">'+safeText(s.name)+'</td><td>'+safeText(s.stock)+'</td><td class="real-transit" data-store="'+safeText(s.name)+'" data-transit="0" style="color:#999;">查询中…</td><td class="detail-status" style="text-align:center;font-size:11px;">-</td><td class="detail-demand" data-demand="'+safeText(s.demand)+'" style="font-weight:600;color:var(--primary);text-align:center;">'+safeText(s.demand)+'</td><td style="font-size:12px;color:var(--text-muted);">'+safeText(s.reporter||'-')+'</td></tr>'; });
+    // 重置过滤复选框
+    var cb = document.getElementById('detailHideCompleted'); if (cb) cb.checked = false;
     document.getElementById('detailModal').classList.add('show');
     // 异步刷新实时配送数据
     refreshTransitData(p.product_code, sa);
