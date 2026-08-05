@@ -1,7 +1,49 @@
 # 缺货统计系统 — 完整项目文档
 
-> **适用版本**：v5.8.0 | **更新日期**：2026-07-17  
+> **适用版本**：v5.8.2 | **更新日期**：2026-07-21  
 > **项目名称**：WSZH-ShortageStore | **所属**：微山县众和医药连锁有限公司
+
+---
+
+## 🔥 v5.8.2 核心升级（2026-07-21）
+
+### 状态判定策略大重构 + 自动转入已完成列表
+
+#### 1. 状态判定改为「严格按已配送」
+
+| 状态 | 条件 |
+|------|------|
+| ✓ 已完成 | 已配送 >= 需求 |
+| ⚠ 部分 | 0 < 已配送 < 需求 |
+| 未配送 | 已配送 = 0 |
+
+**不再参考库存**，只有配送记录决定状态。已配送 = 0 的门店统一显示"未配送"。
+
+#### 2. 汇总行需求算法重构
+
+旧算法 `total_demand - sum(transit)` 受 cbp/sbp 拆分影响（已完成门店从 total_demand 消失，但 transit 还在），导致汇总 42 ≠ 明细 47−8=39。
+
+新算法 `sum(max(0, demand - transit))` 按**门店明细逐行求和**，与明细弹窗显示逻辑完全一致。
+
+#### 3. 自动转入已完成列表（新功能）
+
+打开需求明细弹窗 → 实时配送数据加载完成后 → 自动检测「已配送 >= 需求」的行：
+- 后端 `mark_store_completed` action 按 (product_code, store_id) 粒度持久化到 Supabase
+- 前端：从 sbp.stores 移除、加入 completed_by_product、移除明细 DOM 行、重渲染汇总
+- 弹 Toast 提示：`已自动转入已完成列表：14第十四药店、04第四药店`
+
+#### 4. 关键 Bug 修复
+
+| Bug | 修复 |
+|-----|------|
+| 14 第十四药店已配送显示 0（实际配送 2）| since 用商品全局最早 `report_time`，而非每家门店各自的最新时间 |
+| 03 第三药店已配送 8 但需求不减 | `refreshTransitData` 的 transitMap 回写 `p.stores[sid].transit` + 触发汇总重渲染 |
+| 商品编码搜索无效 | 双重事件绑定（HTML oninput + JS addEventListener）|
+| 08 第四药店汇总查到 5 配送、明细查到 0 | 统一 since 为商品全局最早，消除两个接口的数据源差异 |
+
+#### 5. 客户端版本升级
+
+所有客户端文件从 5.8.1 → 5.8.2，electron-builder 重新打包，GitHub Release v5.8.2 已替换。
 
 ---
 
@@ -75,7 +117,7 @@
 **核心架构**：
 ```
 门店客户端 (Electron/login.html → store.html) 
-    ↓ Edge Function (query-shortage-data: 70+action, ~4656行)
+    ↓ Edge Function (query-shortage-data: 44 action, ~4700行)
     ↓ SQL Server RQZT (读写/SP) + ZHYYLS (只读: GoodsStocks+Vptype+vBuySendSumDetail) + Supabase (reports/认证/通知)
 管理后台 (admin.html) → 一键同步 → 按门店自动判定：已完成 / 已到货 → 写 store_notifications
     ↓ Supabase Realtime
@@ -601,7 +643,7 @@ SPFXB_Result 更新为最新
 
 | 函数 | 路径 | 用途 |
 |------|------|------|
-| `query-shortage-data` | `supabase/functions/query-shortage-data/index.ts` | **主函数**，50 个 action，处理所有业务逻辑 |
+| `query-shortage-data` | `supabase/functions/query-shortage-data/index.ts` | **主函数**，44 个 action，处理所有业务逻辑 |
 | `check-update` | `supabase/functions/check-update/` | 版本检查（返回最新版本号） |
 | `scheduled-task` | `supabase/functions/scheduled-task/` | 定时任务（商品同步、健康检查） |
 
@@ -979,7 +1021,7 @@ ALTER TABLE reports DISABLE ROW LEVEL SECURITY;
 ├── supabase/
 │   └── functions/
 │       ├── query-shortage-data/
-│       │   └── index.ts          # 主 Edge Function（43 action）
+│       │   └── index.ts          # 主 Edge Function（44 action）
 │       ├── check-update/
 │       │   └── index.ts          # 版本检查
 │       └── scheduled-task/
@@ -1064,6 +1106,8 @@ npx wrangler pages deploy . --project-name=wszhyy --branch=main
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v5.8.2** | **2026-07-21** | **状态判定策略大重构**：严格按已配送判定（已配送=0→未配送）；汇总需求改为 sum(max(0,d-t))；自动转入已完成列表（mark_store_completed 按 product_code+store_id 粒度持久化）；since 修复（用商品全局最早 report_time，不漏 7/18 配送）；商品编码搜索绑定修复；14 家 Bug 修复整合 |
+| **v5.8.1** | **2026-07-20** | **自动在线升级修复**：Edge Function 时区/库存查询/rem 截断修复；两阶段同步架构（SP 判定→apply_status_sync 异步批量）；实时配送数据 items 传递；已到货回退去 limit(500)；需求汇总 = 总需求 - 已配送；已完成回退逻辑；DW/phoneToStore 统一维护 |
 | **v5.8.0** | **2026-07-17** | **门店历史表优化**：移除"类型/紧急"列，新增"已配送/仓库库存"列（异步查询 SQL Server），引入正式翻页控件；修复需求明细"已配送"一直显示"查询中…"、后台/门店状态不一致、各店库存弹窗表头不对齐 |
 | **v5.7.0** | **2026-07-14** | **门店通知中心**：铃铛按钮 + 弹窗 + Supabase Realtime 实时推送 + 全员互通；修复 detectR 块级作用域、SQL_SERVER_HOST 配错（221.6.160.13→221.6.168.13）、"已到货"误入已完成列表 |
 | **v5.6.0** | **2026-07-13** | **按门店自动判定**：C1/C2/C3 拆解（门店优先→仓库补判），状态枚举扩充为"已完成/已到货/待处理"，配送查询从 Gp_SendDoing 改为 vBuySendSumDetail（上报日期后），一键同步仅做自动检测 |

@@ -234,50 +234,6 @@ function showConfirm(msg, onYes, onNo, yesText, noText) {
     }
 }
 
-// ========== 统一 Prompt 弹窗（替代浏览器原生 prompt，避免 Electron 拦截） ==========
-function showPrompt(title, msg, defaultValue, onOk, onCancel) {
-    var modal = document.getElementById('promptModal');
-    var titleEl = document.getElementById('promptTitle');
-    var msgEl = document.getElementById('promptMsg');
-    var inputEl = document.getElementById('promptInput');
-    var okBtn = document.getElementById('promptOkBtn');
-    var cancelBtn = document.getElementById('promptCancelBtn');
-    if (modal && inputEl && okBtn && cancelBtn) {
-        if (titleEl) titleEl.textContent = title || '输入';
-        if (msgEl) msgEl.textContent = msg || '';
-        inputEl.value = (defaultValue !== undefined && defaultValue !== null) ? String(defaultValue) : '';
-        modal.classList.add('show');
-        // 自动聚焦输入框
-        setTimeout(function() { try { inputEl.focus(); inputEl.select(); } catch(e) {} }, 50);
-        // 清理旧 handler
-        var newOk = function() {
-            modal.classList.remove('show');
-            var v = inputEl.value;
-            okBtn.onclick = null;
-            cancelBtn.onclick = null;
-            inputEl.onkeydown = null;
-            if (onOk) onOk(v);
-        };
-        var newCancel = function() {
-            modal.classList.remove('show');
-            okBtn.onclick = null;
-            cancelBtn.onclick = null;
-            inputEl.onkeydown = null;
-            if (onCancel) onCancel();
-        };
-        okBtn.onclick = newOk;
-        cancelBtn.onclick = newCancel;
-        inputEl.onkeydown = function(e) {
-            if (e.key === 'Enter') newOk();
-            else if (e.key === 'Escape') newCancel();
-        };
-    } else {
-        // fallback: 退到浏览器原生
-        var v = window.prompt(msg || title || '请输入', defaultValue || '');
-        if (v === null) { if (onCancel) onCancel(); } else { if (onOk) onOk(v); }
-    }
-}
-
 // ========== 按钮 Loading 状态 ==========
 function setBtnLoading(btn, loadingText) {
     if (!btn) return function(){};

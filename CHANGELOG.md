@@ -1,6 +1,104 @@
 # 版本升级记录 (CHANGELOG)
 
-> 适用版本：v5.8.1 | 更新日期：2026-07-17
+> 适用版本：v5.8.2 | 更新日期：2026-07-21
+
+---
+
+## v5.8.2 — 状态判定策略大重构 + 自动转入已完成 + Bug 修复（2026-07-21）
+
+### 一、核心判定逻辑大重构
+
+#### 1.1 状态判定改为「严格按已配送」（重大变更）
+
+| 状态 | 条件 | 说明 |
+|------|------|------|
+| ✓ 已完成 | 已配送 >= 需求 | 配送数量已满足需求 |
+| ⚠ 部分 | 0 < 已配送 < 需求 | 有配送但数量不足 |
+| 未配送 | 已配送 = 0 | 无配送记录 |
+
+**变更对比**：
+| 逻辑 | 旧版 | 新版 |
+|------|------|------|
+| 判定依据 | 库存 + 已配送 >= 需求 | **仅已配送** >= 需求 |
+| 库存 = 需求且已配送 = 0 | 已完成 | **未配送** |
+| 库存 > 0 但已配送 = 0 | 部分 | **未配送** |
+
+#### 1.2 汇总行需求改为 `sum(max(0, demand - transit))`
+
+旧版用 `total_demand - sum(transit)`，依赖 `total_demand` 累加正确性和 cbp/sbp 拆分逻辑，导致 42 ≠ 39。
+
+新版直接按门店明细的 `demand - transit` 逐行求和，与明细行逻辑完全一致，无论 `total_demand` 是否正确。
+
+#### 1.3 状态判定数据源统一
+
+`get_realtime_transit`（明细用）和 `get_realtime_stock`（汇总用）的查询结果差异导致 03 第三药店/04 第四药店的配送量显示不一致。修复明细 since 用商品全局最早的 `report_time`，避免每家门店各自用最新上报时间漏掉历史配送。
+
+### 二、关键 Bug 修复
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| 汇总显示需求 42，明细 47−8=39 | `total_demand` 不含已完成门店；`transit` 用 `in_transit`(5) 非实时配送(8) | 汇总改为 `sum(max(0,d-t))` + since 全局最早 |
+| 14 第十四药店已配送显示 0（实际配送 2）| since 用 7/19 漏掉 7/18 配送 | since 改为商品全局最早 `report_time` |
+| 03 第三药店 库存2+配送8=需求10 误判"部分" | 没算库存 | 已改为仅按已配送判断（用户确认） |
+| 已配送 0 的行误显"已完成"/"部分" | 库存+配送判定 | 严格按已配送=0→未配送 |
+| 商品编码搜索无效 | input 缺少 oninput 事件绑定+ SW 缓存 | 双重绑定（HTML attribute + addEventListener）|
+
+### 三、新功能
+
+#### 3.1 自动转入已完成列表
+
+**触发条件**：打开需求明细弹窗 → 实时配送数据加载完成 → 自动检测「已配送 >= 需求」的行。
+
+**流程**：
+1. 后端 `mark_store_completed` action：按 `(product_code, store_id)` 粒度更新 Supabase `reports` 表
+2. 前端：同步从 `sbp.stores` 移除门店、`total_demand` 减量、加入 `completed_by_product`、移除明细 DOM 行、重渲染汇总 + 已完成列表
+3. 弹 Toast 提示：`已自动转入已完成列表：14第十四药店、04第四药店`
+
+#### 3.2 明细实时配送数据回写汇总
+
+`refreshTransitData` 返回 `transitMap` → `showShortageDetail` 写回 `p.stores[sid].transit` → 调用 `renderSummaryPage()`，打开明细后汇总行的需求自动更新。
+
+### 四、客户端版本号升级
+
+| 文件 | 5.8.1 → 5.8.2 |
+|------|---------------|
+| `package.json` / `deploy/package.json` | version 字段 |
+| `electron-main.js` / `deploy/electron-main.js` | 窗口标题、UPDATE_FILES_URL、cacheBuster |
+| `login.html` / `deploy/login.html` | 登录页版本号 V5.8.1 → V5.8.2 |
+| `supabase/functions/check-update/index.ts` | FALLBACK_VERSION 5.8.1 → 5.8.2 |
+
+**重新打包**：electron-builder 产出 88MB 的 `WSZH-ShortageStore Setup 5.8.2.exe`，已上传至 GitHub Release v5.8.2（替换旧版 5.8.1.exe）。
+
+### 五、文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `static/js/admin.js` | `updateDetailStatusCells` 改为严格按已配送；`displayDemand` 改为 sum(d-t)；`refreshTransitData` 返回 map + since 全局最早；`showShortageDetail` 自动转已完成 + 回写 stores；`updateReplenishStatus` 事件双重绑定 |
+| `admin.html` / `deploy/admin.html` | 商品编码搜索框加 oninput 事件；版本号 v=605 |
+| `static/sw.js` / `deploy/static/sw.js` | CACHE_NAME v5.8.2 → v5.8.5 |
+| `supabase/functions/query-shortage-data/index.ts` | 新增 `mark_store_completed` action |
+| `package.json` / `deploy/package.json` | version 5.8.1 → 5.8.2 |
+| `electron-main.js` / `deploy/electron-main.js` | 版本号 3 处升级 |
+| `login.html` / `deploy/login.html` | V5.8.1 → V5.8.2 |
+
+### 六、数据流转逻辑（v5.8.2 版）
+
+```
+门店上报 reports (Supabase)
+  ↓
+管理后台打开需求明细
+  ↓ refreshTransitData()
+实时查询 vBuySendSumDetail（按商品全局最早 since）
+  ↓ transitMap 回写 p.stores[sid].transit
+  ↓ 检测到「已配送 >= 需求」
+  ↓ mark_store_completed（按 product_code + store_id 粒度）
+  ↓
+更新 Supabase reports.replenish_status = '已完成'
+  ↓ 前端同步
+从 sbp.stores 移除 → 加入 completed_by_product
+  → renderSummaryPage（displayDemand = sum(max(0, d-t))）
+  → Toast 提示
+```
 
 ---
 

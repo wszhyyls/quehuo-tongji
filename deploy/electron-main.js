@@ -4,7 +4,7 @@ const { autoUpdater } = require('electron-updater');
 
 // 配置
 const CONFIG = {
-  title: 'WSZH-ShortageStore v5.8.1',
+  title: 'WSZH-ShortageStore v5.8.2',
   width: 1400,
   height: 900,
   minWidth: 800,
@@ -20,7 +20,7 @@ const CONFIG = {
 
 // 更新服务器地址
 const UPDATE_CHECK_URL = 'https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/check-update';
-const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v5.8.1/';  // GitHub Releases
+const UPDATE_FILES_URL = 'https://github.com/wszhyyls/quehuo-tongji/releases/download/v5.8.2/';  // GitHub Releases
 
 let mainWindow = null;
 
@@ -76,7 +76,7 @@ async function createWindow() {
 
   // 从 Cloudflare 加载（带强制缓存绕过）
   var BASE_URL = process.env.BASE_URL || 'https://wszhyy.pages.dev';
-  var cacheBuster = 'v=5.8.1&t=' + Date.now();
+  var cacheBuster = 'v=5.8.2&t=' + Date.now();
   mainWindow.loadURL(BASE_URL + '/login.html?' + cacheBuster, {
     extraHeaders: 'Cache-Control: no-cache, no-store, must-revalidate\nPragma: no-cache'
   });

@@ -1,5 +1,5 @@
 // Service Worker for 缺货统计系统 PWA
-const CACHE_NAME = 'shortage-tool-v5.8.1';
+const CACHE_NAME = 'shortage-tool-v5.8.5';
 const STATIC_ASSETS = [
   '/',
   '/login.html',
@@ -65,6 +65,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // JS/CSS/HTML 文件：网络优先（v5.8.1+ 修复：避免缓存旧版导致 SyntaxError）
+  // 这是关键：caches.match 默认忽略 ?v= 参数，缓存策略会被错误命中
   if (url.pathname.match(/\.(js|css|html)$/) || url.pathname === '/' || url.pathname.endsWith('.html')) {
     event.respondWith(
       fetch(request, { cache: 'no-cache' })
@@ -80,7 +81,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 其他资源：缓存优先
+  // 其他资源（图片、字体等）：缓存优先
   if (url.origin === location.origin) {
     event.respondWith(
       caches.match(request)

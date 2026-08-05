@@ -234,6 +234,50 @@ function showConfirm(msg, onYes, onNo, yesText, noText) {
     }
 }
 
+// ========== 统一 Prompt 弹窗（替代浏览器原生 prompt，避免 Electron 拦截） ==========
+function showPrompt(title, msg, defaultValue, onOk, onCancel) {
+    var modal = document.getElementById('promptModal');
+    var titleEl = document.getElementById('promptTitle');
+    var msgEl = document.getElementById('promptMsg');
+    var inputEl = document.getElementById('promptInput');
+    var okBtn = document.getElementById('promptOkBtn');
+    var cancelBtn = document.getElementById('promptCancelBtn');
+    if (modal && inputEl && okBtn && cancelBtn) {
+        if (titleEl) titleEl.textContent = title || '输入';
+        if (msgEl) msgEl.textContent = msg || '';
+        inputEl.value = (defaultValue !== undefined && defaultValue !== null) ? String(defaultValue) : '';
+        modal.classList.add('show');
+        // 自动聚焦输入框
+        setTimeout(function() { try { inputEl.focus(); inputEl.select(); } catch(e) {} }, 50);
+        // 清理旧 handler
+        var newOk = function() {
+            modal.classList.remove('show');
+            var v = inputEl.value;
+            okBtn.onclick = null;
+            cancelBtn.onclick = null;
+            inputEl.onkeydown = null;
+            if (onOk) onOk(v);
+        };
+        var newCancel = function() {
+            modal.classList.remove('show');
+            okBtn.onclick = null;
+            cancelBtn.onclick = null;
+            inputEl.onkeydown = null;
+            if (onCancel) onCancel();
+        };
+        okBtn.onclick = newOk;
+        cancelBtn.onclick = newCancel;
+        inputEl.onkeydown = function(e) {
+            if (e.key === 'Enter') newOk();
+            else if (e.key === 'Escape') newCancel();
+        };
+    } else {
+        // fallback: 退到浏览器原生
+        var v = window.prompt(msg || title || '请输入', defaultValue || '');
+        if (v === null) { if (onCancel) onCancel(); } else { if (onOk) onOk(v); }
+    }
+}
+
 // ========== 按钮 Loading 状态 ==========
 function setBtnLoading(btn, loadingText) {
     if (!btn) return function(){};
@@ -324,17 +368,14 @@ function callEdgeFunction(action, params, options) {
         }
         return resp.json();
     }).catch(function(err) {
-        // v5.8.1+ 超时/网络错误自动重试（冷启动期间第一次 30s 超时，第二次 60s 必成功）
+        // v5.8.1+ 超时/网络错误自动重试（冷启动期间第一次超时，重试用更短超时）
         if (retryCount < maxRetries && (
             err.message.includes('Failed to fetch') || 
             err.message.includes('NetworkError') || 
             err.name === 'AbortError'
         )) {
-            // 超时重试：用更长 timeout（第 N+1 次比第 N 次多 30s）
-            var retryTimeout = timeoutMs + (retryCount + 1) * 30000;
-            // v5.8.1+ 重试用 DEBUG 级别（不在控制台显示），减少噪音
-            // console.debug('[AutoRetry] ' + action + ' ' + (err.name === 'AbortError' ? '超时' : '失败') +
-            //     '，' + retryTimeout + 'ms 后重试（第' + (retryCount+1) + '次）');
+            // 超时重试：第1次失败后连接可能已热，用短超时（60s）快速重试
+            var retryTimeout = Math.min(timeoutMs, 120000);
             return callEdgeFunction(action, params, { 
                 retryCount: retryCount + 1, 
                 maxRetries: maxRetries,

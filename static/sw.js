@@ -1,5 +1,5 @@
 // Service Worker for 缺货统计系统 PWA
-const CACHE_NAME = 'shortage-tool-v5.8.1';
+const CACHE_NAME = 'shortage-tool-v5.8.5';
 const STATIC_ASSETS = [
   '/',
   '/login.html',

@@ -368,19 +368,6 @@
         </div>
     </div>
 
-    <!-- 自定义 Prompt 弹窗（替代浏览器原生 prompt，避免 Electron 拦截） -->
-    <div id="promptModal" class="modal">
-        <div class="modal-content" style="max-width:420px;">
-            <h3 id="promptTitle">输入</h3>
-            <p id="promptMsg" style="margin-bottom:14px;"></p>
-            <input type="number" id="promptInput" min="0" step="1" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;" />
-            <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end;">
-                <button id="promptCancelBtn" class="btn-secondary">取消</button>
-                <button id="promptOkBtn" class="btn-primary">确定</button>
-            </div>
-        </div>
-    </div>
-
     <!-- 添加员工弹窗 -->
     <div id="empModal" class="modal">
         <div class="modal-content">
@@ -535,7 +522,7 @@
         </div>
     </div>
 
-    <script src="./static/js/admin.js?v=608"></script>
+    <script src="./static/js/admin.js?v=600"></script>
 
     <!-- ========== PWA Service Worker ========== -->
     <script>
