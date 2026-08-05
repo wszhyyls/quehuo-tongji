@@ -1954,11 +1954,32 @@ serve(async (req) => {
             }
           }
 
-          // 3.2 给"已到货"的门店发送通知
+          // 3.2 更新已到货：同步到 Supabase reports + 发送通知
           if (arrivedPairs.length > 0) {
             const BATCH = 20;
             for (let i = 0; i < arrivedPairs.length; i += BATCH) {
               const batch = arrivedPairs.slice(i, i + BATCH);
+              // 更新 Supabase reports 状态为"已到货"
+              const updates = batch.map(pair => {
+                const sid = storeNameToId[pair.store_name];
+                if (!sid) return Promise.resolve(0);
+                return supabase.from("reports").update({
+                  replenish_status: '已到货',
+                  status_remark: '自动',
+                  status_changed_at: new Date().toISOString(),
+                  status_changed_by: '系统自动'
+                })
+                  .eq("product_code", pair.product_code)
+                  .eq("store_id", sid)
+                  .eq("order_type", "缺货订购")
+                  .neq("replenish_status", "已完成")
+                  .neq("replenish_status", "厂家断货")
+                  .then(r => r.error ? 0 : 1)
+                  .catch(() => 0);
+              });
+              const results = await Promise.all(updates);
+              updatedCount += results.reduce((a: number, b: number) => a + b, 0);
+              // 发送通知
               const upserts = batch.map(p => {
                 const sid = storeNameToId[p.store_name];
                 if (!sid) return Promise.resolve(0);
@@ -1972,8 +1993,8 @@ serve(async (req) => {
                   .then(r => r.error ? 0 : 1)
                   .catch(() => 0);
               });
-              const results = await Promise.all(upserts);
-              notifCount += results.reduce((a: number, b: number) => a + b, 0);
+              const notifResults = await Promise.all(upserts);
+              notifCount += notifResults.reduce((a: number, b: number) => a + b, 0);
             }
           }
 
