@@ -535,48 +535,75 @@ async function preciseAutoDetectStatus(
     // 场景：上次标记"已到货"后，库存被其他店请走
     // 修复：去掉 limit 500（之前超过 500 个就漏处理），分批查库存避免大 IN 子查询超时
     try {
-      const { data: arrivedAll } = await supabaseClient
+      // 只回退"系统自动"标记的已到货，手动设置的保留
+      const { data: arrivedAll, error: arrivedErr } = await supabaseClient
         .from("reports")
-        .select("product_code, store_id")
+        .select("product_code, store_id, status_remark")
         .eq("replenish_status", "已到货")
-        .eq("order_type", "缺货订购");
+        .eq("order_type", "缺货订购")
+        .eq("status_remark", "自动");
+      details.push(`[诊断] arrivedAll 长度: ${arrivedAll?.length || 0}, 错误: ${arrivedErr?.message || 'none'}`);
       if (arrivedAll && arrivedAll.length > 0) {
         // 按商品去重
         const codeSet = [...new Set(arrivedAll.map(it => it.product_code).filter(Boolean))];
         if (codeSet.length > 0) {
           // 分批查库存（每批 100 个 code，避免大 IN 子查询超时）
           const stockMap: Record<string, number> = {};
-          const BATCH_SIZE = 100;
+          const BATCH_SIZE = 50;
           for (let i = 0; i < codeSet.length; i += BATCH_SIZE) {
             const codeBatch = codeSet.slice(i, i + BATCH_SIZE);
-            const codeList = codeBatch.map(c => `'${c.replace(/'/g, "''")}'`).join(',');
-            const whRes = await pool.request().query(`
+            // 使用参数化查询，避免字符串拼接的 collation 问题
+            const params: Record<string, string> = {};
+            const placeholders = codeBatch.map((c, idx) => {
+              const p = `c${idx}`;
+              params[p] = c;
+              return `@${p}`;
+            }).join(',');
+            const whRes = await pool.request().inputs(params).query(`
               SELECT v.usercode, ISNULL(SUM(gs.qty), 0) as wh_qty
               FROM ZHYYLS.dbo.Vptype v WITH(NOLOCK)
               LEFT JOIN ZHYYLS.dbo.GoodsStocks gs WITH(NOLOCK) ON gs.prec = v.rec AND gs.krec = '3'
-              WHERE v.usercode IN (${codeList})
+              WHERE v.usercode IN (${placeholders})
               GROUP BY v.usercode
             `);
-            (whRes.recordset || []).forEach((r: any) => { stockMap[r.usercode] = r.wh_qty; });
+            (whRes.recordset || []).forEach((r: any) => { stockMap[r.usercode] = Number(r.wh_qty); });
+            // 把没找到的编码也标记为 0
+            codeBatch.forEach(c => { if (!(c in stockMap)) stockMap[c] = 0; });
           }
 
           // 对每个"已到货"商品，若仓库库存=0则一律回退为"待处理"
           let reverted = 0;
+          let checkCount = 0;
           for (const it of arrivedAll) {
-            if ((stockMap[it.product_code] || 0) <= 0) {
-              await supabaseClient.from("reports").update({
+            const stock = stockMap[it.product_code];
+            checkCount++;
+            if ((stock === undefined ? 0 : stock) <= 0) {
+              const { error: updErr } = await supabaseClient.from("reports").update({
                 replenish_status: '待处理',
-                status_remark: '自动：仓库库存耗尽，已回退',
+                status_remark: '自动',
                 status_changed_at: new Date().toISOString(),
                 status_changed_by: '系统自动'
               })
                 .eq("product_code", it.product_code)
                 .eq("store_id", it.store_id)
                 .eq("order_type", "缺货订购")
-                .eq("replenish_status", "已到货");
-              reverted++;
+                .eq("replenish_status", "已到货")
+                .eq("status_remark", "自动");
+              if (!updErr) {
+                reverted++;
+              }
             }
           }
+          details.push(`[诊断] 循环遍历: ${checkCount} 条, 回退: ${reverted} 条`);
+          // 调试：把诊断信息加到 details
+          details.push(`[诊断] arrivedAll 长度: ${arrivedAll?.length || 0}`);
+          details.push(`[诊断] codeSet 大小: ${codeSet.length}`);
+          details.push(`[诊断] stockMap 大小: ${Object.keys(stockMap).length}`);
+          // 检查 1083 是否在 arrivedAll
+          const found1083 = (arrivedAll || []).find(it => it.product_code === '1083');
+          details.push(`[诊断] arrivedAll 中 1083: ${found1083 ? JSON.stringify(found1083) : '未找到'}`);
+          details.push(`[诊断] stockMap[1083]: ${stockMap['1083']}`);
+          details.push(`[诊断] reverted: ${reverted}`);
           if (reverted > 0) {
             details.push(`智能回退：${reverted} 条已到货回退为待处理（仓库库存=0）`);
             console.log(`[Revert] ${reverted} 已到货 → 待处理`);
