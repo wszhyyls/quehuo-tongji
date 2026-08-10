@@ -1203,10 +1203,11 @@ window.updateReplenishStatus = async function(selectEl) {
                     });
                 }
                 if (typeof isCompletedStatus === 'function' && (isCompletedStatus(ns) || isCompletedStatus(os))) {
-                    // 跨完成边界需重新加载数据，加载完成后恢复筛选状态
+                    // 跨完成边界需重新加载数据，加载完成后恢复筛选状态和页码
                     var savedFilterStatus = currentFilterStatus;
                     var savedCodeSearch = (document.getElementById('productCodeSearch') || {}).value || '';
                     var savedSuppliers = selectedSuppliers.slice();
+                    var savedPage = currentPage;
                     loadSummary().then(function() {
                         if (savedFilterStatus) {
                             currentFilterStatus = savedFilterStatus;
@@ -1216,10 +1217,10 @@ window.updateReplenishStatus = async function(selectEl) {
                         var cs = document.getElementById('productCodeSearch');
                         if (cs && savedCodeSearch) cs.value = savedCodeSearch;
                         if (savedSuppliers.length > 0) selectedSuppliers = savedSuppliers;
+                        currentPage = savedPage;
                         try { applyStatusFilter(); } catch(e) {}
                     });
                 } else {
-                    currentPage = 1;
                     try { applyStatusFilter(); } catch(e) {}
                 }
             }).catch(function(err) {
