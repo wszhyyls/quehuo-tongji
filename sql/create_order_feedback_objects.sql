@@ -88,12 +88,13 @@ BEGIN
     IF EXISTS (SELECT 1 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 = @商品编码)
     BEGIN
         -- v4.2: 已完成/已到货的不降级，仅更新订货数量
+        -- v5.8.3: 备注用 LEFT 截断避免超长（保留最近200字符）
         IF @当前状态 IN ('已完成', '已到货')
         BEGIN
             UPDATE dbo.Shortage_OrderFeedback
             SET 实际订货数量 = @实际订货数量,
                 操作人 = @操作人,
-                备注 = ISNULL(备注, '') + ' | 更新订货(已完成):' + CAST(@实际订货数量 AS NVARCHAR) + ' ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+                备注 = LEFT(ISNULL(备注, '') + ' | 更新订货(已完成):' + CAST(@实际订货数量 AS NVARCHAR) + ' ' + CONVERT(NVARCHAR(16), GETDATE(), 120), 200)
             WHERE 商品编码 = @商品编码;
             SELECT 商品编码 = @商品编码, 结果 = '订货更新(已完成)', 补货状态 = '已完成', 实际订货数量 = @实际订货数量;
         END
@@ -105,7 +106,7 @@ BEGIN
                 订货时间 = GETDATE(),
                 操作人 = @操作人,
                 到货确认时间 = NULL,
-                备注 = ISNULL(备注, '') + ' | 更新订货:' + CAST(@实际订货数量 AS NVARCHAR) + ' ' + CONVERT(NVARCHAR(16), GETDATE(), 120)
+                备注 = LEFT(ISNULL(备注, '') + ' | 更新订货:' + CAST(@实际订货数量 AS NVARCHAR) + ' ' + CONVERT(NVARCHAR(16), GETDATE(), 120), 200)
             WHERE 商品编码 = @商品编码;
             SELECT 商品编码 = @商品编码, 结果 = '订货成功', 补货状态 = '已订购', 实际订货数量 = @实际订货数量;
         END
