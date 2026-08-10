@@ -543,8 +543,13 @@ async function handleOrderSave() {
 }
 
 // ========== 缺货汇总 ==========
-async function loadSummary() {
+async function loadSummary(keepFilters) {
     if (isLoadingSummary) return;
+    // 保存当前筛选状态
+    var savedFilter = currentFilterStatus;
+    var savedCode = (document.getElementById('productCodeSearch') || {}).value || '';
+    var savedSuppliers = selectedSuppliers.slice();
+    var savedPage = currentPage;
     isLoadingSummary = true;
     try {
         // 使用 get_summary 复合 action，一次请求获取 reports + plan
@@ -657,7 +662,19 @@ async function loadSummary() {
         }
         updateSupplierDisplay();
 
-        filteredData = activeData; currentPage = 1; currentFilterStatus = '';
+        filteredData = activeData;
+        if (keepFilters && savedFilter) {
+            currentFilterStatus = savedFilter;
+            document.getElementById('statusFilter').value = savedFilter;
+            if (document.getElementById('productCodeSearch')) document.getElementById('productCodeSearch').value = savedCode;
+            selectedSuppliers = savedSuppliers;
+            currentPage = savedPage;
+            applyStatusFilter(true);
+        } else {
+            currentPage = 1; currentFilterStatus = '';
+            document.getElementById('statusFilter').value = '';
+            renderSummaryPage(); renderCompletedSection();
+        }
         document.getElementById('statusFilter').value = '';
         renderSummaryPage(); renderCompletedSection();
         renderNewProductsTable();
@@ -1204,23 +1221,8 @@ window.updateReplenishStatus = async function(selectEl) {
                     });
                 }
                 if (typeof isCompletedStatus === 'function' && (isCompletedStatus(ns) || isCompletedStatus(os))) {
-                    // 跨完成边界需重新加载数据，加载完成后恢复筛选状态和页码
-                    var savedFilterStatus = currentFilterStatus;
-                    var savedCodeSearch = (document.getElementById('productCodeSearch') || {}).value || '';
-                    var savedSuppliers = selectedSuppliers.slice();
-                    var savedPage = currentPage;
-                    loadSummary().then(function() {
-                        if (savedFilterStatus) {
-                            currentFilterStatus = savedFilterStatus;
-                            var sf = document.getElementById('statusFilter');
-                            if (sf) sf.value = savedFilterStatus;
-                        }
-                        var cs = document.getElementById('productCodeSearch');
-                        if (cs && savedCodeSearch) cs.value = savedCodeSearch;
-                        if (savedSuppliers.length > 0) selectedSuppliers = savedSuppliers;
-                        currentPage = savedPage;
-                        try { applyStatusFilter(true); } catch(e) {}
-                    });
+                    // 跨完成边界需重新加载数据，保持筛选和页码
+                    loadSummary(true);
                 } else {
                     try { applyStatusFilter(true); } catch(e) {}
                 }
