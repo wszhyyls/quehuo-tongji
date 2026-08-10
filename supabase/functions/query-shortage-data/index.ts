@@ -547,19 +547,19 @@ async function preciseAutoDetectStatus(
         // 按商品去重
         const codeSet = [...new Set(arrivedAll.map(it => it.product_code).filter(Boolean))];
         if (codeSet.length > 0) {
-          // 分批查库存（每批 100 个 code，避免大 IN 子查询超时）
+          // 分批查库存（每批 50 个 code，避免大 IN 子查询超时）
           const stockMap: Record<string, number> = {};
           const BATCH_SIZE = 50;
           for (let i = 0; i < codeSet.length; i += BATCH_SIZE) {
             const codeBatch = codeSet.slice(i, i + BATCH_SIZE);
-            // 使用参数化查询，避免字符串拼接的 collation 问题
-            const params: Record<string, string> = {};
+            // 使用 .input() 逐个添加参数（node-mssql 不支持 .inputs() 批量方法）
+            const req = pool.request();
             const placeholders = codeBatch.map((c, idx) => {
               const p = `c${idx}`;
-              params[p] = c;
+              req.input(p, sql.NVarChar, c);
               return `@${p}`;
             }).join(',');
-            const whRes = await pool.request().inputs(params).query(`
+            const whRes = await req.query(`
               SELECT v.usercode, ISNULL(SUM(gs.qty), 0) as wh_qty
               FROM ZHYYLS.dbo.Vptype v WITH(NOLOCK)
               LEFT JOIN ZHYYLS.dbo.GoodsStocks gs WITH(NOLOCK) ON gs.prec = v.rec AND gs.krec = '3'
