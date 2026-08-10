@@ -2034,52 +2034,69 @@ serve(async (req) => {
                   }
                 }
               }
-              // 查询 SQL Server 配送量（按门店查上报日期后的配送量）
+              // 查询 SQL Server 配送量（批量单次查询，避免 N 次单查超时）
               try {
-                // 获取本批每个 (product_code, store_name) 的配送量
                 const transitPairs = batch.map((p: any) => ({
                   product_code: p.product_code,
                   store_name: p.store_name,
                   krec: STORE_KREC_MAP[p.store_name] || ''
                 })).filter((t: any) => t.krec);
                 if (transitPairs.length > 0) {
-                  // 先批量查 Vptype 获取 prec
                   const codesForTransit = [...new Set(transitPairs.map((t: any) => t.product_code))];
-                  const precMap: Record<string, string> = {};
-                  for (const code of codesForTransit) {
-                    const vpRes = await pool.request()
-                      .input('c', sql.NVarChar(50), code)
-                      .query(`SELECT rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode = @c`);
-                    if (vpRes.recordset?.[0]?.rec) precMap[code] = vpRes.recordset[0].rec;
-                  }
-                  // 查配送量：按 (prec, krec) 查询
                   const krecs = [...new Set(transitPairs.map((t: any) => t.krec))];
-                  for (const code of Object.keys(precMap)) {
-                    const prec = precMap[code];
-                    const reqT = pool.request().input('prec', sql.NVarChar, prec);
-                    const krecParams = krecs.map((k: string, idx: number) => {
-                      reqT.input(`k${idx}`, sql.NVarChar(5), k);
-                      return `@k${idx}`;
+                  // 单次查询：批量获取所有 usercode → rec 映射
+                  const codeParams: Record<string, any> = {};
+                  const codePlaceholders = codesForTransit.map((c: string, idx: number) => {
+                    const p = `c${idx}`;
+                    codeParams[p] = c;
+                    return `@${p}`;
+                  }).join(',');
+                  const precMap: Record<string, string> = {};
+                  if (codePlaceholders) {
+                    const vpReq = pool.request();
+                    Object.entries(codeParams).forEach(([k, v]) => vpReq.input(k, sql.NVarChar(50), v));
+                    const vpRes = await vpReq.query(`
+                      SELECT usercode, rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK)
+                      WHERE usercode IN (${codePlaceholders})
+                    `);
+                    (vpRes.recordset || []).forEach((r: any) => { precMap[r.usercode] = r.rec; });
+                  }
+                  // 单次查询：批量获取所有 (prec, krec) 的配送量
+                  const recs = Object.values(precMap).filter(Boolean);
+                  if (recs.length > 0 && krecs.length > 0) {
+                    const transitReq = pool.request();
+                    const recPlaceholders = recs.map((r: string, idx: number) => {
+                      const p = `r${idx}`;
+                      transitReq.input(p, sql.NVarChar, r);
+                      return `@${p}`;
                     }).join(',');
-                    if (krecParams) {
-                      const tRes = await reqT.query(`
-                        SELECT vs.InKRec as krec, ISNULL(SUM(ABS(vs.Qty)), 0) as transit_qty
-                        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
-                        WHERE vs.PRec = @prec AND vs.OutKRec = '3'
-                          AND vs.InKRec IN (${krecParams})
-                          AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
-                        GROUP BY vs.InKRec
-                      `);
-                      if (!notifTransitMap[code]) notifTransitMap[code] = {};
-                      (tRes.recordset || []).forEach((r: any) => {
-                        // 找到对应的 store_name
-                        for (const tp of transitPairs) {
-                          if (tp.product_code === code && tp.krec === r.krec) {
-                            notifTransitMap[code][tp.store_name] = Number(r.transit_qty);
-                          }
-                        }
-                      });
-                    }
+                    const krecPlaceholders = krecs.map((k: string, idx: number) => {
+                      const p = `k${idx}`;
+                      transitReq.input(p, sql.NVarChar(5), k);
+                      return `@${p}`;
+                    }).join(',');
+                    const tRes = await transitReq.query(`
+                      SELECT vs.PRec as prec, vs.InKRec as krec, ISNULL(SUM(ABS(vs.Qty)), 0) as transit_qty
+                      FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+                      WHERE vs.OutKRec = '3'
+                        AND vs.PRec IN (${recPlaceholders})
+                        AND vs.InKRec IN (${krecPlaceholders})
+                        AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
+                      GROUP BY vs.PRec, vs.InKRec
+                    `);
+                    // 反向映射：prec → usercode，krec → store_name
+                    const precToCode: Record<string, string> = {};
+                    Object.entries(precMap).forEach(([code, rec]) => { precToCode[rec] = code; });
+                    const krecToStore: Record<string, string> = {};
+                    transitPairs.forEach((tp: any) => { krecToStore[tp.krec] = tp.store_name; });
+                    (tRes.recordset || []).forEach((r: any) => {
+                      const code = precToCode[r.prec];
+                      const storeName = krecToStore[r.krec];
+                      if (code && storeName) {
+                        if (!notifTransitMap[code]) notifTransitMap[code] = {};
+                        notifTransitMap[code][storeName] = Number(r.transit_qty);
+                      }
+                    });
                   }
                 }
               } catch (_) { /* 配送量查询失败不阻断通知 */ }
@@ -2265,7 +2282,7 @@ serve(async (req) => {
                   }
                 }
               }
-              // 查询 SQL Server 配送量
+              // 查询 SQL Server 配送量（单次批量查询）
               try {
                 const transitPairs = batch.map((p: any) => ({
                   product_code: p.product_code, store_name: p.store_name,
@@ -2273,39 +2290,57 @@ serve(async (req) => {
                 })).filter((t: any) => t.krec);
                 if (transitPairs.length > 0) {
                   const codesForTransit = [...new Set(transitPairs.map((t: any) => t.product_code))];
-                  const precMap: Record<string, string> = {};
-                  for (const code of codesForTransit) {
-                    const vpRes = await transitPool.request()
-                      .input('c', sql.NVarChar(50), code)
-                      .query(`SELECT rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode = @c`);
-                    if (vpRes.recordset?.[0]?.rec) precMap[code] = vpRes.recordset[0].rec;
-                  }
                   const krecs = [...new Set(transitPairs.map((t: any) => t.krec))];
-                  for (const code of Object.keys(precMap)) {
-                    const prec = precMap[code];
-                    const reqT = transitPool.request().input('prec', sql.NVarChar, prec);
-                    const krecParams = krecs.map((k: string, idx: number) => {
-                      reqT.input(`k${idx}`, sql.NVarChar(5), k);
-                      return `@k${idx}`;
+                  const codeParams: Record<string, any> = {};
+                  const codePlaceholders = codesForTransit.map((c: string, idx: number) => {
+                    const p = `c${idx}`;
+                    codeParams[p] = c;
+                    return `@${p}`;
+                  }).join(',');
+                  const precMap: Record<string, string> = {};
+                  if (codePlaceholders) {
+                    const vpReq = transitPool.request();
+                    Object.entries(codeParams).forEach(([k, v]) => vpReq.input(k, sql.NVarChar(50), v));
+                    const vpRes = await vpReq.query(`
+                      SELECT usercode, rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK)
+                      WHERE usercode IN (${codePlaceholders})
+                    `);
+                    (vpRes.recordset || []).forEach((r: any) => { precMap[r.usercode] = r.rec; });
+                  }
+                  const recs = Object.values(precMap).filter(Boolean);
+                  if (recs.length > 0 && krecs.length > 0) {
+                    const transitReq = transitPool.request();
+                    const recPlaceholders = recs.map((r: string, idx: number) => {
+                      const p = `r${idx}`;
+                      transitReq.input(p, sql.NVarChar, r);
+                      return `@${p}`;
                     }).join(',');
-                    if (krecParams) {
-                      const tRes = await reqT.query(`
-                        SELECT vs.InKRec as krec, ISNULL(SUM(ABS(vs.Qty)), 0) as transit_qty
-                        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
-                        WHERE vs.PRec = @prec AND vs.OutKRec = '3'
-                          AND vs.InKRec IN (${krecParams})
-                          AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
-                        GROUP BY vs.InKRec
-                      `);
-                      if (!notifTransitMap[code]) notifTransitMap[code] = {};
-                      (tRes.recordset || []).forEach((r: any) => {
-                        for (const tp of transitPairs) {
-                          if (tp.product_code === code && tp.krec === r.krec) {
-                            notifTransitMap[code][tp.store_name] = Number(r.transit_qty);
-                          }
-                        }
-                      });
-                    }
+                    const krecPlaceholders = krecs.map((k: string, idx: number) => {
+                      const p = `k${idx}`;
+                      transitReq.input(p, sql.NVarChar(5), k);
+                      return `@${p}`;
+                    }).join(',');
+                    const tRes = await transitReq.query(`
+                      SELECT vs.PRec as prec, vs.InKRec as krec, ISNULL(SUM(ABS(vs.Qty)), 0) as transit_qty
+                      FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+                      WHERE vs.OutKRec = '3'
+                        AND vs.PRec IN (${recPlaceholders})
+                        AND vs.InKRec IN (${krecPlaceholders})
+                        AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
+                      GROUP BY vs.PRec, vs.InKRec
+                    `);
+                    const precToCode: Record<string, string> = {};
+                    Object.entries(precMap).forEach(([code, rec]) => { precToCode[rec] = code; });
+                    const krecToStore: Record<string, string> = {};
+                    transitPairs.forEach((tp: any) => { krecToStore[tp.krec] = tp.store_name; });
+                    (tRes.recordset || []).forEach((r: any) => {
+                      const code = precToCode[r.prec];
+                      const storeName = krecToStore[r.krec];
+                      if (code && storeName) {
+                        if (!notifTransitMap[code]) notifTransitMap[code] = {};
+                        notifTransitMap[code][storeName] = Number(r.transit_qty);
+                      }
+                    });
                   }
                 }
               } catch (_) { /* 配送量查询失败不阻断 */ }
