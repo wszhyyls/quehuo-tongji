@@ -905,7 +905,7 @@ window.toggleCompletedSection = function() {
     else { body.style.display = 'none'; toggle.textContent = '▼ 展开'; }
 };
 
-window.applyStatusFilter = function() {
+window.applyStatusFilter = function(keepPage) {
     if (!summaryData) return;  // 数据未加载完时直接返回，避免 null 引用
     var sv = document.getElementById('statusFilter').value;
     currentFilterStatus = sv;
@@ -947,7 +947,8 @@ window.applyStatusFilter = function() {
         filteredData = filteredActive.filter(function(p) { return p.replenish_status === sv; });
         completedData = filteredCompleted;
     }
-    currentPage = 1; renderSummaryPage(); renderCompletedSection();
+    if (!keepPage) currentPage = 1;
+    renderSummaryPage(); renderCompletedSection();
 };
 
 // 商品编码输入触发
@@ -1218,10 +1219,10 @@ window.updateReplenishStatus = async function(selectEl) {
                         if (cs && savedCodeSearch) cs.value = savedCodeSearch;
                         if (savedSuppliers.length > 0) selectedSuppliers = savedSuppliers;
                         currentPage = savedPage;
-                        try { applyStatusFilter(); } catch(e) {}
+                        try { applyStatusFilter(true); } catch(e) {}
                     });
                 } else {
-                    try { applyStatusFilter(); } catch(e) {}
+                    try { applyStatusFilter(true); } catch(e) {}
                 }
             }).catch(function(err) {
                 showAlert('更新异常：'+err);
