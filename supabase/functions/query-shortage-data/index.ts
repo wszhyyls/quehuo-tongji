@@ -591,6 +591,16 @@ async function preciseAutoDetectStatus(
                 .eq("status_remark", "自动");
               if (!updErr) {
                 reverted++;
+                // 同步更新通知消息
+                try {
+                  await supabaseClient.from("store_notifications").upsert({
+                    store_id: it.store_id,
+                    product_code: it.product_code,
+                    message: `${it.product_code} 仓库库存已耗尽，已回退为待处理`,
+                    created_at: new Date().toISOString(),
+                    is_read: false
+                  }, { onConflict: 'store_id,product_code' });
+                } catch (_) { /* 通知更新失败不阻断 */ }
               }
             }
           }
@@ -2006,14 +2016,34 @@ serve(async (req) => {
               });
               const results = await Promise.all(updates);
               updatedCount += results.reduce((a: number, b: number) => a + b, 0);
-              // 发送通知
+              // 发送通知（先查询需求量和已配送量，增强通知内容）
+              // 批量查询本批商品的 demand_quantity 和 transit_qty
+              const notifDemandMap: Record<string, Record<string, number>> = {};
+              const batchCodes = [...new Set(batch.map((p: any) => p.product_code))];
+              if (batchCodes.length > 0) {
+                const { data: demandData } = await supabase
+                  .from("reports")
+                  .select("product_code, store_id, demand_quantity")
+                  .eq("order_type", "缺货订购")
+                  .in("product_code", batchCodes);
+                if (demandData) {
+                  for (const d of demandData) {
+                    if (!notifDemandMap[d.product_code]) notifDemandMap[d.product_code] = {};
+                    notifDemandMap[d.product_code][d.store_id] = (notifDemandMap[d.product_code][d.store_id] || 0) + (d.demand_quantity || 0);
+                  }
+                }
+              }
               const upserts = batch.map(p => {
                 const sid = storeNameToId[p.store_name];
                 if (!sid) return Promise.resolve(0);
+                const demand = notifDemandMap[p.product_code]?.[sid] || 0;
+                const msg = demand > 0
+                  ? `${p.product_code} 仓库有货可配送（本店需求${demand}）`
+                  : `${p.product_code} 已到货（仓库可配送）`;
                 return supabase.from("store_notifications").upsert({
                   store_id: sid,
                   product_code: p.product_code,
-                  message: p.product_code + ' 已到货（仓库可配送）',
+                  message: msg,
                   created_at: new Date().toISOString(),
                   is_read: false
                 }, { onConflict: 'store_id,product_code' })
@@ -2074,7 +2104,19 @@ serve(async (req) => {
                     .eq("order_type", "缺货订购")
                     .eq("replenish_status", "已到货")
                     .eq("status_remark", "自动");
-                  if (!updErr) finalRevert++;
+                  if (!updErr) {
+                    finalRevert++;
+                    // 同步更新通知消息：告知门店库存已耗尽
+                    try {
+                      await supabase.from("store_notifications").upsert({
+                        store_id: it.store_id,
+                        product_code: it.product_code,
+                        message: `${it.product_code} 仓库库存已耗尽，已回退为待处理`,
+                        created_at: new Date().toISOString(),
+                        is_read: false
+                      }, { onConflict: 'store_id,product_code' });
+                    } catch (_) { /* 通知更新失败不阻断主流程 */ }
+                  }
                 }
               }
               if (finalRevert > 0) {
@@ -2138,19 +2180,39 @@ serve(async (req) => {
           }
         }
 
-        // ② 给"已到货"的门店发送通知
+        // ② 给"已到货"的门店发送通知（增强通知内容：含需求量和已配送量）
         const notifPairs = arrived_pairs || [];
         if (notifPairs.length > 0) {
           const BATCH = 20;
           for (let i = 0; i < notifPairs.length; i += BATCH) {
             const batch = notifPairs.slice(i, i + BATCH);
+            // 查询需求信息
+            const notifDemandMap: Record<string, Record<string, number>> = {};
+            const batchCodes = [...new Set(batch.map((p: any) => p.product_code))];
+            if (batchCodes.length > 0) {
+              const { data: demandData } = await supabase
+                .from("reports")
+                .select("product_code, store_id, demand_quantity")
+                .eq("order_type", "缺货订购")
+                .in("product_code", batchCodes);
+              if (demandData) {
+                for (const d of demandData) {
+                  if (!notifDemandMap[d.product_code]) notifDemandMap[d.product_code] = {};
+                  notifDemandMap[d.product_code][d.store_id] = (notifDemandMap[d.product_code][d.store_id] || 0) + (d.demand_quantity || 0);
+                }
+              }
+            }
             const upserts = batch.map(p => {
               const sid = storeNameToId[p.store_name];
               if (!sid) return Promise.resolve(0);
+              const demand = notifDemandMap[p.product_code]?.[sid] || 0;
+              const msg = demand > 0
+                ? `${p.product_code} 仓库有货可配送（本店需求${demand}）`
+                : `${p.product_code} 已到货（仓库可配送）`;
               return supabase.from("store_notifications").upsert({
                 store_id: sid,
                 product_code: p.product_code,
-                message: p.product_code + ' 已到货（仓库可配送）',
+                message: msg,
                 created_at: new Date().toISOString(),
                 is_read: false
               }, { onConflict: 'store_id,product_code' })
