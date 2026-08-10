@@ -2016,14 +2016,15 @@ serve(async (req) => {
               });
               const results = await Promise.all(updates);
               updatedCount += results.reduce((a: number, b: number) => a + b, 0);
-              // 发送通知（先查询需求量和已配送量，增强通知内容）
-              // 批量查询本批商品的 demand_quantity 和 transit_qty
+              // 发送通知（含需求量、已配送量、建议要货数量）
               const notifDemandMap: Record<string, Record<string, number>> = {};
+              const notifTransitMap: Record<string, Record<string, number>> = {};
               const batchCodes = [...new Set(batch.map((p: any) => p.product_code))];
+              // 查询 Supabase 需求量和上报日期
               if (batchCodes.length > 0) {
                 const { data: demandData } = await supabase
                   .from("reports")
-                  .select("product_code, store_id, demand_quantity")
+                  .select("product_code, store_id, demand_quantity, created_at")
                   .eq("order_type", "缺货订购")
                   .in("product_code", batchCodes);
                 if (demandData) {
@@ -2033,13 +2034,71 @@ serve(async (req) => {
                   }
                 }
               }
+              // 查询 SQL Server 配送量（按门店查上报日期后的配送量）
+              try {
+                // 获取本批每个 (product_code, store_name) 的配送量
+                const transitPairs = batch.map((p: any) => ({
+                  product_code: p.product_code,
+                  store_name: p.store_name,
+                  krec: STORE_KREC_MAP[p.store_name] || ''
+                })).filter((t: any) => t.krec);
+                if (transitPairs.length > 0) {
+                  // 先批量查 Vptype 获取 prec
+                  const codesForTransit = [...new Set(transitPairs.map((t: any) => t.product_code))];
+                  const precMap: Record<string, string> = {};
+                  for (const code of codesForTransit) {
+                    const vpRes = await pool.request()
+                      .input('c', sql.NVarChar(50), code)
+                      .query(`SELECT rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode = @c`);
+                    if (vpRes.recordset?.[0]?.rec) precMap[code] = vpRes.recordset[0].rec;
+                  }
+                  // 查配送量：按 (prec, krec) 查询
+                  const krecs = [...new Set(transitPairs.map((t: any) => t.krec))];
+                  for (const code of Object.keys(precMap)) {
+                    const prec = precMap[code];
+                    const reqT = pool.request().input('prec', sql.NVarChar, prec);
+                    const krecParams = krecs.map((k: string, idx: number) => {
+                      reqT.input(`k${idx}`, sql.NVarChar(5), k);
+                      return `@k${idx}`;
+                    }).join(',');
+                    if (krecParams) {
+                      const tRes = await reqT.query(`
+                        SELECT vs.InKRec as krec, ISNULL(SUM(ABS(vs.Qty)), 0) as transit_qty
+                        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+                        WHERE vs.PRec = @prec AND vs.OutKRec = '3'
+                          AND vs.InKRec IN (${krecParams})
+                          AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
+                        GROUP BY vs.InKRec
+                      `);
+                      if (!notifTransitMap[code]) notifTransitMap[code] = {};
+                      (tRes.recordset || []).forEach((r: any) => {
+                        // 找到对应的 store_name
+                        for (const tp of transitPairs) {
+                          if (tp.product_code === code && tp.krec === r.krec) {
+                            notifTransitMap[code][tp.store_name] = Number(r.transit_qty);
+                          }
+                        }
+                      });
+                    }
+                  }
+                }
+              } catch (_) { /* 配送量查询失败不阻断通知 */ }
               const upserts = batch.map(p => {
                 const sid = storeNameToId[p.store_name];
                 if (!sid) return Promise.resolve(0);
                 const demand = notifDemandMap[p.product_code]?.[sid] || 0;
-                const msg = demand > 0
-                  ? `${p.product_code} 仓库有货可配送（本店需求${demand}）`
-                  : `${p.product_code} 已到货（仓库可配送）`;
+                const transit = notifTransitMap[p.product_code]?.[p.store_name] || 0;
+                const suggest = Math.max(0, demand - transit);
+                let msg: string;
+                if (demand > 0) {
+                  if (transit > 0) {
+                    msg = `${p.product_code} 仓库有货可配送（需求${demand}，已配${transit}，建议再要${suggest}）`;
+                  } else {
+                    msg = `${p.product_code} 仓库有货可配送（本店需求${demand}）`;
+                  }
+                } else {
+                  msg = `${p.product_code} 已到货（仓库可配送）`;
+                }
                 return supabase.from("store_notifications").upsert({
                   store_id: sid,
                   product_code: p.product_code,
@@ -2180,47 +2239,107 @@ serve(async (req) => {
           }
         }
 
-        // ② 给"已到货"的门店发送通知（增强通知内容：含需求量和已配送量）
+        // ② 给"已到货"的门店发送通知（含需求量、已配送量、建议要货数量）
         const notifPairs = arrived_pairs || [];
         if (notifPairs.length > 0) {
           const BATCH = 20;
-          for (let i = 0; i < notifPairs.length; i += BATCH) {
-            const batch = notifPairs.slice(i, i + BATCH);
-            // 查询需求信息
-            const notifDemandMap: Record<string, Record<string, number>> = {};
-            const batchCodes = [...new Set(batch.map((p: any) => p.product_code))];
-            if (batchCodes.length > 0) {
-              const { data: demandData } = await supabase
-                .from("reports")
-                .select("product_code, store_id, demand_quantity")
-                .eq("order_type", "缺货订购")
-                .in("product_code", batchCodes);
-              if (demandData) {
-                for (const d of demandData) {
-                  if (!notifDemandMap[d.product_code]) notifDemandMap[d.product_code] = {};
-                  notifDemandMap[d.product_code][d.store_id] = (notifDemandMap[d.product_code][d.store_id] || 0) + (d.demand_quantity || 0);
+          let transitPool: any = null;
+          try {
+            transitPool = await getPool();
+            for (let i = 0; i < notifPairs.length; i += BATCH) {
+              const batch = notifPairs.slice(i, i + BATCH);
+              // 查询需求信息
+              const notifDemandMap: Record<string, Record<string, number>> = {};
+              const notifTransitMap: Record<string, Record<string, number>> = {};
+              const batchCodes = [...new Set(batch.map((p: any) => p.product_code))];
+              if (batchCodes.length > 0) {
+                const { data: demandData } = await supabase
+                  .from("reports")
+                  .select("product_code, store_id, demand_quantity")
+                  .eq("order_type", "缺货订购")
+                  .in("product_code", batchCodes);
+                if (demandData) {
+                  for (const d of demandData) {
+                    if (!notifDemandMap[d.product_code]) notifDemandMap[d.product_code] = {};
+                    notifDemandMap[d.product_code][d.store_id] = (notifDemandMap[d.product_code][d.store_id] || 0) + (d.demand_quantity || 0);
+                  }
                 }
               }
+              // 查询 SQL Server 配送量
+              try {
+                const transitPairs = batch.map((p: any) => ({
+                  product_code: p.product_code, store_name: p.store_name,
+                  krec: STORE_KREC_MAP[p.store_name] || ''
+                })).filter((t: any) => t.krec);
+                if (transitPairs.length > 0) {
+                  const codesForTransit = [...new Set(transitPairs.map((t: any) => t.product_code))];
+                  const precMap: Record<string, string> = {};
+                  for (const code of codesForTransit) {
+                    const vpRes = await transitPool.request()
+                      .input('c', sql.NVarChar(50), code)
+                      .query(`SELECT rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode = @c`);
+                    if (vpRes.recordset?.[0]?.rec) precMap[code] = vpRes.recordset[0].rec;
+                  }
+                  const krecs = [...new Set(transitPairs.map((t: any) => t.krec))];
+                  for (const code of Object.keys(precMap)) {
+                    const prec = precMap[code];
+                    const reqT = transitPool.request().input('prec', sql.NVarChar, prec);
+                    const krecParams = krecs.map((k: string, idx: number) => {
+                      reqT.input(`k${idx}`, sql.NVarChar(5), k);
+                      return `@k${idx}`;
+                    }).join(',');
+                    if (krecParams) {
+                      const tRes = await reqT.query(`
+                        SELECT vs.InKRec as krec, ISNULL(SUM(ABS(vs.Qty)), 0) as transit_qty
+                        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+                        WHERE vs.PRec = @prec AND vs.OutKRec = '3'
+                          AND vs.InKRec IN (${krecParams})
+                          AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
+                        GROUP BY vs.InKRec
+                      `);
+                      if (!notifTransitMap[code]) notifTransitMap[code] = {};
+                      (tRes.recordset || []).forEach((r: any) => {
+                        for (const tp of transitPairs) {
+                          if (tp.product_code === code && tp.krec === r.krec) {
+                            notifTransitMap[code][tp.store_name] = Number(r.transit_qty);
+                          }
+                        }
+                      });
+                    }
+                  }
+                }
+              } catch (_) { /* 配送量查询失败不阻断 */ }
+              const upserts = batch.map(p => {
+                const sid = storeNameToId[p.store_name];
+                if (!sid) return Promise.resolve(0);
+                const demand = notifDemandMap[p.product_code]?.[sid] || 0;
+                const transit = notifTransitMap[p.product_code]?.[p.store_name] || 0;
+                const suggest = Math.max(0, demand - transit);
+                let msg: string;
+                if (demand > 0) {
+                  if (transit > 0) {
+                    msg = `${p.product_code} 仓库有货可配送（需求${demand}，已配${transit}，建议再要${suggest}）`;
+                  } else {
+                    msg = `${p.product_code} 仓库有货可配送（本店需求${demand}）`;
+                  }
+                } else {
+                  msg = `${p.product_code} 已到货（仓库可配送）`;
+                }
+                return supabase.from("store_notifications").upsert({
+                  store_id: sid,
+                  product_code: p.product_code,
+                  message: msg,
+                  created_at: new Date().toISOString(),
+                  is_read: false
+                }, { onConflict: 'store_id,product_code' })
+                  .then(r => r.error ? 0 : 1)
+                  .catch(() => 0);
+              });
+              const results = await Promise.all(upserts);
+              notifCount += results.reduce((a: number, b: number) => a + b, 0);
             }
-            const upserts = batch.map(p => {
-              const sid = storeNameToId[p.store_name];
-              if (!sid) return Promise.resolve(0);
-              const demand = notifDemandMap[p.product_code]?.[sid] || 0;
-              const msg = demand > 0
-                ? `${p.product_code} 仓库有货可配送（本店需求${demand}）`
-                : `${p.product_code} 已到货（仓库可配送）`;
-              return supabase.from("store_notifications").upsert({
-                store_id: sid,
-                product_code: p.product_code,
-                message: msg,
-                created_at: new Date().toISOString(),
-                is_read: false
-              }, { onConflict: 'store_id,product_code' })
-                .then(r => r.error ? 0 : 1)
-                .catch(() => 0);
-            });
-            const results = await Promise.all(upserts);
-            notifCount += results.reduce((a: number, b: number) => a + b, 0);
+          } finally {
+            if (transitPool) releasePool(transitPool);
           }
         }
 
