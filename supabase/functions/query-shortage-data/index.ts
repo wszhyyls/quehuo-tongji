@@ -314,6 +314,74 @@ async function executeWithTimeout<T>(
   });
 }
 
+// ========== v5.8.3 二次校验（异步后台执行，避免 Edge Function 超时）==========
+async function runSecondCheck(pool: any, supabase: any, arrivedPairs: Array<{ product_code: string; store_name: string; store_id: string }>) {
+  try {
+    if (!arrivedPairs || arrivedPairs.length === 0) return;
+    const finalCodes = [...new Set(arrivedPairs.map((it: any) => it.product_code).filter(Boolean))];
+    if (finalCodes.length === 0) return;
+    const finalStockMap: Record<string, number> = {};
+    const BATCH = 50;
+    for (let i = 0; i < finalCodes.length; i += BATCH) {
+      const codeBatch = finalCodes.slice(i, i + BATCH);
+      const req2 = pool.request();
+      const placeholders = codeBatch.map((c: string, idx: number) => {
+        const p = `c${idx}`;
+        req2.input(p, sql.NVarChar, c);
+        return `@${p}`;
+      }).join(',');
+      try {
+        const whRes = await req2.query(`
+          SELECT v.usercode, ISNULL(SUM(gs.qty), 0) as wh_qty
+          FROM ZHYYLS.dbo.Vptype v WITH(NOLOCK)
+          LEFT JOIN ZHYYLS.dbo.GoodsStocks gs WITH(NOLOCK) ON gs.prec = v.rec AND gs.krec = '3'
+          WHERE v.usercode IN (${placeholders})
+          GROUP BY v.usercode
+        `);
+        (whRes.recordset || []).forEach((r: any) => { finalStockMap[r.usercode] = Number(r.wh_qty); });
+        codeBatch.forEach((c: string) => { if (!(c in finalStockMap)) finalStockMap[c] = 0; });
+      } catch (_) { /* 单批失败不阻断 */ }
+    }
+    let finalRevert = 0;
+    for (const it of arrivedPairs) {
+      if (!it.store_id) continue;
+      const stock = finalStockMap[it.product_code];
+      if ((stock === undefined ? 0 : stock) <= 0) {
+        try {
+          const { error: updErr } = await supabase.from("reports").update({
+            replenish_status: '待处理',
+            status_remark: '自动',
+            status_changed_at: new Date().toISOString(),
+            status_changed_by: '系统自动'
+          })
+            .eq("product_code", it.product_code)
+            .eq("store_id", it.store_id)
+            .eq("order_type", "缺货订购")
+            .eq("replenish_status", "已到货")
+            .eq("status_remark", "自动");
+          if (!updErr) {
+            finalRevert++;
+            try {
+              await supabase.from("store_notifications").upsert({
+                store_id: it.store_id,
+                product_code: it.product_code,
+                message: `${it.product_code} 仓库库存已耗尽，已回退为待处理`,
+                created_at: new Date().toISOString(),
+                is_read: false
+              }, { onConflict: 'store_id,product_code' });
+            } catch (_) { /* 通知失败不阻断 */ }
+          }
+        } catch (_) { /* 单条失败不阻断 */ }
+      }
+    }
+    if (finalRevert > 0) {
+      console.log(`[SecondCheck-async] 回退 ${finalRevert} 条已到货→待处理`);
+    }
+  } catch (e) {
+    console.warn('[SecondCheck-async] 失败:', e);
+  }
+}
+
 // ========== v5.6 自动检测：计算下沉到 RQZT 存储过程（SQL 2008 R2 兼容） ==========
 async function preciseAutoDetectStatus(
   pool: sql.ConnectionPool,
@@ -2133,76 +2201,23 @@ serve(async (req) => {
 
           console.log(`[sync_with_auto_status] Supabase同步: ${updatedCount}条状态更新, ${notifCount}条通知`);
 
-          // ④ 二次校验：SP 同步完成后，再次核对所有"已到货"商品当前仓库库存
-          // 原因：SP 判定的瞬间有库存，但同步过程中可能被其他门店请走
-          // 检查全部"已到货（自动）"商品，若仓库库存=0 则回退为"待处理"
-          try {
-            const { data: arrivedFinal } = await supabase
-              .from("reports")
-              .select("product_code, store_id")
-              .eq("replenish_status", "已到货")
-              .eq("order_type", "缺货订购")
-              .eq("status_remark", "自动");
-            if (arrivedFinal && arrivedFinal.length > 0) {
-              const finalCodes = [...new Set(arrivedFinal.map((it: any) => it.product_code).filter(Boolean))];
-              const finalStockMap: Record<string, number> = {};
-              const BATCH = 50;
-              for (let i = 0; i < finalCodes.length; i += BATCH) {
-                const codeBatch = finalCodes.slice(i, i + BATCH);
-                const req2 = pool.request();
-                const placeholders = codeBatch.map((c: string, idx: number) => {
-                  const p = `c${idx}`;
-                  req2.input(p, sql.NVarChar, c);
-                  return `@${p}`;
-                }).join(',');
-                const whRes = await req2.query(`
-                  SELECT v.usercode, ISNULL(SUM(gs.qty), 0) as wh_qty
-                  FROM ZHYYLS.dbo.Vptype v WITH(NOLOCK)
-                  LEFT JOIN ZHYYLS.dbo.GoodsStocks gs WITH(NOLOCK) ON gs.prec = v.rec AND gs.krec = '3'
-                  WHERE v.usercode IN (${placeholders})
-                  GROUP BY v.usercode
-                `);
-                (whRes.recordset || []).forEach((r: any) => { finalStockMap[r.usercode] = Number(r.wh_qty); });
-                codeBatch.forEach((c: string) => { if (!(c in finalStockMap)) finalStockMap[c] = 0; });
-              }
-              let finalRevert = 0;
-              for (const it of arrivedFinal) {
-                const stock = finalStockMap[it.product_code];
-                if ((stock === undefined ? 0 : stock) <= 0) {
-                  const { error: updErr } = await supabase.from("reports").update({
-                    replenish_status: '待处理',
-                    status_remark: '自动',
-                    status_changed_at: new Date().toISOString(),
-                    status_changed_by: '系统自动'
-                  })
-                    .eq("product_code", it.product_code)
-                    .eq("store_id", it.store_id)
-                    .eq("order_type", "缺货订购")
-                    .eq("replenish_status", "已到货")
-                    .eq("status_remark", "自动");
-                  if (!updErr) {
-                    finalRevert++;
-                    // 同步更新通知消息：告知门店库存已耗尽
-                    try {
-                      await supabase.from("store_notifications").upsert({
-                        store_id: it.store_id,
-                        product_code: it.product_code,
-                        message: `${it.product_code} 仓库库存已耗尽，已回退为待处理`,
-                        created_at: new Date().toISOString(),
-                        is_read: false
-                      }, { onConflict: 'store_id,product_code' });
-                    } catch (_) { /* 通知更新失败不阻断主流程 */ }
-                  }
-                }
-              }
-              if (finalRevert > 0) {
-                console.log(`[sync_with_auto_status] 二次校验回退: ${finalRevert} 条已到货→待处理`);
-                autoDetectDetails.push(`二次校验回退: ${finalRevert} 条（SP同步后库存已为0）`);
-              }
-            }
-          } catch (e2) {
-            console.warn('[sync_with_auto_status] 二次校验失败:', e2);
-            autoDetectDetails.push(`二次校验异常: ${String(e2)}`);
+          // ④ 二次校验：移到异步后台执行（避免 Edge Function 超时）
+          // 用 EdgeRuntime.waitUntil 保持函数存活，让后续的库存核对在后台完成
+          const allAutoArrived = arrivedPairs.map((p: any) => ({
+            product_code: p.product_code,
+            store_name: p.store_name,
+            store_id: storeNameToId[p.store_name] || ''
+          })).filter((p: any) => p.store_id);
+          // EdgeRuntime.waitUntil 在 Edge Function 中支持
+          // @ts-ignore
+          if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime.waitUntil) {
+            // @ts-ignore
+            EdgeRuntime.waitUntil((async () => {
+              await runSecondCheck(pool, supabase, allAutoArrived);
+            })());
+          } else {
+            // 降级：仍然同步执行（旧行为）
+            await runSecondCheck(pool, supabase, allAutoArrived);
           }
 
           result = { ...result, supabaseUpdated: updatedCount, notificationsSent: notifCount };
