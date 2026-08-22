@@ -2403,6 +2403,21 @@ serve(async (req) => {
         break;
       }
 
+      case "second_check": {
+        // 二次校验：检查所有"已到货（自动）"商品，库存=0 的回退
+        const pool = await getPool();
+        try {
+          await runSecondCheck(pool, supabase);
+          result = { success: true, second_check: 'done' };
+        } catch (e) {
+          console.error("[second_check] 失败:", e);
+          result = { success: false, error: String(e) };
+        } finally {
+          releasePool(pool);
+        }
+        break;
+      }
+
       case "get_status_change_log": {
         // 查询状态变更日志（从 StatusChangeLog 表读取）
         const { log_product_code, top } = params;
