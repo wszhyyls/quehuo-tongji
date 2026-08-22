@@ -315,13 +315,26 @@ async function executeWithTimeout<T>(
 }
 
 // ========== v5.8.3 二次校验（异步后台执行，避免 Edge Function 超时）==========
-async function runSecondCheck(pool: any, supabase: any, arrivedPairs: Array<{ product_code: string; store_name: string; store_id: string }>) {
+// 检查 Supabase 中所有"已到货（自动）"商品，仓库库存=0 的回退为待处理
+// 同步执行（在 releasePool 之前），单次批量 SQL，覆盖全部已到货商品
+async function runSecondCheck(pool: any, supabase: any) {
   try {
-    if (!arrivedPairs || arrivedPairs.length === 0) return;
-    const finalCodes = [...new Set(arrivedPairs.map((it: any) => it.product_code).filter(Boolean))];
+    // 1. 查所有已到货（自动）商品
+    const { data: arrivedAll, error: errA } = await supabase
+      .from("reports")
+      .select("product_code, store_id")
+      .eq("replenish_status", "已到货")
+      .eq("order_type", "缺货订购")
+      .eq("status_remark", "自动");
+    if (errA) { console.warn('[SecondCheck] 查询失败:', errA.message); return; }
+    if (!arrivedAll || arrivedAll.length === 0) return;
+
+    const finalCodes = [...new Set(arrivedAll.map((it: any) => it.product_code).filter(Boolean))];
     if (finalCodes.length === 0) return;
+
+    // 2. 单次批量查 SQL Server 仓库库存（按商品编码聚合，IN 子句批量）
     const finalStockMap: Record<string, number> = {};
-    const BATCH = 50;
+    const BATCH = 100;  // 单批 100 条，单次 SQL
     for (let i = 0; i < finalCodes.length; i += BATCH) {
       const codeBatch = finalCodes.slice(i, i + BATCH);
       const req2 = pool.request();
@@ -342,9 +355,10 @@ async function runSecondCheck(pool: any, supabase: any, arrivedPairs: Array<{ pr
         codeBatch.forEach((c: string) => { if (!(c in finalStockMap)) finalStockMap[c] = 0; });
       } catch (_) { /* 单批失败不阻断 */ }
     }
+
+    // 3. 对库存=0 的回退
     let finalRevert = 0;
-    for (const it of arrivedPairs) {
-      if (!it.store_id) continue;
+    for (const it of arrivedAll) {
       const stock = finalStockMap[it.product_code];
       if ((stock === undefined ? 0 : stock) <= 0) {
         try {
@@ -375,10 +389,10 @@ async function runSecondCheck(pool: any, supabase: any, arrivedPairs: Array<{ pr
       }
     }
     if (finalRevert > 0) {
-      console.log(`[SecondCheck-async] 回退 ${finalRevert} 条已到货→待处理`);
+      console.log(`[SecondCheck] 回退 ${finalRevert} 条已到货→待处理`);
     }
   } catch (e) {
-    console.warn('[SecondCheck-async] 失败:', e);
+    console.warn('[SecondCheck] 失败:', e);
   }
 }
 
@@ -2201,31 +2215,22 @@ serve(async (req) => {
 
           console.log(`[sync_with_auto_status] Supabase同步: ${updatedCount}条状态更新, ${notifCount}条通知`);
 
-          // ④ 二次校验：移到异步后台执行（避免 Edge Function 超时）
-          // 用 EdgeRuntime.waitUntil 保持函数存活，让后续的库存核对在后台完成
-          const allAutoArrived = arrivedPairs.map((p: any) => ({
-            product_code: p.product_code,
-            store_name: p.store_name,
-            store_id: storeNameToId[p.store_name] || ''
-          })).filter((p: any) => p.store_id);
-          // EdgeRuntime.waitUntil 在 Edge Function 中支持
-          // @ts-ignore
-          if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime.waitUntil) {
-            // @ts-ignore
-            EdgeRuntime.waitUntil((async () => {
-              await runSecondCheck(pool, supabase, allAutoArrived);
-            })());
-          } else {
-            // 降级：仍然同步执行（旧行为）
-            await runSecondCheck(pool, supabase, allAutoArrived);
-          }
-
           result = { ...result, supabaseUpdated: updatedCount, notificationsSent: notifCount };
         } catch (e1) {
           throw e1;
-        } finally {
-          releasePool(pool);
         }
+        // ④ 二次校验：用 EdgeRuntime.waitUntil 在后台异步执行
+        // 检查 Supabase 中所有"已到货（自动）"商品，覆盖本轮及之前的所有记录
+        // @ts-ignore
+        if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime.waitUntil) {
+          // @ts-ignore
+          EdgeRuntime.waitUntil((async () => {
+            await runSecondCheck(pool, supabase);
+          })());
+        } else {
+          await runSecondCheck(pool, supabase);
+        }
+        releasePool(pool);
         break;
       }
 
