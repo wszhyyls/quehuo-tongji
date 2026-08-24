@@ -330,7 +330,7 @@ document.getElementById('syncPlanBtn').addEventListener('click', async function(
         var completedPairs = r.data?.completedPairs || [];
         var arrivedPairs = r.data?.arrivedPairs || [];
         if (completedPairs.length > 0 || arrivedPairs.length > 0) {
-            callEdgeFunction('apply_status_sync', {
+            await callEdgeFunction('apply_status_sync', {
                 completed_pairs: completedPairs,
                 arrived_pairs: arrivedPairs
             }, { timeout: 60000 }).then(function(syncResult) {
@@ -343,26 +343,21 @@ document.getElementById('syncPlanBtn').addEventListener('click', async function(
                 } else {
                     console.warn('[SyncPhase2] Supabase 同步未完成:', syncResult.error);
                 }
-                // 阶段三：同步完成后自动触发二次校验（库存=0 的回退）
-                callEdgeFunction('second_check', {}, { timeout: 60000 }).then(function(scResult) {
-                    if (scResult.success) {
-                        console.log('[SyncPhase3] 二次校验完成');
-                    } else {
-                        console.warn('[SyncPhase3] 二次校验未完成:', scResult.error);
-                    }
-                }).catch(function(err) {
-                    console.warn('[SyncPhase3] 二次校验异常:', err);
-                });
                 return;
             }).catch(function(err) {
                 console.warn('[SyncPhase2] Supabase 同步异常:', err);
-                // 即使阶段二失败也尝试二次校验
-                callEdgeFunction('second_check', {}, { timeout: 60000 }).catch(function(){});
             });
-        } else {
-            // 没有状态变更也做一次二次校验，清理历史库存=0 的已到货
-            callEdgeFunction('second_check', {}, { timeout: 60000 }).catch(function(){});
         }
+        // 阶段三：二次校验（库存=0 的回退），并等它完成后才刷新页面
+        await callEdgeFunction('second_check', {}, { timeout: 90000 }).then(function(scResult) {
+            if (scResult.success) {
+                console.log('[SyncPhase3] 二次校验完成');
+            } else {
+                console.warn('[SyncPhase3] 二次校验未完成:', scResult.error);
+            }
+        }).catch(function(err) {
+            console.warn('[SyncPhase3] 二次校验异常:', err);
+        });
         localStorage.removeItem('summaryData');
         await loadSummary();
     } catch(e) {
