@@ -1,7 +1,45 @@
 # 缺货统计系统 — 完整项目文档
 
-> **适用版本**：v5.8.3 | **更新日期**：2026-08-10  
+> **适用版本**：v5.9.1 | **更新日期**：2026-10-26  
 > **项目名称**：WSZH-ShortageStore | **所属**：微山县众和医药连锁有限公司
+
+---
+
+## 🔥 v5.9.1 核心升级（2026-10-26）
+
+### 登录慢根治 + 一键同步自动定时闭环
+
+| 修复项 | 问题 | 修复 |
+|--------|------|------|
+| **登录慢** | jsDelivr CDN 下载 supabase-js 耗时 38s | 本地化到 `static/js/supabase.min.js`，8 个页面全部改用本地引用，40s → 1-2s |
+| **一键同步定时不跑** | pg_cron 时区错（UTC 00:30=北京 08:30 晚8h）+ 鉴权不可靠 | schedule `30 16 * * *`（UTC 16:30=北京 00:30）+ Bearer service_role key，新 jobid=11 active=true |
+| **手动验证** | full_sync 端到端跑通 | 4173 条商品 + 19058 条采购缓存 + 8 个商品自动判定已完成 |
+
+**一键同步自动执行**：
+- ⏰ 每天 **北京时间 00:30**（pg_cron jobid=11 `sync-spfxb-result`）
+- 🔐 鉴权方式：`Authorization: Bearer service_role_key`
+- 📊 执行链路：pg_cron → scheduled-task Edge Function → full_sync → RQZT 缓存 + Supabase 缓存 + 自动完成判定
+
+---
+
+## 🔥 v5.9.0 核心升级（2026-09-17）
+
+### 药品状态变更新规则：取消「已到货」
+
+| 项 | 旧规则 | 新规则 |
+|----|--------|--------|
+| 状态机 | 待处理/已订购/已到货/已完成/厂家断货/待付款 | 待处理/已订购/已完成/厂家断货/待付款（**取消「已到货」**） |
+| 「已完成」含义 | 货已配送到门店 | **采购入库累计 ≥ 缺货汇总**（货到仓，配送由人工跟进） |
+| 完成判定 | 门店/仓库库存满足 + 智能回退 | **单调递增、永不回退**（采购入库只增不减） |
+| 到货通知 | 绑在一键同步里自动发 | **独立「通知刷新」按钮**手动触发 + `notified_at` 去重 |
+| 配送跟进 | 无 | 新增「配送待办」列表 |
+
+**新增功能与按钮**：
+- **一键同步**：商品缓存同步 + 完成判定（采购入库累计 ≥ 缺货汇总 → 已完成）
+- **通知刷新**：未完成上报 + 仓库有货 + 门店库存+在途 < 需求 → 发通知（本周期一次）
+- **配送待办**：已完成 + 仓库有货 + 门店库存+在途 < 需求 → 待配送清单
+- **门店上报**：一周期只允许上报一次（未完成前）
+- **新增字段**：`reports.settled_at`、`product_completion.last_completed_at`、`store_notifications.notified_at`
 
 ---
 
@@ -146,14 +184,15 @@
 门店客户端 (Electron/login.html → store.html) 
     ↓ Edge Function (query-shortage-data: 44 action, ~4700行)
     ↓ SQL Server RQZT (读写/SP) + ZHYYLS (只读: GoodsStocks+Vptype+vBuySendSumDetail) + Supabase (reports/认证/通知)
-管理后台 (admin.html) → 一键同步 → 按门店自动判定：已完成 / 已到货 → 写 store_notifications
+管理后台 (admin.html) → 一键同步（完成判定） → 通知刷新（到货通知） → 配送待办（人工配送）
     ↓ Supabase Realtime
-门店端通知中心（v5.7） ← 实时推送
+门店端通知中心 ← 实时推送
 ```
-- **一键同步**：商品缓存同步 + `preciseAutoDetectStatus`（SP判定） + 智能回退（同步前）+ 二次校验（同步后）→ 写 `store_notifications`（含需求量/已配送量/建议再要）→ Realtime 推送门店
-- **判定顺序**：门店配送满足（已完成）→ 仓库/采购满足（已到货）→ 其他（待处理）
-- **智能回退**：仓库库存=0 的"已到货"自动回退为"待处理"，同步更新通知为"库存已耗尽"
-- **状态主数据源**：`reports.replenish_status`（Supabase），不回退时 SQL Server 作为兜底
+- **状态机**：待处理 / 已订购 / 已完成 / 厂家断货 / 待付款（取消「已到货」）
+- **一键同步**：商品缓存同步 + `preciseAutoDetectStatusV2`（采购入库累计 ≥ 缺货汇总 → 已完成，永不回退）
+- **通知刷新**：未完成上报 + 仓库有货 + 门店库存+在途 < 需求 → 写 `store_notifications`（`notified_at` 去重）
+- **配送待办**：已完成 + 仓库有货 + 门店库存+在途 < 需求 → 待配送清单
+- **状态主数据源**：`reports.replenish_status`（Supabase）
 
 **修改文件指南**：
 - 改前端 → `login.html` / `store.html` + `static/js/store.js` / `admin.html` + `static/js/admin.js`
@@ -206,10 +245,11 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
   ├─ 上报缺货/新品 ──────────────────→ 汇总缺货列表
   │                                       ├─ 查看各门店缺货汇总
   │                                       ├─ 订货管理（设置实际订货数量）
-  │                                       ├─ 修改补货状态（待处理→已订购→已到货）
-  │                                       ├─ 一键同步（自动判定+智能回退）
-  │  ◀──────── 通知中心 (Realtime) ────────┤  ├─ 推送"已到货"通知（含需求量/已配送量/建议再要）
-  │                                       │  ├─ 库存耗尽自动更新通知
+  │                                       ├─ 修改补货状态（待处理/已订购/已完成/厂家断货/待付款）
+  │                                       ├─ 一键同步（完成判定：采购入库≥缺货汇总）
+  │                                       ├─ 通知刷新（到货通知，含在途判断）
+  │                                       ├─ 配送待办（人工跟进配送）
+  │  ◀──────── 通知中心 (Realtime) ────────┤  ├─ 推送"商品已到仓"通知
   │                                       └─ Excel VBA 批量回写
   └─ 查看上报历史 + 审批通知     │
 ```
@@ -674,7 +714,7 @@ SPFXB_Result 更新为最新
 |------|------|------|
 | `query-shortage-data` | `supabase/functions/query-shortage-data/index.ts` | **主函数**，44 个 action，处理所有业务逻辑 |
 | `check-update` | `supabase/functions/check-update/` | 版本检查（返回最新版本号） |
-| `scheduled-task` | `supabase/functions/scheduled-task/` | 定时任务（商品同步、健康检查） |
+| `scheduled-task` | `supabase/functions/scheduled-task/` | **定时任务核心**：full_sync（RQZT缓存+商品缓存+采购计划+自动完成判定），pg_cron 每天 00:30 北京时间自动触发，支持 Bearer service_role_key + x-task-secret 双通道鉴权（config.toml: verify_jwt=false） |
 
 ### 6.2 query-shortage-data Action 清单
 
@@ -917,9 +957,20 @@ queryProductByCode(code, forceRefresh)
 # 部署 Edge Function
 cd "g:\Trae项目\缺货统计系统"
 npx supabase functions deploy query-shortage-data --project-ref qswpgnnedqvuegwfbprd
+npx supabase functions deploy scheduled-task --project-ref qswpgnnedqvuegwfbprd
 
 # 部署前端到 Cloudflare Pages
 npx wrangler pages deploy . --project-name=wszhyy --branch=main
+
+# 重建 pg_cron 一键同步定时任务（时区修正 + Bearer 鉴权）
+supabase db query --linked -f sql/create_auto_sync_cron.sql
+
+# 查询 pg_cron job 状态
+supabase db query --linked "SELECT jobid, jobname, schedule, active FROM cron.job ORDER BY jobid;"
+
+# 查询项目用量诊断
+supabase db query --linked "SELECT pg_size_pretty(pg_database_size(current_database())) as total_db_size;"
+supabase db query --linked "SELECT count(*) as auth_users FROM auth.users;"
 ```
 
 ### 8.2 环境变量（Supabase Edge Functions）
@@ -1013,6 +1064,54 @@ ALTER TABLE product_cache DISABLE ROW LEVEL SECURITY;
 ALTER TABLE shortage_storestock_cache DISABLE ROW LEVEL SECURITY;
 ALTER TABLE shortage_purchaseplancache DISABLE ROW LEVEL SECURITY;
 ALTER TABLE reports DISABLE ROW LEVEL SECURITY;
+```
+
+### 9.4 登录报「Failed to fetch」（2026-10-19 记录）
+
+浏览器把所有请求层失败统一包装成 `Failed to fetch`，历史上一共出现过 3 类根因，按下列顺序排查：
+
+| 根因 | 判断方法 | 处理 |
+|------|---------|------|
+| **Supabase 组织配额耗尽（HTTP 402）** | 请求 `https://qswpgnnedqvuegwfbprd.supabase.co/auth/v1/health`，若返回 **402 Payment Required** 即为此类；Dashboard 显示 `Services restricted`，Usage 页可看具体超限项 | 见下方「9.5 配额超限完整处置流程」 |
+| **CORS 白名单拦截** | 服务端 curl 请求正常返回，但浏览器控制台报 CORS 错误 | Edge Function 的 CORS 白名单需允许所有 `*.wszhyy.pages.dev` 子域名 + localhost（v3.18.7 已修复，Cloudflare 每次部署会生成新子域名） |
+| **客户端网络/缓存问题** | 单台设备报错、其他设备正常 | 清浏览器/客户端缓存、换网络重试 |
+| **客户端双击无反应** | 双击图标不弹窗口 | 后台残留僵尸进程占用单实例锁 → `Stop-Process -Name 'WSZH-ShortageStore' -Force` 清理后重开 |
+
+> 快速自检脚本要点：`Invoke-WebRequest https://qswpgnnedqvuegwfbprd.supabase.co/auth/v1/health` → 402=配额限制；超时=网络/DNS；200=后端正常，再查前端 CORS。
+
+### 9.5 Supabase 配额超限（402）完整处置流程（2026-10-19 实例）
+
+**① 定位超限项**：Dashboard → Usage 页看哪项超限（本次是 Database Size 1.212/0.5GB）。
+
+**② 定位大表**（SQL Editor 执行）：
+```sql
+SELECT n.nspname AS schema, c.relname,
+       pg_size_pretty(pg_total_relation_size(c.oid)) AS size
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','i','m','t') AND n.nspname NOT IN ('pg_catalog','information_schema')
+ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 15;
+```
+
+**③ 清理**（注意两条坑）：
+```sql
+-- 单条选中执行；schema 是 net，不是 supabase_functions
+TRUNCATE TABLE net._http_response;
+```
+```sql
+-- VACUUM FULL 必须单条执行，不能与其他语句同批（否则报 cannot run inside a transaction block）
+VACUUM FULL net._http_response;
+```
+
+**④ 防复发**（仅 DELETE 不 VACUUM 不会归还磁盘，要用 TRUNCATE）：
+```sql
+SELECT cron.schedule('cleanup-http-response', '0 4 * * *', $$TRUNCATE net._http_response$$);
+```
+
+**⑤ 关键结论**：⚠️ 数据库降回 44MB 后 **402 不会立即自动解除**，重启项目也无效。官方口径是三条路：升级 Pro（立即）/ 等下个账单周期 / 提工单人工解除。本实例中限制最终于 **2026-10-21 自行解除**（实测 Edge Function 返回 200，工单未及回复），说明 Supabase 会在后台定期重新评估用量——降回限额后通常 1~3 天内恢复，急用则升级。
+
+**⑥ 未来新建表授权**：Supabase 自 2026-10-30 起，`public` 新建表不再自动授权，建表 SQL 末尾需补：
+```sql
+grant select, insert, update, delete on public.新表名 to anon, authenticated, service_role;
 ```
 
 ---

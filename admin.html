@@ -11,7 +11,7 @@
 
     <title>微山县众和医药连锁有限公司 药品订购系统 - 管理后台</title>
     <link rel="stylesheet" href="./static/css/style.css?v=600">
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="./static/js/supabase.min.js?v=600"></script>
     <script src="./static/js/utils.js?v=600"></script>
 </head>
 <body class="admin-page">
@@ -34,7 +34,7 @@
         <div class="order-tabs admin-tabs">
             <button class="tab-btn active" data-tab="summary">缺货汇总<span class="tab-badge" id="shortageBadge"></span></button>
             <button class="tab-btn" data-tab="new">新品汇总<span class="tab-badge" id="newBadge"></span></button>
-            <button class="tab-btn" onclick="window.open('procurement.html','_self')" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-weight:600;">采购记录</button>
+
             <button class="tab-btn" data-tab="employees">员工管理</button>
             <button class="tab-btn" data-tab="devices">设备授权</button>
             <button class="tab-btn" data-tab="users">门店管理</button>
@@ -49,7 +49,7 @@
                 <div class="stat-card stat-card-clickable" onclick="filterByStat('待付款')" title="筛选待付款"><span class="stat-value" id="paymentCount">0</span><span class="stat-label">待付款</span></div>
                 <div class="stat-card stat-card-clickable" onclick="filterByStat('已完成')" title="筛选已完成"><span class="stat-value" id="completedTotalCount">0</span><span class="stat-label">已完成</span></div>
                 <div class="stat-card stat-card-clickable" onclick="filterByStat('待处理')" title="筛选待处理"><span class="stat-value" id="pendingCount">0</span><span class="stat-label">待处理</span></div>
-                <div class="stat-card stat-card-clickable" onclick="filterByStat('已到货')" title="筛选已到货"><span class="stat-value" id="arrivedCount">0</span><span class="stat-label">已到货</span></div>
+                <div class="stat-card stat-card-clickable" onclick="document.getElementById('deliveryTodoBtn').click()" title="查看已完成未配送商品"><span class="stat-value" id="arrivedCount">-</span><span class="stat-label">配送待办</span></div>
                 <div class="stat-card stat-card-clickable" onclick="filterByStat('今日上报')" title="筛选今日上报"><span class="stat-value" id="todayCount">0</span><span class="stat-label">今日上报</span></div>
             </div>
             
@@ -94,12 +94,13 @@
                         <select id="statusFilter" class="filter-select-sm" style="width:auto;padding:4px 8px;font-size:12px;" onchange="applyStatusFilter()">
                             <option value="">状态筛选</option>
                             <option value="待处理">待处理</option><option value="已订购">已订购</option>
-                            <option value="已到货">已到货</option>
                             <option value="已完成">已完成</option><option value="待付款">待付款</option>
                             <option value="厂家断货">厂家断货</option>
                         </select>
                         <input type="text" id="productCodeSearch" placeholder="商品编码" class="filter-input-sm" style="width:120px;padding:4px 8px;font-size:12px;" oninput="onProductCodeChange()">
-                        <button id="syncPlanBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" title="按门店自动判定：仓库满足→已到货 / 门店满足→已完成">一键同步</button>
+                        <button id="syncPlanBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" title="自动判定：采购入库累计 ≥ 缺货汇总 → 已完成">一键同步</button>
+                        <button id="notifyRefreshBtn" class="btn-fbar" style="background:#ff9800;color:#fff;font-weight:600;" title="手动触发到货通知：未完成上报 + 仓库有货 + 门店库存<需求">通知刷新</button>
+                        <button id="deliveryTodoBtn" class="btn-fbar" style="background:#607d8b;color:#fff;font-weight:600;" title="查看已完成但未配送到店（门店库存<需求）的商品">配送待办</button>
                         <button id="refreshBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" title="重新加载缺货汇总数据，不触发同步流程">刷新订购数据</button>
                     <span style="font-size:12px;color:var(--text-muted);">自动刷新:</span>
                     <select id="autoRefreshInterval" class="filter-select-sm" style="width:auto;padding:4px 8px;font-size:12px;">
@@ -117,10 +118,8 @@
                     <span>已选择 <strong id="selectedCount">0</strong> 项</span>
                     <select id="batchTargetStatus" class="filter-select-sm" style="width:auto;margin-right:6px;" onchange="this.title='批量目标状态：'+this.value">
                         <option value="待处理">待处理</option>
-                        <option value="配货中">配货中</option>
                         <option value="已订购">已订购</option>
-                        <option value="已到货" selected>已到货</option>
-                        <option value="已完成">已完成</option>
+                        <option value="已完成" selected>已完成</option>
                         <option value="待付款">待付款</option>
                         <option value="厂家断货">厂家断货</option>
                     </select>
@@ -180,7 +179,7 @@
                 <div class="list-header"><h2>新品订购汇总</h2><button id="refreshNewBtn" class="btn-search">刷新</button></div>
                 <div class="table-wrapper">
                     <table class="data-table">
-                        <thead><tr><th>商品名称</th><th>规格</th><th>参考厂家</th><th>紧急程度</th><th>总需求</th><th>审批状态</th><th>操作</th><th>删除</th></tr></thead>
+                        <thead><tr><th>商品名称</th><th>规格</th><th>参考厂家</th><th>紧急程度</th><th>总需求</th><th>上报日期</th><th>门店</th><th>上报人</th><th>审批状态</th><th>删除</th></tr></thead>
                         <tbody id="newGroupTbody"></tbody>
                     </table>
                 </div>
@@ -466,9 +465,7 @@
                     <select id="omTargetStatus" style="width:100%;padding:9px;border-radius:6px;border:1px solid #ddd;font-size:14px;">
                         <option value="">不修改</option>
                         <option value="待处理">待处理</option>
-                        <option value="配货中">配货中</option>
                         <option value="已订购">已订购</option>
-                        <option value="已到货">已到货</option>
                         <option value="已完成">已完成</option>
                         <option value="待付款">待付款</option>
                         <option value="厂家断货">厂家断货</option>
@@ -524,6 +521,8 @@
                         <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="manage_devices"> 管理设备授权</label>
                         <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="manage_stores"> 管理门店</label>
                         <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="sync_data"> 同步采购计划</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="notify_refresh" checked> 通知刷新</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="view_delivery_todo" checked> 配送待办</label>
                         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="view_audit_log"> 查看操作日志</label>
                     </div>
                 </div>
@@ -535,6 +534,7 @@
         </div>
     </div>
 
+    <script src="./static/js/xlsx.full.min.js?v=600"></script>
     <script src="./static/js/admin.js?v=608"></script>
 
     <!-- ========== PWA Service Worker ========== -->

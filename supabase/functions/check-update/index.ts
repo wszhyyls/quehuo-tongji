@@ -7,7 +7,7 @@ const corsHeaders = {
 };
 
 // 本地声明的最新版本（如果 GitHub API 失败时兜底）
-const FALLBACK_VERSION = '5.8.1';
+const FALLBACK_VERSION = '5.9.0';
 const GITHUB_REPO = 'wszhyyls/quehuo-tongji';
 const GITHUB_API_LATEST = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 // Cloudflare Pages Function 代理下载（用户网络访问不到 objects.githubusercontent.com 时使用）
@@ -77,7 +77,9 @@ serve(async (req) => {
     const cfProxyUrl = `${CF_PROXY_BASE}/download?version=${actualVersion}`;
     // 实际给用户的链接：优先用 CF 代理（兼容性更好）
     const directDownloadUrl = cfProxyUrl;
-    const updateFilesUrl = `${CF_PROXY_BASE}/download?version=${actualVersion}`;
+    // electron-updater 自动下载源：GitHub Release 目录（latest.yml 与 exe 文件名均需与此匹配）
+    // 下载失败时客户端会自动回退为「提示手动下载」（走 CF 代理 downloadUrl）
+    const updateFilesUrl = `https://github.com/${GITHUB_REPO}/releases/download/v${actualVersion}/`;
 
     // 2) 比较版本
     const isUpdateAvailable = compareVersions(actualVersion, version) > 0;

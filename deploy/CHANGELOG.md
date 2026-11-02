@@ -1,6 +1,54 @@
 # 版本升级记录 (CHANGELOG)
 
-> 适用版本：v5.8.3 | 更新日期：2026-08-10
+> 适用版本：v5.9.0 | 更新日期：2026-09-17
+
+---
+
+## v5.9.0 — 药品状态变更新规则：取消「已到货」（2026-09-17）
+
+### 一、方案概述
+
+| 项 | 旧规则 | 新规则 |
+|----|--------|--------|
+| 状态机 | 待处理 / 已订购 / 已到货 / 已完成 / 厂家断货 / 待付款 | 待处理 / 已订购 / 已完成 / 厂家断货 / 待付款（**取消「已到货」**） |
+| 「已完成」含义 | 货已配送到门店 | **采购入库累计 ≥ 缺货汇总**（仅代表货已到仓，配送由人工处理） |
+| 完成判定 | 门店/仓库库存满足 + 智能回退 | **单调递增、永不回退**（采购入库只增不减） |
+| 到货通知 | 绑在一键同步里自动发 | **独立「通知刷新」按钮**手动触发 + `notified_at` 去重 |
+| 配送跟进 | 无 | 新增「配送待办」列表（已完成 + 仓库有货 + 门店库存 < 需求） |
+
+> 核心洞察：采购入库量单调递增，「已完成」一旦满足永久成立，彻底消除旧方案的智能回退、二次校验、second-check 计划任务、通知库存耗尽回退等一批补丁。
+
+### 二、数据库迁移（`supabase/migrations/20260917000000_status_logic_v2.sql`）
+
+| 变更 | 说明 |
+|------|------|
+| `reports.settled_at` | 新增「已结算」标记，完成时回填 |
+| `product_completion` 表 | 新建，商品级完成周期锚点 `last_completed_at` |
+| `store_notifications.notified_at` | 新增通知去重字段 |
+| 存量数据迁移 | 「已到货」一次性改为「已完成」；初始化锚点；清空旧「已到货」通知 |
+
+### 三、后端改动（Edge Function）
+
+| 文件 | 改动 |
+|------|------|
+| `query-shortage-data/index.ts` | 新增 `preciseAutoDetectStatusV2`（采购入库累计判定）、`queryPurchaseQty`、`queryInventoryMaps`；新增 `notify_refresh`（到货通知）、`get_delivery_todo`（配送待办）；`insert_report` 增加「一周期只报一次」校验 |
+| `scheduled-task/index.ts` | 定时任务接入 v2 完成判定（只做完成判定、不发通知） |
+
+### 四、前端改动
+
+| 文件 | 改动 |
+|------|------|
+| `static/js/utils.js` / `deploy/static/js/utils.js` | `ORDER_STATUSES` 移除「已到货」 |
+| `static/js/admin.js` / `deploy/static/js/admin.js` | 一键同步改为完成判定；新增「通知刷新」「配送待办」按钮 + 权限位 `notify_refresh`/`view_delivery_todo`；配送待办弹窗（表格框线、固定表头、斑马纹、单行截断、数量角标） |
+| `static/js/store.js` / `deploy/static/js/store.js` | 移除旧「已到货」登录提示死代码 |
+| `admin.html` / `deploy/admin.html` | 新增两个按钮 + 权限复选框 |
+
+### 五、部署情况
+
+- 迁移 SQL：已在 Supabase SQL Editor 执行
+- Edge Functions：`query-shortage-data`、`scheduled-task` 已重新部署
+- 前端：已部署到 Cloudflare Pages（`wszhyy.pages.dev`）
+- 客户端：无需更新（客户端运行时远程加载页面，自动生效）
 
 ---
 

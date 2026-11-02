@@ -227,7 +227,6 @@ async function initializeApp() {
         // 后台静默更新
         checkProductsUpdate().catch(function(){});
         loadReporterOptions();
-        checkArrivalNotifications();
         checkApprovalNotifications();
     } else {
         updateLoadingProgress('正在加载数据...', '20%');
@@ -241,7 +240,6 @@ async function initializeApp() {
         setTimeout(hideLoadingOverlay, 300);
         preloadComplete = true;
         loadReporterOptions();
-        checkArrivalNotifications();
         checkApprovalNotifications();
     }
 }
@@ -830,24 +828,6 @@ window.refreshHistoryEnrich = function() {
         showToast('刷新失败，可重试', 'warn');
     });
 };
-
-// ========== 到货通知（登录时检查）==========
-async function checkArrivalNotifications() {
-    try {
-        var result = await callEdgeFunction('get_my_reports', { store_id: user.store_id });
-        if (!result.success || !result.data) return;
-        var arrived = result.data.filter(function(r) { return r.replenish_status === '已到货'; });
-        if (arrived.length === 0) return;
-        var names = arrived.slice(0, 5).map(function(r) { return r.product_name || r.new_product_name || r.product_code; }).join('、');
-        var more = arrived.length > 5 ? ' 等' + arrived.length + '个商品' : '';
-        var bar = document.getElementById('versionBar'), msg = document.getElementById('versionMsg');
-        if (bar && msg) {
-            msg.innerHTML = '📦 您上报的 <b>' + names + '</b>' + more + ' 已到货，请查收！<button onclick="this.parentElement.parentElement.style.display=\'none\'" style="margin-left:12px;padding:2px 10px;background:#fff;color:#4CAF50;border:none;border-radius:4px;cursor:pointer;">知道了</button>';
-            bar.style.display = 'block'; bar.style.background = '#4CAF50';
-            setTimeout(function() { bar.style.display = 'none'; }, 15000);
-        }
-    } catch(e) {}
-}
 
 // ========== 新品审批通知 ==========
 async function checkApprovalNotifications() {

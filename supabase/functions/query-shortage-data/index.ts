@@ -412,13 +412,13 @@ async function preciseAutoDetectStatus(
       .order("created_at", { ascending: false })
       .limit(2000);
     
-    // 筛选未完成的记录（待处理/已订购/已到货/待付款/配货中），排除已完成/厂家断货
+    // 筛选未完成的记录（待处理/已订购/已到货/待付款/配货中），排除已完成/厂家断货/已关闭
     const sqlItems: Array<{ 商品编码: string; 补货状态: string; 订货数量: number }> = [];
     const sqlCodes = new Set<string>();
     for (const r of (allOrdered || [])) {
       if (!r.product_code || !r.store_name) continue;
       const status = r.replenish_status || '待处理';
-      if (status === '已完成' || status === '厂家断货') continue;
+      if (status === '已完成' || status === '厂家断货' || status === '已关闭') continue;
       if (!sqlCodes.has(r.product_code)) {
         sqlItems.push({ 商品编码: r.product_code, 补货状态: status, 订货数量: r.demand_quantity || 0 });
         sqlCodes.add(r.product_code);
@@ -770,6 +770,316 @@ async function preciseAutoDetectStatus(
     console.error("[preciseAutoDetect] 错误:", err);
     return { detected: 0, details: [String(err)] };
   }
+}
+
+// ========== v2 完成判定：采购入库累计 ≥ 缺货汇总（商品级，单调递增，永不回退） ==========
+// 迁移上线时间兜底锚点（product_completion 无记录时使用，方案⑤）
+const STATUS_MIGRATION_EPOCH = '2026-09-17';
+
+// 门店名称 → 门店ID 映射（复用，通知/待办时用）
+const STORE_NAME_TO_ID_V2: Record<string, string> = {
+  '02第二药店': 'wszhyy02', '03第三药店': 'wszhyy03', '04第四药店': 'wszhyy04',
+  '06常口店': 'wszhyy06', '08第八药店': 'wszhyy08', '09第九药店': 'wszhyy09',
+  '14第十四药店': 'wszhyy14', '16凤凰山药店': 'wszhyy16', '17益丰店': 'wszhyy17', '21富源店': 'wszhyy21',
+};
+
+// 查单商品采购入库累计（BillType=34，入库到仓库 krec='3'，锚点之后）
+async function queryPurchaseQty(pool: sql.ConnectionPool, code: string, anchor: string): Promise<number> {
+  const req = pool.request();
+  req.input("code", sql.NVarChar(50), code);
+  req.input("anchor", sql.VarChar(10), (anchor || STATUS_MIGRATION_EPOCH).substring(0, 10));
+  const res = await req.query(`
+    SELECT ISNULL(SUM(ABS(vs.Qty)), 0) as purchase_qty
+    FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+    JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+    WHERE v.usercode = @code
+      AND vs.BillType = 34
+      AND vs.InKRec = '3'
+      AND vs.BillDate > @anchor
+  `);
+  return Number(res.recordset?.[0]?.purchase_qty || 0);
+}
+
+async function preciseAutoDetectStatusV2(
+  pool: sql.ConnectionPool,
+  supabaseClient: any
+): Promise<{ detected: number; details: string[]; completedCodes: string[]; completedCount: number }> {
+  const details: string[] = [];
+  try {
+    // 1. 获取所有未完成（非「已完成/厂家断货/已关闭」）的缺货订购上报
+    //    过滤必须下推到服务端（PostgREST 单次最多返回 1000 行，客户端过滤会截掉老记录）
+    const { data: allOrdered } = await supabaseClient
+      .from("reports")
+      .select("id, product_code, store_id, store_name, demand_quantity, created_at, replenish_status, status_changed_at")
+      .eq("order_type", "缺货订购")
+      .not("product_code", "is", null)
+      .neq("replenish_status", "已完成")
+      .neq("replenish_status", "厂家断货")
+      .neq("replenish_status", "已关闭")
+      .order("created_at", { ascending: false })
+      .limit(2000);
+
+    const activeItems = (allOrdered || []).filter((r: any) => {
+      const s = r.replenish_status || '待处理';
+      return s !== '已完成' && s !== '厂家断货' && s !== '已关闭';
+    });
+    const activeCodes = [...new Set(activeItems.map((r: any) => r.product_code).filter(Boolean))];
+    details.push(`待检测商品: ${activeCodes.length} 个`);
+    if (activeCodes.length === 0) {
+      return { detected: 0, details, completedCodes: [], completedCount: 0 };
+    }
+
+    // 2. 读取各商品完成周期锚点
+    const completionMap: Record<string, string> = {};
+    for (let i = 0; i < activeCodes.length; i += 200) {
+      const batch = activeCodes.slice(i, i + 200);
+      const { data: compRows } = await supabaseClient
+        .from("product_completion")
+        .select("product_code, last_completed_at")
+        .in("product_code", batch);
+      (compRows || []).forEach((c: any) => {
+        if (c.last_completed_at) completionMap[c.product_code] = c.last_completed_at;
+      });
+    }
+
+    // 3. 构建缺货汇总：累计所有未完成上报的需求（含迁移前存量老记录）
+    //    采购锚点：优先完成周期锚点；无完成记录用最早未完成上报日
+    const demandByCode: Record<string, number> = {};
+    const earliestActiveAt: Record<string, string> = {};
+    for (const r of activeItems) {
+      const code = r.product_code;
+      if (!code) continue;
+      demandByCode[code] = (demandByCode[code] || 0) + (Number(r.demand_quantity) || 0);
+      if (r.created_at) {
+        const c = new Date(r.created_at).toISOString();
+        if (!earliestActiveAt[code] || c < earliestActiveAt[code]) earliestActiveAt[code] = c;
+      }
+    }
+
+    // 4. 查询采购入库累计（分批并发，避免逐个串行超时）
+    const purchaseByCode: Record<string, number> = {};
+    const CONCURRENCY = 5;
+    for (let i = 0; i < activeCodes.length; i += CONCURRENCY) {
+      const batch = activeCodes.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (code) => {
+        try {
+          purchaseByCode[code] = await queryPurchaseQty(pool, code, completionMap[code] || earliestActiveAt[code] || STATUS_MIGRATION_EPOCH);
+        } catch (e) {
+          purchaseByCode[code] = 0;
+        }
+      }));
+    }
+
+    // 5. 判定：采购入库累计 ≥ 缺货汇总 → 已完成（商品级）
+    const completedCodes: string[] = [];
+    let completedCount = 0;
+    const now = new Date().toISOString();
+    for (const code of activeCodes) {
+      const demand = demandByCode[code] || 0;
+      const purchase = purchaseByCode[code] || 0;
+      if (demand > 0 && purchase >= demand) {
+        completedCodes.push(code);
+        try {
+          const { error: updErr } = await supabaseClient.from("reports").update({
+            replenish_status: '已完成',
+            status_remark: '自动',
+            status_changed_at: now,
+            status_changed_by: '系统自动',
+            settled_at: now
+          })
+            .eq("product_code", code)
+            .eq("order_type", "缺货订购")
+            .neq("replenish_status", "已完成");
+          if (!updErr) {
+            await supabaseClient.from("product_completion").upsert({
+              product_code: code,
+              last_completed_at: now,
+              updated_at: now
+            }, { onConflict: 'product_code' });
+            // 新周期重置通知去重：清空该商品 notified_at，允许下个周期再次通知
+            try {
+              await supabaseClient.from("store_notifications").update({ notified_at: null })
+                .eq("product_code", code);
+            } catch (_) { /* 清空通知去重失败不阻断 */ }
+            completedCount++;
+          }
+        } catch (e) {
+          console.warn(`[preciseAutoDetectV2] 商品 ${code} 标记完成失败:`, e);
+        }
+      }
+    }
+    details.push(`完成判定: ${completedCount} 个商品（采购入库 ≥ 缺货汇总）`);
+
+    // 6. 手工状态超时回退：已订购/待付款 超过 30 天且采购仍不够 → 待处理
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    let revertedCount = 0;
+    const nowTs = Date.now();
+    for (const r of activeItems) {
+      const s = r.replenish_status;
+      if (s !== '已订购' && s !== '待付款') continue;
+      const changedAt = r.status_changed_at ? new Date(r.status_changed_at).getTime() : 0;
+      if (!changedAt || (nowTs - changedAt) < THIRTY_DAYS_MS) continue;
+      const code = r.product_code;
+      const demand = demandByCode[code] || 0;
+      const purchase = purchaseByCode[code] || 0;
+      if (purchase >= demand) continue; // 采购已够，交给完成判定升级
+      try {
+        const { error: revErr } = await supabaseClient.from("reports").update({
+          replenish_status: '待处理',
+          status_remark: '超时回退(30天未到货)',
+          status_changed_at: new Date().toISOString(),
+          status_changed_by: '系统自动'
+        }).eq("id", r.id);
+        if (!revErr) revertedCount++;
+      } catch (e) { /* 回退失败不阻断 */ }
+    }
+    if (revertedCount > 0) {
+      details.push(`超时回退: ${revertedCount} 条已订购/待付款(30天未到货) → 待处理`);
+    }
+
+    return { detected: completedCount, details, completedCodes, completedCount };
+  } catch (err) {
+    console.error("[preciseAutoDetectV2] 错误:", err);
+    return { detected: 0, details: [String(err)], completedCodes: [], completedCount: 0 };
+  }
+}
+
+// 查询活跃商品的仓库库存（krec='3'）、门店库存（krec<>'3'）和在途数量，批量返回
+async function queryInventoryMaps(
+  pool: sql.ConnectionPool,
+  codes: string[]
+): Promise<{ whStock: Record<string, number>; storeStock: Record<string, number>; transit: Record<string, number> }> {
+  const whStock: Record<string, number> = {};
+  const storeStock: Record<string, number> = {};
+  const transit: Record<string, number> = {};
+  if (codes.length === 0) return { whStock, storeStock, transit };
+
+  const krecToStoreId: Record<string, string> = {};
+  Object.entries(STORE_KREC_MAP).forEach(([name, krec]) => {
+    krecToStoreId[krec] = STORE_NAME_TO_ID_V2[name] || '';
+  });
+
+  for (let i = 0; i < codes.length; i += 100) {
+    const batch = codes.slice(i, i + 100);
+    try {
+      // 仓库库存（配送中心 krec='3'）
+      const whReq = pool.request();
+      const whPlaceholders = batch.map((c, idx) => { whReq.input(`c${idx}`, sql.NVarChar(50), c); return `@c${idx}`; }).join(',');
+      const whRes = await whReq.query(`
+        SELECT v.usercode, ISNULL(SUM(gs.qty), 0) as wh_qty
+        FROM ZHYYLS.dbo.Vptype v WITH(NOLOCK)
+        LEFT JOIN ZHYYLS.dbo.GoodsStocks gs WITH(NOLOCK) ON gs.prec = v.rec AND gs.krec = '3'
+        WHERE v.usercode IN (${whPlaceholders})
+        GROUP BY v.usercode
+      `);
+      (whRes.recordset || []).forEach((r: any) => { whStock[r.usercode] = Number(r.wh_qty); });
+    } catch (_) { /* 仓库库存失败不阻断 */ }
+
+    try {
+      // 门店库存（各门店 krec <> '3'）
+      const stReq = pool.request();
+      const stPlaceholders = batch.map((c, idx) => { stReq.input(`s${idx}`, sql.NVarChar(50), c); return `@s${idx}`; }).join(',');
+      const stRes = await stReq.query(`
+        SELECT v.usercode, gs.krec, ISNULL(SUM(gs.qty), 0) as store_qty
+        FROM ZHYYLS.dbo.Vptype v WITH(NOLOCK)
+        JOIN ZHYYLS.dbo.GoodsStocks gs WITH(NOLOCK) ON gs.prec = v.rec
+        WHERE v.usercode IN (${stPlaceholders}) AND gs.krec <> '3'
+        GROUP BY v.usercode, gs.krec
+      `);
+      (stRes.recordset || []).forEach((r: any) => {
+        const sid = krecToStoreId[r.krec];
+        if (sid) storeStock[r.usercode + '||' + sid] = Number(r.store_qty);
+      });
+    } catch (_) { /* 门店库存失败不阻断 */ }
+
+  }
+
+  // 在途（实时：Gp_SendDoing 存储过程，一次返回全部在途记录）
+  try {
+    const d30 = new Date(Date.now() - 30 * 86400000).toISOString().substring(0, 10);
+    const today = new Date().toISOString().substring(0, 10);
+    const gReq = pool.request();
+    gReq.input('sd', sql.VarChar(10), d30);
+    gReq.input('ed', sql.VarChar(10), today);
+    const gRes = await Promise.race([
+      gReq.query(`EXEC ZHYYLS.dbo.Gp_SendDoing 0,'','',0,0,0,@sd,@ed,0,0,0,2`),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('在途查询超时(30s)')), 30000))
+    ]);
+    const rows = gRes.recordset || [];
+    // 反查 PRec → usercode
+    const precList = [...new Set(rows.map((r: any) => r.PRec).filter(Boolean))];
+    const precToCode: Record<number, string> = {};
+    for (let i = 0; i < precList.length; i += 500) {
+      const batch = precList.slice(i, i + 500);
+      const vpReq = pool.request();
+      const ph = batch.map((p, idx) => { vpReq.input(`p${idx}`, sql.Int, p); return `@p${idx}`; }).join(',');
+      const vpRes = await vpReq.query(`SELECT rec, usercode FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE rec IN (${ph})`);
+      (vpRes.recordset || []).forEach((r: any) => { precToCode[r.rec] = r.usercode; });
+    }
+    // 构建 transit map（posid = 门店 krec，KRec=3 为配送中心出库）
+    for (const r of rows) {
+      const sid = krecToStoreId[String(r.posid)];
+      const code = precToCode[r.PRec];
+      if (!sid || !code) continue;
+      const k = code + '||' + sid;
+      transit[k] = (transit[k] || 0) + Number(r.Qty);
+    }
+  } catch (_) { /* 在途查询失败不阻断 */ }
+
+  return { whStock, storeStock, transit };
+}
+
+// 查询累计配送量（从上报日期起，配送中心 OutKRec='3' 出库到门店，排除调货出库单）
+async function queryDeliveredMap(
+  pool: sql.ConnectionPool,
+  pairs: Array<{ code: string; krec: string; since: string }>
+): Promise<Record<string, number>> {
+  const delivered: Record<string, number> = {};
+  if (pairs.length === 0) return delivered;
+
+  const codes = [...new Set(pairs.map(p => p.code))];
+  const precMap: Record<string, number> = {};
+  const precToCode: Record<number, string> = {};
+  for (let i = 0; i < codes.length; i += 200) {
+    const batch = codes.slice(i, i + 200);
+    const req = pool.request();
+    const ph = batch.map((c, idx) => { req.input(`c${idx}`, sql.NVarChar(50), c); return `@c${idx}`; }).join(',');
+    const res = await req.query(`SELECT rec, usercode FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode IN (${ph})`);
+    (res.recordset || []).forEach((r: any) => { precMap[r.usercode] = r.rec; precToCode[r.rec] = r.usercode; });
+  }
+
+  const krecToStoreId: Record<string, string> = {};
+  Object.entries(STORE_KREC_MAP).forEach(([name, krec]) => { krecToStoreId[krec] = STORE_NAME_TO_ID_V2[name] || ''; });
+
+  for (let i = 0; i < pairs.length; i += 50) {
+    const batch = pairs.slice(i, i + 50);
+    const req = pool.request();
+    const vals: string[] = [];
+    batch.forEach((p, j) => {
+      req.input(`p${j}`, sql.Int, precMap[p.code] || 0);
+      req.input(`k${j}`, sql.NVarChar(10), p.krec);
+      req.input(`s${j}`, sql.VarChar(10), p.since);
+      vals.push(`(@p${j}, @k${j}, @s${j})`);
+    });
+    const res = await req.query(`
+      CREATE TABLE #ZHD (prec INT, krec NVARCHAR(10), since VARCHAR(10));
+      INSERT INTO #ZHD (prec, krec, since) VALUES ${vals.join(',')};
+      SELECT z.prec, z.krec, ISNULL(SUM(ABS(v.Qty)), 0) as delivered_qty
+      FROM #ZHD z
+      JOIN ZHYYLS.dbo.vBuySendSumDetail v WITH(NOLOCK)
+        ON v.PRec = z.prec AND v.InKRec = z.krec AND v.OutKRec = '3'
+        AND v.BillDate >= z.since
+        AND (v.Comment IS NULL OR v.Comment NOT LIKE '%调货出库单%')
+      GROUP BY z.prec, z.krec;
+      DROP TABLE #ZHD;
+    `);
+    (res.recordset || []).forEach((r: any) => {
+      const sid = krecToStoreId[String(r.krec)];
+      const code = precToCode[r.prec];
+      if (sid && code) delivered[code + '||' + sid] = Number(r.delivered_qty);
+    });
+  }
+  return delivered;
 }
 
 // 允许的来源域名列表（安全增强）
@@ -1485,14 +1795,34 @@ serve(async (req) => {
           }
           // 同步更新 Supabase reports 表中的状态
           try {
+            const now = new Date().toISOString();
+            const updatePayload: Record<string, unknown> = {
+              replenish_status: validStatus,
+              status_remark: '手动',
+              status_changed_at: now,
+              status_changed_by: validOperator
+            };
+            if (validStatus === '已完成') {
+              updatePayload.settled_at = now; // 手工标记完成也结算
+            }
             const { error: supaError } = await supabase
               .from("reports")
-              .update({ replenish_status: validStatus, status_remark: '手动', status_changed_at: new Date().toISOString(), status_changed_by: validOperator })
+              .update(updatePayload)
               .eq("product_code", validProductCode)
               .eq("order_type", "缺货订购");
             if (supaError) {
               result = { success: false, error: `Supabase 同步失败: ${supaError.message}`, supabase_updated: false };
             } else {
+              if (validStatus === '已完成') {
+                // 手工标记完成：更新完成周期锚点
+                try {
+                  await supabase.from("product_completion").upsert({
+                    product_code: validProductCode,
+                    last_completed_at: now,
+                    updated_at: now
+                  }, { onConflict: 'product_code' });
+                } catch (_) { /* 锚点更新失败不阻断 */ }
+              }
               result = { success: true, message: '状态更新成功', product_code: validProductCode, status: validStatus, supabase_updated: true };
             }
           } catch (supabaseErr) {
@@ -1653,10 +1983,32 @@ serve(async (req) => {
 
           // 同步更新 Supabase reports 表中的状态
           try {
+            const now = new Date().toISOString();
+            const batchPayload: Record<string, unknown> = {
+              replenish_status: validStatus,
+              status_remark: '手动',
+              status_changed_at: now,
+              status_changed_by: validOperator
+            };
+            if (validStatus === '已完成') {
+              batchPayload.settled_at = now;
+            }
             await supabase
               .from("reports")
-              .update({ replenish_status: validStatus })
+              .update(batchPayload)
               .in("product_code", product_codes);
+            // 批量标记完成：更新完成周期锚点
+            if (validStatus === '已完成') {
+              for (const code of product_codes) {
+                try {
+                  await supabase.from("product_completion").upsert({
+                    product_code: String(code),
+                    last_completed_at: now,
+                    updated_at: now
+                  }, { onConflict: 'product_code' });
+                } catch (_) { /* 锚点更新失败不阻断 */ }
+              }
+            }
           } catch (supabaseErr) {
             console.warn("[batch_update_status] Supabase 同步失败（不影响核心更新）:", supabaseErr);
           }
@@ -2013,224 +2365,149 @@ serve(async (req) => {
             console.warn('[sync_with_auto_status] 商品缓存同步失败（不阻断后续）:', e);
           }
 
-          // ② 自动检测状态
+          // ② 完成判定（v2：采购入库累计 ≥ 缺货汇总，商品级，永不回退）
           let autoDetectCount = 0;
           let completedPairCount = 0;
-          let arrivedPairCount = 0;
           let autoDetectDetails: string[] = [];
-          let detectR: any = null; // 修复 ReferenceError：提升到 try 外声明，供后续通知使用
           try {
-            detectR = await preciseAutoDetectStatus(pool, supabase);
+            const detectR = await preciseAutoDetectStatusV2(pool, supabase);
             autoDetectCount = detectR.detected || 0;
             completedPairCount = detectR.completedCount || 0;
-            arrivedPairCount = detectR.arrivedCount || 0;
             autoDetectDetails = detectR.details || [];
-            console.log(`[sync_with_auto_status] 精准检测: ${completedPairCount}个已完成, ${arrivedPairCount}个已到货 (SP更新${autoDetectCount}条)`);
+            console.log(`[sync_with_auto_status] 完成判定: ${completedPairCount} 个商品`);
             for (const d of autoDetectDetails) {
               console.log(`  → ${d}`);
             }
           } catch (detectErr) {
-            console.error('[sync_with_auto_status] 精准检测失败:', detectErr);
+            console.error('[sync_with_auto_status] 完成判定失败:', detectErr);
             autoDetectDetails = [String(detectErr)];
           }
-          
-          result = { success: true, message: `已完成${completedPairCount} 已到货${arrivedPairCount}`, synced_products: syncedProducts, auto_detected: autoDetectCount, detect_details: autoDetectDetails, completedPairs: detectR?.completedPairs || [], arrivedPairs: detectR?.arrivedPairs || [] };
 
-          // ③ 自动同步 SP 结果到 Supabase（批量更新 + 通知）
-          const completedPairs = detectR?.completedPairs || [];
-          const arrivedPairs = detectR?.arrivedPairs || [];
-          let updatedCount = 0, notifCount = 0;
-          const storeNameToId: Record<string, string> = {
-            '02第二药店': 'wszhyy02', '03第三药店': 'wszhyy03', '04第四药店': 'wszhyy04',
-            '06常口店': 'wszhyy06', '08第八药店': 'wszhyy08', '09第九药店': 'wszhyy09',
-            '14第十四药店': 'wszhyy14', '16凤凰山药店': 'wszhyy16', '17益丰店': 'wszhyy17', '21富源店': 'wszhyy21',
-          };
-
-          // 3.1 批量更新 Supabase reports 状态
-          if (completedPairs.length > 0) {
-            const BATCH = 20;
-            for (let i = 0; i < completedPairs.length; i += BATCH) {
-              const batch = completedPairs.slice(i, i + BATCH);
-              const upserts = batch.map(pair => {
-                const sid = storeNameToId[pair.store_name];
-                if (!sid) return Promise.resolve(0);
-                return supabase.from("reports").update({
-                  replenish_status: pair.status,
-                  status_remark: '自动',
-                  status_changed_at: new Date().toISOString(),
-                  status_changed_by: '系统自动'
-                })
-                  .eq("product_code", pair.product_code)
-                  .eq("store_id", sid)
-                  .eq("order_type", "缺货订购")
-                  .neq("replenish_status", "已完成")
-                  .neq("replenish_status", "厂家断货")
-                  .then(r => r.error ? 0 : 1)
-                  .catch(() => 0);
-              });
-              const results = await Promise.all(upserts);
-              updatedCount += results.reduce((a: number, b: number) => a + b, 0);
-            }
-          }
-
-          // 3.2 更新已到货：同步到 Supabase reports + 发送通知
-          if (arrivedPairs.length > 0) {
-            const BATCH = 20;
-            for (let i = 0; i < arrivedPairs.length; i += BATCH) {
-              const batch = arrivedPairs.slice(i, i + BATCH);
-              // 更新 Supabase reports 状态为"已到货"
-              const updates = batch.map(pair => {
-                const sid = storeNameToId[pair.store_name];
-                if (!sid) return Promise.resolve(0);
-                return supabase.from("reports").update({
-                  replenish_status: '已到货',
-                  status_remark: '自动',
-                  status_changed_at: new Date().toISOString(),
-                  status_changed_by: '系统自动'
-                })
-                  .eq("product_code", pair.product_code)
-                  .eq("store_id", sid)
-                  .eq("order_type", "缺货订购")
-                  .neq("replenish_status", "已完成")
-                  .neq("replenish_status", "厂家断货")
-                  .then(r => r.error ? 0 : 1)
-                  .catch(() => 0);
-              });
-              const results = await Promise.all(updates);
-              updatedCount += results.reduce((a: number, b: number) => a + b, 0);
-              // 发送通知（含需求量、已配送量、建议要货数量）
-              const notifDemandMap: Record<string, Record<string, number>> = {};
-              const notifTransitMap: Record<string, Record<string, number>> = {};
-              const batchCodes = [...new Set(batch.map((p: any) => p.product_code))];
-              // 查询 Supabase 需求量和上报日期
-              if (batchCodes.length > 0) {
-                const { data: demandData } = await supabase
-                  .from("reports")
-                  .select("product_code, store_id, demand_quantity, created_at")
-                  .eq("order_type", "缺货订购")
-                  .in("product_code", batchCodes);
-                if (demandData) {
-                  for (const d of demandData) {
-                    if (!notifDemandMap[d.product_code]) notifDemandMap[d.product_code] = {};
-                    notifDemandMap[d.product_code][d.store_id] = (notifDemandMap[d.product_code][d.store_id] || 0) + (d.demand_quantity || 0);
-                  }
-                }
-              }
-              // 查询 SQL Server 配送量（批量单次查询，避免 N 次单查超时）
-              try {
-                const transitPairs = batch.map((p: any) => ({
-                  product_code: p.product_code,
-                  store_name: p.store_name,
-                  krec: STORE_KREC_MAP[p.store_name] || ''
-                })).filter((t: any) => t.krec);
-                if (transitPairs.length > 0) {
-                  const codesForTransit = [...new Set(transitPairs.map((t: any) => t.product_code))];
-                  const krecs = [...new Set(transitPairs.map((t: any) => t.krec))];
-                  // 单次查询：批量获取所有 usercode → rec 映射
-                  const codeParams: Record<string, any> = {};
-                  const codePlaceholders = codesForTransit.map((c: string, idx: number) => {
-                    const p = `c${idx}`;
-                    codeParams[p] = c;
-                    return `@${p}`;
-                  }).join(',');
-                  const precMap: Record<string, string> = {};
-                  if (codePlaceholders) {
-                    const vpReq = pool.request();
-                    Object.entries(codeParams).forEach(([k, v]) => vpReq.input(k, sql.NVarChar(50), v));
-                    const vpRes = await vpReq.query(`
-                      SELECT usercode, rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK)
-                      WHERE usercode IN (${codePlaceholders})
-                    `);
-                    (vpRes.recordset || []).forEach((r: any) => { precMap[r.usercode] = r.rec; });
-                  }
-                  // 单次查询：批量获取所有 (prec, krec) 的配送量
-                  const recs = Object.values(precMap).filter(Boolean);
-                  if (recs.length > 0 && krecs.length > 0) {
-                    const transitReq = pool.request();
-                    const recPlaceholders = recs.map((r: string, idx: number) => {
-                      const p = `r${idx}`;
-                      transitReq.input(p, sql.NVarChar, r);
-                      return `@${p}`;
-                    }).join(',');
-                    const krecPlaceholders = krecs.map((k: string, idx: number) => {
-                      const p = `k${idx}`;
-                      transitReq.input(p, sql.NVarChar(5), k);
-                      return `@${p}`;
-                    }).join(',');
-                    const tRes = await transitReq.query(`
-                      SELECT vs.PRec as prec, vs.InKRec as krec, ISNULL(SUM(ABS(vs.Qty)), 0) as transit_qty
-                      FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
-                      WHERE vs.OutKRec = '3'
-                        AND vs.PRec IN (${recPlaceholders})
-                        AND vs.InKRec IN (${krecPlaceholders})
-                        AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
-                      GROUP BY vs.PRec, vs.InKRec
-                    `);
-                    // 反向映射：prec → usercode，krec → store_name
-                    const precToCode: Record<string, string> = {};
-                    Object.entries(precMap).forEach(([code, rec]) => { precToCode[rec] = code; });
-                    const krecToStore: Record<string, string> = {};
-                    transitPairs.forEach((tp: any) => { krecToStore[tp.krec] = tp.store_name; });
-                    (tRes.recordset || []).forEach((r: any) => {
-                      const code = precToCode[r.prec];
-                      const storeName = krecToStore[r.krec];
-                      if (code && storeName) {
-                        if (!notifTransitMap[code]) notifTransitMap[code] = {};
-                        notifTransitMap[code][storeName] = Number(r.transit_qty);
-                      }
-                    });
-                  }
-                }
-              } catch (_) { /* 配送量查询失败不阻断通知 */ }
-              const upserts = batch.map(p => {
-                const sid = storeNameToId[p.store_name];
-                if (!sid) return Promise.resolve(0);
-                const demand = notifDemandMap[p.product_code]?.[sid] || 0;
-                const transit = notifTransitMap[p.product_code]?.[p.store_name] || 0;
-                const suggest = Math.max(0, demand - transit);
-                let msg: string;
-                if (demand > 0) {
-                  if (transit > 0) {
-                    msg = `${p.product_code} 仓库有货可配送（需求${demand}，已配${transit}，建议再要${suggest}）`;
-                  } else {
-                    msg = `${p.product_code} 仓库有货可配送（本店需求${demand}）`;
-                  }
-                } else {
-                  msg = `${p.product_code} 已到货（仓库可配送）`;
-                }
-                return supabase.from("store_notifications").upsert({
-                  store_id: sid,
-                  product_code: p.product_code,
-                  message: msg,
-                  created_at: new Date().toISOString(),
-                  is_read: false
-                }, { onConflict: 'store_id,product_code' })
-                  .then(r => r.error ? 0 : 1)
-                  .catch(() => 0);
-              });
-              const notifResults = await Promise.all(upserts);
-              notifCount += notifResults.reduce((a: number, b: number) => a + b, 0);
-            }
-          }
-
-          console.log(`[sync_with_auto_status] Supabase同步: ${updatedCount}条状态更新, ${notifCount}条通知`);
-
-          result = { ...result, supabaseUpdated: updatedCount, notificationsSent: notifCount };
+          result = { success: true, message: `完成判定：${completedPairCount} 个商品已自动完成`, synced_products: syncedProducts, auto_detected: autoDetectCount, detect_details: autoDetectDetails };
         } catch (e1) {
           throw e1;
         }
-        // ④ 二次校验：用 EdgeRuntime.waitUntil 在后台异步执行
-        // 检查 Supabase 中所有"已到货（自动）"商品，覆盖本轮及之前的所有记录
-        // @ts-ignore
-        if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime.waitUntil) {
-          // @ts-ignore
-          EdgeRuntime.waitUntil((async () => {
-            await runSecondCheck(pool, supabase);
-          })());
-        } else {
-          await runSecondCheck(pool, supabase);
-        }
         releasePool(pool);
+        break;
+      }
+
+      // ========== v2 到货通知刷新（独立按钮触发） ==========
+      case "notify_refresh": {
+        // 条件：未完成上报 + 仓库有库存 + 门店库存<需求；notified_at 本周期去重
+        const pool = await getPool();
+        let notified = 0;
+        let skipped = 0;
+        try {
+          const { data: activeReports } = await supabase
+            .from("reports")
+            .select("product_code, store_id, store_name, demand_quantity")
+            .eq("order_type", "缺货订购")
+            .neq("replenish_status", "已完成")
+            .not("product_code", "is", null);
+
+          if (!activeReports || activeReports.length === 0) {
+            result = { success: true, notified: 0, skipped: 0 };
+            break;
+          }
+
+          const demandMap: Record<string, number> = {};
+          const keyInfo: Record<string, { product_code: string; store_id: string; store_name: string }> = {};
+          for (const r of activeReports) {
+            const key = r.product_code + '||' + r.store_id;
+            demandMap[key] = (demandMap[key] || 0) + (Number(r.demand_quantity) || 0);
+            keyInfo[key] = { product_code: r.product_code, store_id: r.store_id, store_name: r.store_name };
+          }
+
+          const codes = [...new Set(activeReports.map((r: any) => r.product_code).filter(Boolean))];
+          const { whStock, storeStock, transit } = await queryInventoryMaps(pool, codes);
+
+          const now = new Date().toISOString();
+          for (const key of Object.keys(keyInfo)) {
+            const info = keyInfo[key];
+            const demand = demandMap[key] || 0;
+            const wh = whStock[info.product_code] || 0;
+            const st = storeStock[key] || 0;
+            const tr = transit[key] || 0;
+            if (wh <= 0) continue;
+            if (st + tr >= demand) continue;
+            const { data: existNotif } = await supabase
+              .from("store_notifications")
+              .select("id, notified_at")
+              .eq("store_id", info.store_id)
+              .eq("product_code", info.product_code)
+              .maybeSingle();
+            if (existNotif && existNotif.notified_at) { skipped++; continue; }
+            const { error: nErr } = await supabase.from("store_notifications").upsert({
+              store_id: info.store_id,
+              product_code: info.product_code,
+              message: `${info.product_code} 商品已到仓，仓库有货可领取（本店缺货${demand}件）`,
+              created_at: now,
+              is_read: false,
+              notified_at: now
+            }, { onConflict: 'store_id,product_code' });
+            if (!nErr) notified++;
+          }
+          result = { success: true, notified, skipped };
+        } catch (e) {
+          console.error('[notify_refresh] 失败:', e);
+          result = { success: false, error: String(e) };
+        } finally {
+          releasePool(pool);
+        }
+        break;
+      }
+
+      // ========== v2 配送待办列表（后台人工跟进配送） ==========
+      case "get_delivery_todo": {
+        // 条件：已完成 + 仓库有库存 + 门店库存<需求
+        const pool = await getPool();
+        try {
+          const { data: completedReports } = await supabase
+            .from("reports")
+            .select("product_code, store_id, store_name, demand_quantity, product_name, specification, manufacturer, created_at")
+            .eq("order_type", "缺货订购")
+            .eq("replenish_status", "已完成")
+            .not("product_code", "is", null);
+
+          if (!completedReports || completedReports.length === 0) {
+            result = { success: true, todo: [] };
+            break;
+          }
+
+          const demandMap: Record<string, number> = {};
+          const keyInfo: Record<string, { product_code: string; store_id: string; store_name: string; product_name: string; product_spec: string; manufacturer: string; since: string }> = {};
+          for (const r of completedReports) {
+            const key = r.product_code + '||' + r.store_id;
+            demandMap[key] = (demandMap[key] || 0) + (Number(r.demand_quantity) || 0);
+            const curSince = String(r.created_at || '').substring(0, 10);
+            if (!keyInfo[key]) {
+              keyInfo[key] = { product_code: r.product_code, store_id: r.store_id, store_name: r.store_name, product_name: r.product_name || '', product_spec: r.specification || '', manufacturer: r.manufacturer || '', since: curSince || '2020-01-01' };
+            } else if (curSince && curSince < keyInfo[key].since) {
+              keyInfo[key].since = curSince;
+            }
+          }
+
+          const codes = [...new Set(completedReports.map((r: any) => r.product_code).filter(Boolean))];
+          const { whStock, storeStock, transit } = await queryInventoryMaps(pool, codes);
+
+          const todo: Array<{ product_code: string; store_id: string; store_name: string; product_name: string; product_spec: string; manufacturer: string; demand: number; wh_stock: number; store_stock: number; transit: number }> = [];
+          for (const key of Object.keys(keyInfo)) {
+            const info = keyInfo[key];
+            const demand = demandMap[key] || 0;
+            const wh = whStock[info.product_code] || 0;
+            const st = storeStock[key] || 0;
+            const tr = transit[key] || 0;
+            if (wh > 0 && (st + tr) < demand) {
+              todo.push({ product_code: info.product_code, store_id: info.store_id, store_name: info.store_name, product_name: info.product_name, product_spec: info.product_spec, manufacturer: info.manufacturer, demand, wh_stock: wh, store_stock: st, transit: tr });
+            }
+          }
+          result = { success: true, todo };
+        } catch (e) {
+          console.error('[get_delivery_todo] 失败:', e);
+          result = { success: false, error: String(e) };
+        } finally {
+          releasePool(pool);
+        }
         break;
       }
 
@@ -4177,29 +4454,45 @@ serve(async (req) => {
         const storeId = reportData.store_id as string;
         const productCode = reportData.product_code as string;
         
-        // 重复上报检测（同门店+同商品，7天内，排除已完成/厂家断货）
+        // 重复上报检测（同门店+同商品，一周期只允许一次：存在未完成上报即拦截）
         if (storeId && productCode && reportData.order_type === '缺货订购') {
-          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
           const { data: existing } = await supabase
             .from("reports")
-            .select("id, replenish_status, created_at")
+            .select("id, replenish_status, created_at, settled_at")
             .eq("store_id", storeId)
             .eq("product_code", productCode)
             .eq("order_type", "缺货订购")
-            .not("replenish_status", "in", '("已完成","厂家断货")')
-            .gte("created_at", sevenDaysAgo)
+            .neq("replenish_status", "已完成")
+            .is("settled_at", null)
             .order("created_at", { ascending: false })
             .limit(1);
-          
+
           if (existing && existing.length > 0) {
             const prev = existing[0];
             return new Response(JSON.stringify({
               success: false, 
-              error: "该商品已于 " + formatDate(prev.created_at) + " 上报过，状态为「" + (prev.replenish_status || '待处理') + "」，7天内请勿重复上报"
+              error: "该商品已于 " + formatDate(prev.created_at) + " 上报过，状态为「" + (prev.replenish_status || '待处理') + "」，本周期请勿重复上报"
             }), { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
         }
         
+        // A：补全商品基础信息——用 product_cache 的标准名称(FullName)覆盖，
+        // 堵住门店端旧缓存带来的「品名(品牌)」后缀（如「阿莫西林胶囊（葵花）」）
+        if (reportData.order_type === '缺货订购' && productCode) {
+          try {
+            const { data: pInfo } = await supabase
+              .from("product_cache")
+              .select("product_name, product_spec, manufacturer")
+              .eq("product_code", productCode)
+              .maybeSingle();
+            if (pInfo) {
+              if (pInfo.product_name) (reportData as any).product_name = pInfo.product_name;
+              if (pInfo.product_spec) (reportData as any).specification = pInfo.product_spec;
+              if (pInfo.manufacturer) (reportData as any).manufacturer = pInfo.manufacturer;
+            }
+          } catch (_) { /* 补全失败不阻断，保留门店原值 */ }
+        }
+
         // v4.0：门店上报初始状态统一为待处理（同步采购计划时自动检测是否已完成）
         (reportData as any).replenish_status = "待处理";
         
@@ -4699,11 +4992,32 @@ serve(async (req) => {
 
       case "get_summary": {
         // 管理后台汇总查询：优先返回 reports + plan + supplierLookup（失败时只返回 reports）
-        const { data: reports } = await supabase
-          .from("reports")
-          .select("*")
-          .order("created_at", { ascending: false })
-          .limit(500);
+        // 缺货订购与新品订购分开查询；分页拉全量（单次 limit 会被 PostgREST 1000 行上限截断，
+        // 导致老记录——如早已上报后完成的商品——在汇总里搜索不到）
+        async function fetchAllReports(ot: string) {
+          const out: any[] = [];
+          const PAGE = 1000;
+          let from = 0;
+          while (true) {
+            const res = await supabase
+              .from("reports")
+              .select("*")
+              .eq("order_type", ot)
+              .order("created_at", { ascending: false })
+              .range(from, from + PAGE - 1);
+            const rows = res.data || [];
+            out.push(...rows);
+            if (rows.length < PAGE) break;
+            from += PAGE;
+          }
+          return out;
+        }
+        const reports = await fetchAllReports("缺货订购");
+        let newTypeReports: any[] = [];
+        try {
+          newTypeReports = await fetchAllReports("新品订购");
+        } catch (_) { /* 新品查询失败不阻断 */ }
+        const mergedReports = [...(reports || []), ...newTypeReports];
 
         let planRecords: any[] = [];
         let supplierLookup: Record<string, string> = {};
@@ -4791,7 +5105,7 @@ serve(async (req) => {
           console.error('[get_summary] SQL Server 查询失败，只返回 reports:', e);
         }
 
-        result = { reports: reports || [], plan: [planRecords], supplierLookup };
+        result = { reports: mergedReports, plan: [planRecords], supplierLookup };
         break;
       }
 

@@ -33,10 +33,11 @@ function getStoreDeviceLimit(storeId) {
 }
 
 // ========== 补货状态定义（全局唯一）v4.2==========
-var ORDER_STATUSES = ['待处理', '已订购', '已到货', '已完成', '待付款', '厂家断货'];
+var ORDER_STATUSES = ['待处理', '已订购', '已完成', '待付款', '厂家断货'];
 window.isCompletedStatus = function(status) {
     // "已到货" 不算完成（仓库有货但还没到门店，仍需关注）
-    return status === '已完成' || status === '厂家断货';
+    // "已关闭" 是 90 天超期自动关闭，也是终态，不计入待处理汇总
+    return status === '已完成' || status === '厂家断货' || status === '已关闭';
 };
 var STATUS_BADGE_CLASS = {
     '待处理': 'replenish-pending',

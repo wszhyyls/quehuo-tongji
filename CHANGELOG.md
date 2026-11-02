@@ -1,6 +1,351 @@
 # 版本升级记录 (CHANGELOG)
 
-> 适用版本：v5.8.3 | 更新日期：2026-08-10
+> 适用版本：v5.9.0 | 更新日期：2026-11-02
+
+---
+
+## v3.17 简化版 — 判定逻辑去保护期 + 批量查询优化（2026-11-01 ~ 11-02）
+
+### 一、问题背景
+
+之前的 v3.x 判定逻辑引入了"事件驱动保护期"：上报日期晚于全历史最新采购日期的商品**暂时跳过判定**，等下次同步。实际运行发现这导致两个严重问题：
+1. **大量商品被保护期卡住**（159 条里排除 142 条），真正参与判定的只有 17 条
+2. **不是真正的"总账"逻辑**——简化版应该是：总需求 vs 采购累计，够了就完成，不够就不完成，不该有任何跳过
+
+### 二、简化版逻辑（v3.17）
+
+```
+每个商品的判定:
+  anchor = 最早未完成上报日
+  purchase = SUM(采购入库数量) WHERE BillDate >= anchor
+  demand = SUM(未完成缺货需求)
+  if purchase >= demand → 全部标记已完成
+  else → 不判定，等下次同步再查
+```
+
+**核心改动**（`supabase/functions/scheduled-task/index.ts`）：
+
+| 步骤 | 旧 v3.x | 新 v3.17 简化版 |
+|------|---------|----------------|
+| 待处理筛选 | 事件驱动保护期过滤（排除 142 条） | **所有待处理 reports 全参与** |
+| 采购查询 | N 次逐个商品 SQL（120 商品 × 2 = 240 次） | **2 次批量 SQL** + JS 内存分组 |
+| 全新商品 | fail_count 豁免 | **所有商品一视同仁** |
+| carryover/anchor | 读写 carryover_qty、last_anchor | **弃用，不再读写** |
+
+### 三、SQL Server 连通性排查（2026-11-01 下午）
+
+用户报告"debug_check_code 连不上 SQL Server"。排查结论：
+
+| 检查项 | 结果 |
+|--------|------|
+| 本地 TCP → 221.6.168.13:1311 | ✅ 通 |
+| Edge Function health | ✅ healthy |
+| Edge Function → SQL Server | ✅ **能连上**（SQL 查询跑到第 909 行才报错） |
+| debug_check_code 错误 | ❌ **代码 bug**：`ReferenceError: eligibleReports is not defined` |
+| run_detect_only | ❌ **546 WORKER_RESOURCE_LIMIT**（240 次 SQL 超时） |
+
+**不是 SQL Server 超时，是 Edge Function 代码 bug + 查询量过大。**
+
+### 四、修复清单
+
+| # | 问题 | 修复 | 文件 |
+|---|------|------|------|
+| 1 | debugCheckCode 里引用了 `eligibleReports` 但没定义 | 补上保护期过滤逻辑（后又简化移除） | index.ts |
+| 2 | `newProductCodes`、`eligibleDemand`、`protectedReports` 未定义 | 全部按简化版移除 | index.ts |
+| 3 | CONCURRENCY=5 + 240 次查询 → 546 超时 | **改成批量查询**：1 次 `IN (...) GROUP BY` + 1 次 `IN (...)` 明细 | index.ts Step 3-4 |
+| 4 | Step 6 里 `info.total` 残留引用（简化版结构变了） | 改成 `info.qty` | index.ts L396 |
+| 5 | Supabase CLI 过旧 | 2.99.0 → **2.122.0** | 全局 npm |
+
+### 五、手工 SQL 验证（2026-11-02）
+
+直接连 SQL Server 对 3 个商品跑锚点起采购累计，和 Edge Function debugCheck 结果**完全一致**：
+
+| 商品 | anchor | 需求 | 手工SQL采购 | EdgeFunction采购 | 判定 | 一致 |
+|------|--------|------|-----------|-----------------|------|------|
+| 110224 | 2026-09-17 | 5 | 30 | 30 | ✅ 完成 | ✅ |
+| 020816 | 2026-08-08 | 50 | 30 | 30 | ❌ 差20 | ✅ |
+| 0710 | 2026-09-17 | 3 | 0 | 0 | ❌ 差3 | ✅ |
+
+### 六、最终运行结果
+
+```
+run_detect_only (269 商品):
+  超期90天自动关闭: 153 条
+  待处理 reports: 445 条 / 159 个商品
+  参与判定: 445 条 / 159 个（全部参与，无保护期过滤）
+  判定完成: 150 个商品 ✅
+  剩余采购不足: 9 个商品
+
+最终数据库状态 (2026-11-02 上午):
+  已完成   1,271 条
+  待处理     159 条
+  已关闭     153 条
+  厂家断货    71 条
+  已订购/待付款 13 条
+```
+
+### 七、文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `supabase/functions/scheduled-task/index.ts` | **核心重构**：移除保护期逻辑、批量查询替代循环、修复 debugCheck + Step 6 Bug |
+| `package.json` | 无（客户端不需要改，只改 Edge Function） |
+| Supabase CLI | **升级**：2.99.0 → 2.122.0 |
+
+### 八、遗留事项
+
+| 事项 | 状态 |
+|------|------|
+| `product_completion.carryover_qty` / `last_anchor` 字段 | 保留不删，代码不再读写 |
+| `reports.close_reason` / `auto_closed_at` 字段 | 保留，90天自动关闭在用 |
+| Cloudflare Pages `wszhyy.pages.dev` 门店网络超时 | 门店网络问题，Electron 可改本地加载 |
+| pg_cron jobid=11（北京时间 00:30） | 正常运行中 |
+
+### 九、已关闭状态前端汇总遗漏修复（2026-11-02 中午）
+
+**问题**：商品 170038（盐酸萘甲唑啉滴）前端显示"需求 32"，但判定逻辑只用了 20。
+
+**根因追查**：
+
+| 环节 | 已关闭 reports 处理 | 结果 |
+|------|---------------------|------|
+| **v3.17 scheduled-task（判定）** | `.neq("replenish_status", "已关闭")` | ✅ 正确排除 |
+| **query-shortage-data preciseAutoDetectStatus** | 只排除 `已完成/厂家断货` | ❌ **遗漏已关闭** |
+| **query-shortage-data preciseAutoDetectStatusV2** | 只排除 `已完成`（PostgREST 层） | ❌ **遗漏已关闭/厂家断货** |
+| **前端 utils.js isCompletedStatus()** | 只算 `已完成/厂家断货` 为终态 | ❌ **遗漏已关闭** |
+| **前端 admin.js loadSummary()** | 直接拉全部 reports，按 isCompletedStatus 分组 | ❌ 已关闭被放进 shortage_by_product |
+
+170038 的 3 条记录：
+- #1718 10-30 上报 待处理 demand=10
+- #1296 09-09 上报 待处理 demand=10
+- #232 06-14 上报 **已关闭** demand=**12** ← 90天自动关，但前端还在累加
+
+**修复**（3 处）：
+
+| # | 文件 | 改动 |
+|---|------|------|
+| 1 | `static/js/utils.js` | `isCompletedStatus()` 加上 `已关闭` → 终态 |
+| 2 | `supabase/functions/query-shortage-data/index.ts` L421 | `preciseAutoDetectStatus` 过滤加上 `已关闭` |
+| 3 | `supabase/functions/query-shortage-data/index.ts` L816-818 | `preciseAutoDetectStatusV2` PostgREST 和 JS 过滤加上 `厂家断货/已关闭` |
+
+**部署状态**：query-shortage-data Edge Function 已部署，utils.js 已同步到 deploy 和 dist。Cloudflare Pages 需要 wrangler CLOUDFLARE_API_TOKEN 才能推。
+
+---
+
+> 适用版本：v5.9.1 | 更新日期：2026-10-26
+
+---
+
+## v5.9.1 — 登录慢根治 + 一键同步自动定时闭环（2026-10-26）
+
+### 一、登录慢根治：supabase-js 本地化（P0）
+
+**问题**：Electron 客户端登录页加载耗时 ~40 秒，核心瓶颈是 jsDelivr CDN 从海外下载 supabase-js 库耗时 38 秒。
+
+**修复**：
+- 将 `supabase.min.js`（218KB）下载到项目本地 `static/js/supabase.min.js` + `deploy/static/js/supabase.min.js`
+- 8 个页面（login/store/admin/procurement + deploy 副本）CDN 引用 `https://cdn.jsdelivr.net/...` 全部改为本地 `./static/js/supabase.min.js`
+- Cloudflare Pages 重新部署（preview: `https://0a7b5286.wszhyy.pages.dev`，正式: `https://wszhyy.pages.dev`）
+
+**效果**：登录加载 40s → **1-2s**，秒开 ✅
+
+### 二、一键同步 pg_cron 定时任务闭环（P0）
+
+**问题**：pg_cron 自动同步从未跑通过，根因有二：
+1. **时区错误**：原 schedule `30 0 * * *` 在 pg_cron UTC 服务器上实际运行于 **北京时间 08:30**（晚了 8 小时）
+2. **鉴权方式不可靠**：自定义 `x-task-secret` header 在 Edge Function 旧版本中可能未正确识别，调用返回 401
+
+**修复**（`sql/create_auto_sync_cron.sql`）：
+
+| 修复项 | 旧值 | 新值 |
+|--------|------|------|
+| schedule | `30 0 * * *`（UTC 00:30 = 北京 08:30） | **`30 16 * * *`**（UTC 16:30 = 北京 00:30） |
+| 鉴权 | `x-task-secret` header | **`Authorization: Bearer service_role_key`** |
+| jobid | 旧 job（已删除） | **新 jobid=11**，active=true |
+
+**手动 full_sync 端到端验证（2026-10-26 14:16）**：
+```
+✅ RQZT 商品缓存刷新  2,642ms
+✅ 商品缓存同步 Supabase  4,173 条
+✅ 采购计划缓存 Supabase  19,058 条
+✅ 自动判定"已完成"  8 个商品（采购入库 ≥ 缺货汇总）
+✅ success = true
+```
+
+**pg_cron 完整 Job 清单**：
+
+| jobid | jobname | schedule (UTC) | 北京时间 | 用途 |
+|-------|---------|----------------|----------|------|
+| 3 | sync-rqzt-product-cache | `0 3 * * *` | 11:00 | RQZT 缓存单独同步 |
+| 5 | keep-edge-warm | `*/5 * * * *` | 每5分钟 | 预热 Edge Function 防冷启动 |
+| 6 | clean-pg-net-response | `0 3 * * *` | 11:00 | 清理 pg_net 响应表（旧） |
+| 8 | cleanup-http-response | `0 4 * * *` | 12:00 | 清理 pg_net 响应表（新） |
+| **11** | **sync-spfxb-result** | **`30 16 * * *`** | **次日 00:30** | **一键同步（防重复采购）** ✅ |
+
+### 三、Supabase 项目用量诊断（2026-10-26）
+
+| 指标 | 当前值 | 免费上限 | 使用率 | 评估 |
+|------|--------|----------|--------|------|
+| 数据库总大小 | **48 MB** | 500 MB | 9.6% | ✅ 安全 |
+| 数据库表数 | 76 | - | - | - |
+| Auth 用户数 | 19 | 50,000 MAU | 0.04% | ✅ 安全 |
+| pg_cron 活跃 Job | 5 | - | - | - |
+| pg_cron 本周运行 | 2,037 次 | - | - | job5 keep-edge-warm 主力（288次/天） |
+| Edge Function 调用估算 | ~10,200 次/月 | 100 万次 | ~1% | ✅ 安全 |
+| Storage | 1 bucket (static) | 1 GB | 极小 | ✅ 安全 |
+
+**前 10 大表**（增长监控）：
+
+| 表名 | 大小 | 说明 |
+|------|------|------|
+| `shortage_storestock_cache` | 14 MB | 缺货门店库存缓存（最大） |
+| `job_run_details` | 8 MB | pg_cron 运行日志（自动清理） |
+| `product_cache` | 3.9 MB | 商品缓存 |
+| `_http_response` | 3.3 MB | pg_net HTTP 响应（自动清理） |
+| `reports` | 1.1 MB | 缺货上报记录 |
+| `sessions` | 1.0 MB | Auth 会话 |
+| `product_completion` | 184 KB | 商品完成锚点 |
+
+### 四、文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `static/js/supabase.min.js` | **新增**，supabase-js v2 本地化（218KB） |
+| `deploy/static/js/supabase.min.js` | **新增**，deploy 副本同步 |
+| `login.html` / `deploy/login.html` | CDN → 本地引用 |
+| `store.html` / `deploy/store.html` | CDN → 本地引用 |
+| `admin.html` / `deploy/admin.html` | CDN → 本地引用 |
+| `admin_test.html` / `admin_deploy.html` | CDN → 本地引用 |
+| `supabase/functions/scheduled-task/index.ts` | 已含 checkSecret 鉴权逻辑（x-task-secret + Bearer 双通道） |
+| `supabase/functions/scheduled-task/config.toml` | `verify_jwt = false`（允许 pg_cron 无 JWT 调用） |
+| `sql/create_auto_sync_cron.sql` | **更新**：时区修正 `30 16 * * *` + Bearer service_role key |
+
+### 五、遗留事项
+
+| 事项 | 状态 |
+|------|------|
+| 旧 pg_cron jobid=6 `clean-pg-net-response` 冗余（jobid=8 已覆盖） | 可选：`SELECT cron.unschedule(6);` |
+| 旧 pg_cron jobid=10（原始 sync-spfxb-result，已重建为 jobid=11） | 已自动删除 |
+| GitHub Actions auto-full-sync 兜底 workflow | 文件已写，需推仓库 + 配 secrets |
+| Supabase 免费额度监控 | Dashboard → Settings → Usage 定期查看 |
+| Supabase Grace period 警告 | 只是宽限期已过，实际用量 ~10%，短期安全 |
+
+### 六、踩坑记录
+
+| 问题 | 根因 | 解决 |
+|------|------|------|
+| 旧版 pg_cron 时区 | 服务器 UTC，不自动转北京时间 | UTC 时间 = 目标北京时间 − 8 小时 |
+| 旧版 pg_cron `cron.schedule()` 无 timezone 参数 | v1.6.4 旧版，无扩展参数 | 只传 3 参数 `(name, schedule, command)` |
+| `net.http_post` 参数顺序 | 旧版 pg_net 是 3 参数 `(url, headers_jsonb, body_jsonb)` | 新版才是 named params |
+| Supabase CLI telemetry EPERM 沙箱限制 | `.supabase/telemetry.json` 写入权限 | 不影响核心 db query 功能 |
+| `cron.job` 表无 `next_run` 列 | 旧版 pg_cron 不暴露下次运行时间 | 只能手动推算或等运行后看 `job_run_details` |
+
+---
+
+## 故障记录 — 登录「Failed to fetch」→ Supabase 配额耗尽（2026-10-19 ~ 10-21）
+
+### 现象
+
+登录页（员工/管理员模式）点击登录后提示 `Failed to fetch`，所有账号均无法登录；同时客户端出现「双击无反应」。
+
+### 排查与根因
+
+| 测试项 | 结果 |
+|--------|------|
+| DNS 解析 `qswpgnnedqvuegwfbprd.supabase.co` | 正常 |
+| Edge Function 预检 OPTIONS / POST | **HTTP 402（Payment Required）** |
+| Supabase Auth 健康检查 `/auth/v1/health` | **HTTP 402** |
+
+Supabase Dashboard 显示 `Services restricted`（组织配额耗尽，项目 Unhealthy + `EXCEEDING USAGE LIMITS`）。到 Usage 页确认超限项：**Database Size 1.212 / 0.5 GB（242%）**，其余指标（流量 3%、Edge Function 调用 <1%、MAU 1%）全部正常。
+
+再用 SQL 定位大表：`net._http_response`（pg_net 响应队列表，注意 schema 是 **`net`**，不是 `supabase_functions`）占用 **1097 MB**，实际 0 行——纯表膨胀（Keep-Warm/定时任务的 HTTP 响应堆积后清理未归还磁盘），占整个库的 90%。业务表合计不足 50MB。
+
+### 处理过程（含踩坑）
+
+```sql
+-- 正确做法（schema 是 net）
+TRUNCATE TABLE net._http_response;
+VACUUM FULL net._http_response;
+```
+
+| 踩坑 | 现象 | 解决 |
+|------|------|------|
+| schema 写错 | `relation "supabase_functions._http_response" does not exist` | 表实际在 `net` schema，用 `net._http_response` |
+| VACUUM 与多语句一起执行 | `VACUUM cannot run inside a transaction block` | SQL Editor 多条语句会被包进事务，`VACUUM FULL` 必须**单条选中单独执行** |
+
+- 清理结果：`net._http_response` 1097MB → 32kB，数据库总大小 1.212GB → **44MB（12%）**
+- 防复发：pg_cron job 8 `cleanup-http-response`，每天 4:00 TRUNCATE
+- 存量发现：job 6 `clean-pg-net-response`（每天 3:00 删 3 天前数据）早已存在，但**只 DELETE 不 VACUUM FULL**，故只删数据不归还磁盘——这正是当初表膨胀到 1GB 的间接原因，job 6 现已冗余（可 `SELECT cron.unschedule(6);` 删除）
+- 客户端「双击无反应」：后台残留 4 个 `WSZH-ShortageStore` 僵尸进程（单实例锁）→ 用 `Stop-Process -Name 'WSZH-ShortageStore' -Force` 清理
+
+### 最终结论（重要）
+
+⚠️ **数据库降回 44MB 后，402 限制并未自动解除**。实测：重启项目（Settings → General → Restart project）无效，Auth / Edge Function 仍返回 402。
+
+Supabase 官方口径（Usage 页横幅原文）：**升级 Pro 立即解除；或等到下个账单周期开始自动解除**（本周期 2026-10-14 ~ 2026-11-14）。限制一旦触发，不会因中途降回来自动解除。
+
+### 待处理事项
+
+| 事项 | 状态 |
+|------|------|
+| Supabase 服务 402 限制 | ✅ **2026-10-21 已恢复**（实测 Edge Function 返回 200；工单未回复，疑似 Supabase 侧重新评估后自动解除） |
+| 数据库体积监控 | ⚠️ 恢复后 Usage 显示 86MB（清理后曾为 44MB），有回升趋势；job 8 每天 4:00 自动 TRUNCATE 兜底，需持续观察 |
+| 删除冗余定时任务 job 6 | 可选：`SELECT cron.unschedule(6);` |
+| 未来新建表需加 GRANT | Supabase 邮件：2026-10-30 起新建表不再自动授权，建表 SQL 末尾补 `grant ... to anon, authenticated, service_role;` |
+| 长期备选方案 | 国内云自托管（腾讯云 4核4G ¥38/年 首选 / 京东 2核4G ¥158 备选；阿里云 2核2G 内存不足不推荐）；需验证到 SQL Server（221.6.168.13:1311）连通性 + 域名备案 |
+
+### 历史同类现象（根因不同，勿混淆）
+
+- 2026-05-20：Edge Function CORS 白名单未含 Cloudflare 新部署子域名 → 已修复为允许 `*.wszhyy.pages.dev` + localhost
+- 2026-05-21：单台客户端缓存/网络问题 → 清缓存解决
+
+---
+
+## v5.9.0 — 药品状态变更新规则：取消「已到货」（2026-09-17）
+
+### 一、方案概述
+
+| 项 | 旧规则 | 新规则 |
+|----|--------|--------|
+| 状态机 | 待处理 / 已订购 / 已到货 / 已完成 / 厂家断货 / 待付款 | 待处理 / 已订购 / 已完成 / 厂家断货 / 待付款（**取消「已到货」**） |
+| 「已完成」含义 | 货已配送到门店 | **采购入库累计 ≥ 缺货汇总**（仅代表货已到仓，配送由人工处理） |
+| 完成判定 | 门店/仓库库存满足 + 智能回退 | **单调递增、永不回退**（采购入库只增不减） |
+| 到货通知 | 绑在一键同步里自动发 | **独立「通知刷新」按钮**手动触发 + `notified_at` 去重 |
+| 配送跟进 | 无 | 新增「配送待办」列表（已完成 + 仓库有货 + 门店库存 < 需求） |
+
+> 核心洞察：采购入库量单调递增，「已完成」一旦满足永久成立，彻底消除旧方案的智能回退、二次校验、second-check 计划任务、通知库存耗尽回退等一批补丁。
+
+### 二、数据库迁移（`supabase/migrations/20260917000000_status_logic_v2.sql`）
+
+| 变更 | 说明 |
+|------|------|
+| `reports.settled_at` | 新增「已结算」标记，完成时回填 |
+| `product_completion` 表 | 新建，商品级完成周期锚点 `last_completed_at` |
+| `store_notifications.notified_at` | 新增通知去重字段 |
+| 存量数据迁移 | 「已到货」一次性改为「已完成」；初始化锚点；清空旧「已到货」通知 |
+
+### 三、后端改动（Edge Function）
+
+| 文件 | 改动 |
+|------|------|
+| `query-shortage-data/index.ts` | 新增 `preciseAutoDetectStatusV2`（采购入库累计判定）、`queryPurchaseQty`、`queryInventoryMaps`；新增 `notify_refresh`（到货通知）、`get_delivery_todo`（配送待办）；`insert_report` 增加「一周期只报一次」校验 |
+| `scheduled-task/index.ts` | 定时任务接入 v2 完成判定（只做完成判定、不发通知） |
+
+### 四、前端改动
+
+| 文件 | 改动 |
+|------|------|
+| `static/js/utils.js` / `deploy/static/js/utils.js` | `ORDER_STATUSES` 移除「已到货」 |
+| `static/js/admin.js` / `deploy/static/js/admin.js` | 一键同步改为完成判定；新增「通知刷新」「配送待办」按钮 + 权限位 `notify_refresh`/`view_delivery_todo`；配送待办弹窗（表格框线、固定表头、斑马纹、单行截断、数量角标） |
+| `static/js/store.js` / `deploy/static/js/store.js` | 移除旧「已到货」登录提示死代码 |
+| `admin.html` / `deploy/admin.html` | 新增两个按钮 + 权限复选框 |
+
+### 五、部署情况
+
+- 迁移 SQL：已在 Supabase SQL Editor 执行
+- Edge Functions：`query-shortage-data`、`scheduled-task` 已重新部署
+- 前端：已部署到 Cloudflare Pages（`wszhyy.pages.dev`）
+- 客户端：无需更新（客户端运行时远程加载页面，自动生效）
 
 ---
 

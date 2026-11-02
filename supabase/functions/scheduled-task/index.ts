@@ -1,5 +1,5 @@
 // Supabase Edge Function - 定时任务
-// v3.12: 定时自动同步采购计划和商品缓存
+// v3.17: 现查总账模式（去掉 carryover 余量结转，每次从 earliestActive 重新算）
 // 使用方式：
 // 1. Supabase Cron: 调用 cron.job 调度
 // 2. 手动触发: POST /functions/v1/scheduled-task { "action": "full_sync" }
@@ -94,6 +94,327 @@ function releasePool(pool: sql.ConnectionPool, dbName: string = SQL_SERVER_DB) {
   if (cache && cache.pool === pool) {
     cache.inUse = false;
     cache.lastUsed = Date.now();
+  }
+}
+
+// ========== v3.17 简化版：现查总账 + 90天自动关闭 + 30天超时回退 ==========
+// 核心逻辑：所有待处理 reports 都参与判定，anchor = 最早未完成上报日
+//           采购入库累计（锚点起） ≥ 总需求 → 判定完成
+//           采购入库累计（锚点起） <  总需求 → 不判定，等下次同步
+// 迁移上线时间兜底锚点
+const STATUS_MIGRATION_EPOCH = '2026-09-17';
+// 超期关闭：90 天未完成的 reports 自动标记"已关闭(未补货)"
+const AUTO_CLOSE_DAYS = 90;
+// 失败告警阈值
+const FAIL_ALERT_THRESHOLD = 3;
+// 暂停自动判定的状态（厂家断货由门店手动处理）
+const DETECT_PAUSED_STATUSES = ['厂家断货', '已关闭'];
+
+// 查单商品增量采购：从 anchor 起的采购累计 + 最新采购日期
+// 一次查询拿到所有需要的数据
+async function queryPurchaseDelta(
+  pool: sql.ConnectionPool, code: string, anchor: string
+): Promise<{ delta: number; latestDate: string | null; totalAfterAnchor: number }> {
+  const req = pool.request();
+  req.input("code", sql.NVarChar(50), code);
+  req.input("anchor", sql.VarChar(10), (anchor || STATUS_MIGRATION_EPOCH).substring(0, 10));
+  const res = await req.query(`
+    SELECT 
+      ISNULL(SUM(ABS(vs.Qty)), 0) as qty,
+      MAX(vs.BillDate) as latest_date
+    FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+    JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+    WHERE v.usercode = @code
+      AND vs.BillType = 34
+      AND vs.InKRec = '3'
+      AND vs.BillDate > @anchor
+  `);
+  const row = res.recordset?.[0] as any;
+  return {
+    delta: Number(row?.qty || 0),
+    latestDate: row?.latest_date || null,
+    totalAfterAnchor: Number(row?.qty || 0)
+  };
+}
+
+// 查单商品**全历史**最新采购日期（事件驱动保护期用）
+async function queryLatestPurchaseDate(
+  pool: sql.ConnectionPool, code: string
+): Promise<string | null> {
+  const req = pool.request();
+  req.input("code", sql.NVarChar(50), code);
+  const res = await req.query(`
+    SELECT MAX(vs.BillDate) as latest_date
+    FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+    JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+    WHERE v.usercode = @code
+      AND vs.BillType = 34
+      AND vs.InKRec = '3'
+  `);
+  const row = res.recordset?.[0] as any;
+  return row?.latest_date || null;
+}
+
+async function preciseAutoDetectStatusV2(
+  pool: sql.ConnectionPool,
+  supabaseClient: any
+): Promise<{ detected: number; details: string[] }> {
+  const details: string[] = [];
+  const now = new Date().toISOString();
+  const nowTs = Date.now();
+
+  try {
+    // ================================================================
+    // Step 0: 90 天超期自动关闭（独立步骤，不影响判定）
+    // ================================================================
+    const CUTOFF_90_DAYS = new Date(nowTs - AUTO_CLOSE_DAYS * 86400000).toISOString();
+    let closedCount = 0;
+    try {
+      const { data: oldPending, error: qErr } = await supabaseClient
+        .from("reports")
+        .select("id, product_code")
+        .eq("order_type", "缺货订购")
+        .neq("replenish_status", "已完成")
+        .neq("replenish_status", "厂家断货")
+        .lt("created_at", CUTOFF_90_DAYS);
+      if (qErr) {
+        console.warn('[v3] 超期关闭查询失败:', qErr.message);
+      } else if (oldPending && oldPending.length > 0) {
+        const ids = oldPending.map((r: any) => r.id);
+        // 分批更新（Supabase in 最多 1000）
+        for (let i = 0; i < ids.length; i += 500) {
+          const batch = ids.slice(i, i + 500);
+          const { error: cErr } = await supabaseClient.from("reports").update({
+            replenish_status: '已关闭',
+            status_remark: `超期${AUTO_CLOSE_DAYS}天未补货自动关闭`,
+            status_changed_at: now,
+            status_changed_by: '系统自动',
+            auto_closed_at: now,
+            close_reason: `超期${AUTO_CLOSE_DAYS}天`
+          }).in("id", batch);
+          if (!cErr) closedCount += batch.length;
+        }
+        // 同步更新 product_completion.closed_count
+        const closedCodes = [...new Set(oldPending.map((r: any) => r.product_code))];
+        for (const code of closedCodes) {
+          const cnt = oldPending.filter((r: any) => r.product_code === code).length;
+          await supabaseClient.from("product_completion").upsert({
+            product_code: code,
+            closed_count: cnt,
+            updated_at: now
+          }, { onConflict: 'product_code' });
+        }
+      }
+    } catch (e) {
+      console.warn('[v3] 超期关闭异常:', e);
+    }
+    if (closedCount > 0) details.push(`超期${AUTO_CLOSE_DAYS}天自动关闭: ${closedCount} 条`);
+
+    // ================================================================
+    // Step 1: 分页拉取未完成 reports
+    // ================================================================
+    let allItems: any[] = [];
+    let from = 0;
+    const PAGE_SIZE = 1000;
+    while (true) {
+      const { data: page, error } = await supabaseClient
+        .from("reports")
+        .select("id, product_code, store_id, store_name, demand_quantity, created_at, replenish_status, status_changed_at")
+        .eq("order_type", "缺货订购")
+        .not("product_code", "is", null)
+        .neq("replenish_status", "已完成")
+        .neq("replenish_status", "厂家断货")
+        .neq("replenish_status", "已关闭")
+        .order("created_at", { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) { console.warn('[v3] 分页查询失败:', error.message); break; }
+      if (!page || page.length === 0) break;
+      allItems = allItems.concat(page);
+      if (page.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
+    }
+    details.push(`未完成缺货: ${allItems.length} 条`);
+
+    const activeCodes = [...new Set(allItems.map((r: any) => r.product_code).filter(Boolean))];
+    details.push(`待检测商品: ${activeCodes.length} 个`);
+    if (activeCodes.length === 0) {
+      if (closedCount === 0) details.push('无未完成缺货，跳过判定');
+      return { detected: 0, details };
+    }
+
+    // ================================================================
+    // Step 2: 读取 product_completion（只取 fail_count 和 last_completed_at，弃用 carryover/anchor）
+    // ================================================================
+    const compMap: Record<string, any> = {};
+    for (let i = 0; i < activeCodes.length; i += 200) {
+      const batch = activeCodes.slice(i, i + 200);
+      const { data: rows } = await supabaseClient
+        .from("product_completion")
+        .select("product_code, fail_count, last_completed_at")
+        .in("product_code", batch);
+      (rows || []).forEach((c: any) => { compMap[c.product_code] = c; });
+    }
+
+    // ================================================================
+    // Step 3: 构建缺货汇总 + 最早未完成上报日（简化版：不做保护期过滤）
+    // ================================================================
+    const demandByCode: Record<string, number> = {};
+    const earliestActiveAt: Record<string, string> = {};
+    for (const r of allItems) {
+      const code = r.product_code;
+      if (!code) continue;
+      demandByCode[code] = (demandByCode[code] || 0) + (Number(r.demand_quantity) || 0);
+      const ts = new Date(r.created_at).toISOString();
+      if (!earliestActiveAt[code] || ts < earliestActiveAt[code]) {
+        earliestActiveAt[code] = ts;
+      }
+    }
+
+    // 简化版：所有待处理 reports 都参与判定，不做事件驱动保护期过滤
+    // 不再排除 "上报后没新采购" 的商品，老老实实查总账
+    const filteredItems = allItems;
+    const filteredCodes = activeCodes;
+    details.push(`参与判定: ${filteredItems.length} 条 / ${filteredCodes.length} 个商品（全部参与，无保护期过滤）`);
+
+    if (filteredCodes.length === 0) {
+      details.push('无待处理缺货，跳过判定');
+      return { detected: 0, details };
+    }
+
+    // ================================================================
+    // Step 4: 批量查所有待判定商品的采购明细 → JS 内存里按 anchor 过滤求和
+    //         anchor = earliestActive（该商品最早未完成上报日）
+    // ================================================================
+    const codesList = filteredCodes.map(c => `N'${c.replace(/'/g, "''")}'`).join(',');
+    let purchaseInfo: Record<string, { qty: number; anchor: string; error?: string }> = {};
+    try {
+      const purchaseRes = await pool.request().query(`
+        SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+        JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+        WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+      `);
+      // 按 usercode 分组
+      const purchaseByCode: Record<string, { date: string; qty: number }[]> = {};
+      for (const row of purchaseRes.recordset) {
+        const r = row as any;
+        if (!purchaseByCode[r.usercode]) purchaseByCode[r.usercode] = [];
+        purchaseByCode[r.usercode].push({ date: r.BillDate, qty: Number(r.qty || 0) });
+      }
+      // 内存计算：每个 code 的 anchor 起累计
+      for (const code of filteredCodes) {
+        const anchor = (earliestActiveAt[code] || STATUS_MIGRATION_EPOCH).substring(0, 10);
+        const rows = purchaseByCode[code] || [];
+        const anchorTs = new Date(anchor).getTime();
+        const qty = rows.reduce((s, r) => s + (new Date(r.date).getTime() >= anchorTs ? r.qty : 0), 0);
+        purchaseInfo[code] = { qty, anchor };
+      }
+    } catch (e: any) {
+      const errMsg = String(e?.message || e);
+      console.error('[批量查询] purchaseDetail 失败:', errMsg);
+      for (const code of filteredCodes) {
+        const anchor = (earliestActiveAt[code] || STATUS_MIGRATION_EPOCH).substring(0, 10);
+        purchaseInfo[code] = { qty: 0, anchor, error: errMsg };
+      }
+    }
+
+    // ================================================================
+    // Step 5: 判定（简化版：所有商品一视同仁，不区分全新/老商品）
+    // ================================================================
+    let completedCount = 0;
+    const failedCodes: string[] = [];
+    for (const code of filteredCodes) {
+      const demand = demandByCode[code] || 0;
+      const info = purchaseInfo[code];
+      const comp = compMap[code] || {};
+      if (!info) continue;
+
+      // 5a: 查询异常 → fail_count++
+      if (info.error) {
+        const newFail = (Number(comp.fail_count || 0)) + 1;
+        failedCodes.push(`${code}(fail=${newFail})`);
+        await supabaseClient.from("product_completion").upsert({
+          product_code: code, fail_count: newFail, updated_at: now
+        }, { onConflict: 'product_code' });
+        continue;
+      }
+
+      // 5b: 判定 —— 采购累计 ≥ 总需求 → 已完成
+      const purchase = info.qty;
+      if (demand > 0 && purchase >= demand) {
+        const idsToUpdate = filteredItems
+          .filter((r: any) => r.product_code === code)
+          .map((r: any) => r.id);
+        const remark = `自动判定：采购${purchase}≥缺货${demand}（锚点${info.anchor}）`;
+        try {
+          const { error: updErr } = await supabaseClient.from("reports").update({
+            replenish_status: '已完成',
+            status_remark: remark,
+            status_changed_at: now,
+            status_changed_by: '系统自动',
+            settled_at: now
+          }).in("id", idsToUpdate).neq("replenish_status", "已完成");
+
+          if (!updErr) {
+            // 判定完成只更新 last_completed_at + 重置 fail_count，不碰 carryover/anchor
+            await supabaseClient.from("product_completion").upsert({
+              product_code: code,
+              last_completed_at: now,
+              fail_count: 0,
+              updated_at: now
+            }, { onConflict: 'product_code' });
+            try {
+              await supabaseClient.from("store_notifications").update({ notified_at: null })
+                .eq("product_code", code);
+            } catch (_) {}
+            completedCount++;
+          }
+        } catch (e) {
+          console.warn(`[v3.17] ${code} 标记完成失败:`, e);
+        }
+      }
+      // 判定不通过 → 什么都不改，等下次同步再查
+    }
+    details.push(`判定完成: ${completedCount} 个商品`);
+    if (failedCodes.length > 0) {
+      const highFail = failedCodes.filter(c => {
+        const m = c.match(/fail=(\d+)/); return m && parseInt(m[1]) >= FAIL_ALERT_THRESHOLD;
+      });
+      details.push(`⚠ SQL异常跳过 ${failedCodes.length} 个，≥${FAIL_ALERT_THRESHOLD}次告警: ${highFail.slice(0, 5).join(', ')}${highFail.length > 5 ? `...共${highFail.length}` : ''}`);
+    }
+
+    // ================================================================
+    // Step 6: 30 天超时回退（已订购/待付款采购仍不够 → 待处理）
+    // ================================================================
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    let revertedCount = 0;
+    for (const r of allItems) {
+      const s = r.replenish_status;
+      if (s !== '已订购' && s !== '待付款') continue;
+      const changedAt = r.status_changed_at ? new Date(r.status_changed_at).getTime() : 0;
+      if (!changedAt || (nowTs - changedAt) < THIRTY_DAYS_MS) continue;
+      const code = r.product_code;
+      const info = purchaseInfo[code];
+      const demand = demandByCode[code] || 0;
+      if (info && info.qty >= demand) continue; // 采购已够就不回退
+      try {
+        const { error: revErr } = await supabaseClient.from("reports").update({
+          replenish_status: '待处理',
+          status_remark: '超时回退(30天未到货)',
+          status_changed_at: now,
+          status_changed_by: '系统自动'
+        }).eq("id", r.id);
+        if (!revErr) revertedCount++;
+      } catch (e) { /* 不阻断 */ }
+    }
+    if (revertedCount > 0) {
+      details.push(`超时回退: ${revertedCount} 条(30天未到货) → 待处理`);
+    }
+
+    return { detected: completedCount, details };
+  } catch (err) {
+    console.error('[scheduled-task v3] 错误:', err);
+    return { detected: 0, details: [String(err)] };
   }
 }
 
@@ -271,45 +592,36 @@ async function syncProductCache(): Promise<{ success: boolean; message: string; 
   const pool = await getPool();
   
   try {
-    // 从 SQL Server 获取全量商品
+    // 从 RQZT 缓存表获取全量商品（FullName 标准名，避免 Vptype.Name 的「品名(品牌)」后缀）
+    // 先刷新缓存表再读取，与 query-shortage-data 的数据源保持一致
+    await pool.request().execute('usp_Sync_ProductCache_RQZT');
     const result = await pool.request().query(`
-      SELECT 
-        p.USERCODE as product_code,
-        p.NAME as product_name,
-        p.SPEC as product_spec,
-        p.MANUFACTURER as manufacturer,
-        LOWER(ISNULL(p.CODE1, '')) as pinyin_code,
-        p.TYPEID as category_id,
-        p.UNIT as unit,
-        p.PRICE as price,
-        p.VPTYPE as vp_type
-      FROM dbo.Vptype p
-      WHERE p.TYPEId IS NOT NULL AND LTRIM(RTRIM(p.TYPEId)) <> ''
-      ORDER BY p.NAME
+      SELECT
+        product_code,
+        product_name,
+        spec as product_spec,
+        manufacturer,
+        pinyin_code
+      FROM dbo.ProductCache_RQZT WITH (NOLOCK)
+      ORDER BY product_code
     `);
     
     const products = result.recordset || [];
     console.log(`[定时任务] 获取商品 ${products.length} 条`);
     
-    // 先清空旧缓存
-    const { error: deleteError } = await supabase.from('product_cache').delete().neq('product_code', '___never_match___');
-    if (deleteError) {
-      console.error('[定时任务] 清空商品缓存失败:', deleteError);
-    }
-    
-    // 分批插入（每批200条）
+    // UPSERT（有则更新，无则插入），消除 DELETE→INSERT 空窗
     const batchSize = 200;
     let totalInserted = 0;
     
     for (let i = 0; i < products.length; i += batchSize) {
       const batch = products.slice(i, i + batchSize);
-      const { error: insertError } = await supabase.from('product_cache').insert(batch);
+      const { error: insertError } = await supabase.from('product_cache').upsert(batch, { onConflict: 'product_code' });
       
       if (insertError) {
-        console.error(`[定时任务] 插入商品批次 ${i / batchSize + 1} 失败:`, insertError);
+        console.error(`[定时任务] UPSERT 商品批次 ${i / batchSize + 1} 失败:`, insertError);
       } else {
         totalInserted += batch.length;
-        console.log(`[定时任务] 已插入 ${totalInserted}/${products.length} 条`);
+        console.log(`[定时任务] 已同步 ${totalInserted}/${products.length} 条`);
       }
     }
     
@@ -381,15 +693,17 @@ async function syncPurchasePlan(): Promise<{ success: boolean; message: string; 
     
     // v5.2: 按门店精确匹配的自动检测
     let autoDetectCount = 0;
+    let autoDetectDetails: string[] = [];
     try {
-      const detectR = await preciseAutoDetectStatus(pool, supabase);
+      const detectR = await preciseAutoDetectStatusV2(pool, supabase);
       autoDetectCount = detectR.detected;
-      console.log(`[定时任务] 精准检测: ${autoDetectCount}个已完成`);
+      autoDetectDetails = detectR.details;
+      console.log(`[定时任务] 精准检测: ${autoDetectCount}个已完成`, JSON.stringify(detectR.details));
     } catch (detectErr) {
       console.error('[定时任务] 精准检测失败:', detectErr);
     }
     
-    return { success: true, message: `同步完成，${autoDetectCount}个已完成`, supabase_synced: supabaseSynced, auto_detected: autoDetectCount };
+    return { success: true, message: `同步完成，${autoDetectCount}个已完成`, supabase_synced: supabaseSynced, auto_detected: autoDetectCount, detection_details: autoDetectDetails };
     
   } catch (err) {
     console.error('[定时任务] 采购计划同步失败:', err);
@@ -477,6 +791,191 @@ async function healthCheck(): Promise<{ status: string; pools: number; timestamp
   };
 }
 
+// ========== 查询自动同步状态 ==========
+async function getLastSyncInfo(): Promise<{
+  success: boolean;
+  auto_sync?: { start_time: string; status: string };
+  next_sync_beijing?: string;
+  cron_jobs?: Array<{ jobid: number; jobname: string; schedule: string }>;
+  error?: string;
+}> {
+  try {
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+    const SYNC_JOBID = 11; // sync-spfxb-result
+
+    // 查最近一次自动同步运行记录
+    const { data, error } = await supabase
+      .rpc('get_last_cron_run', { p_jobid: SYNC_JOBID });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    // 算下次同步时间（UTC 16:30 = 北京 00:30，明天）
+    const now = new Date();
+    const nextUtc = new Date(now);
+    nextUtc.setUTCHours(16, 30, 0, 0);
+    if (nextUtc.getTime() <= now.getTime()) {
+      nextUtc.setUTCDate(nextUtc.getUTCDate() + 1);
+    }
+    const nextBeijing = nextUtc.toLocaleString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    });
+
+    return {
+      success: true,
+      auto_sync: data ? {
+        start_time: data.start_time,
+        status: data.status
+      } : undefined,
+      next_sync_beijing: nextBeijing
+    };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e) };
+  }
+}
+
+// ========== DEBUG: 查单商品判定详情 ==========
+async function debugCheckCode(code: string, forceAnchor?: string): Promise<any> {
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+  const pool = await getPool();
+
+  try {
+    // 1. Supabase 里的 reports
+    const { data: reports } = await supabase
+      .from("reports")
+      .select("id, store_name, demand_quantity, replenish_status, created_at, status_remark")
+      .eq("product_code", code)
+      .eq("order_type", "缺货订购")
+      .order("created_at", { ascending: false });
+
+    // 2. product_completion（v3 新增字段）
+    const { data: comp } = await supabase
+      .from("product_completion").select("*").eq("product_code", code);
+
+    // 3. 未完成缺货汇总
+    const pending = (reports || []).filter((r: any) => r.replenish_status !== '已完成' && r.replenish_status !== '厂家断货' && r.replenish_status !== '已关闭');
+    const demand = pending.reduce((s: number, r: any) => s + (Number(r.demand_quantity) || 0), 0);
+    const totalDemand = (reports || []).reduce((s: number, r: any) => s + (Number(r.demand_quantity) || 0), 0);
+
+    // 4. 事件驱动保护期：全历史最新采购日期
+    let latestPurchaseAllTime: string | null = null;
+    let anchorForDelta: string = forceAnchor || STATUS_MIGRATION_EPOCH;
+    try {
+      const latestRes = await pool.request()
+        .input("code", sql.NVarChar(50), code)
+        .query(`
+          SELECT MAX(vs.BillDate) as latest_date
+          FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+          JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+          WHERE v.usercode = @code AND vs.BillType = 34 AND vs.InKRec = '3'
+        `);
+      latestPurchaseAllTime = latestRes.recordset?.[0]?.latest_date || null;
+    } catch {}
+
+    // 5. 增量采购 + 结转余量
+    const compRow = comp?.[0] || {};
+    const lastAnchor = compRow.last_anchor?.substring(0, 10) || STATUS_MIGRATION_EPOCH;
+    const carryover = Number(compRow.carryover_qty || 0);
+    anchorForDelta = forceAnchor || lastAnchor;
+
+    let deltaAfterAnchor = 0;
+    let rowsAll: any[] = [];
+    try {
+      const req1 = pool.request();
+      req1.input("code", sql.NVarChar(50), code);
+      req1.input("anchor", sql.VarChar(10), anchorForDelta);
+      const res1 = await req1.query(`
+        SELECT ISNULL(SUM(ABS(vs.Qty)), 0) as qty
+        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+        JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+        WHERE v.usercode = @code AND vs.BillType = 34 AND vs.InKRec = '3' AND vs.BillDate > @anchor
+      `);
+      deltaAfterAnchor = Number(res1.recordset?.[0]?.qty || 0);
+
+      const resAll = await pool.request().query(`
+        SELECT vs.BillDate, ABS(vs.Qty) as Qty, v.usercode as Code
+        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+        JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+        WHERE v.usercode = '${code.replace(/'/g, "''")}' AND vs.BillType = 34 AND vs.InKRec = '3'
+        ORDER BY vs.BillDate DESC
+      `);
+      rowsAll = resAll.recordset || [];
+    } catch (e: any) {
+      return { success: false, error: String(e?.message || e) };
+    }
+
+    const totalAllTime = rowsAll.reduce((s: number, r: any) => s + Number(r.Qty || 0), 0);
+
+    // 简化版：所有 pending reports 都参与判定，anchor = 最早上报日
+    const anchorEarliest = pending.length > 0
+      ? pending.reduce((e: string, r: any) => {
+          const c = (r.created_at || '').substring(0, 10);
+          return !e || c < e ? c : e;
+        }, STATUS_MIGRATION_EPOCH)
+      : STATUS_MIGRATION_EPOCH;
+    let deltaFromEarliestAnchor = 0;
+    try {
+      const req2 = pool.request();
+      req2.input("code", sql.NVarChar(50), code);
+      req2.input("anchor", sql.VarChar(10), anchorEarliest);
+      const res2 = await req2.query(`
+        SELECT ISNULL(SUM(ABS(vs.Qty)), 0) as qty
+        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+        JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+        WHERE v.usercode = @code AND vs.BillType = 34 AND vs.InKRec = '3' AND vs.BillDate >= @anchor
+      `);
+      deltaFromEarliestAnchor = Number(res2.recordset?.[0]?.qty || 0);
+    } catch {}
+
+    return {
+      success: true,
+      product_code: code,
+      version: 'v3.17 简化版（无保护期，现查总账）',
+      supabase_reports: reports,
+      pending_demand: demand,
+      anchor_earliest_report: anchorEarliest,
+      all_reports_total_demand: totalDemand,
+      completion_state: {
+        fail_count: compRow.fail_count,
+        last_completed_at: compRow.last_completed_at,
+        updated_at: compRow.updated_at
+      },
+      purchase_analysis: {
+        latest_purchase_all_time: latestPurchaseAllTime,
+        purchase_since_earliest_anchor: deltaFromEarliestAnchor,
+        all_time_total: totalAllTime
+      },
+      judge_result_now: demand > 0 && deltaFromEarliestAnchor >= demand
+        ? `✅ 判定完成：采购${deltaFromEarliestAnchor}≥缺货${demand}（锚点${anchorEarliest}）`
+        : demand === 0
+          ? '✅ 无未完成缺货'
+          : `❌ 不满足：锚点${anchorEarliest}起采购${deltaFromEarliestAnchor}<缺货${demand}，差${demand - deltaFromEarliestAnchor}`,
+      logic_breakdown: `
+        1. 简化版：无事件驱动保护期，所有${pending.length}条待处理都参与
+        2. 锚点=${anchorEarliest}（最早未完成上报日）
+        3. 总需求=${demand}
+        4. 锚点起采购累计=${deltaFromEarliestAnchor}
+        5. ${deltaFromEarliestAnchor >= demand ? '采购足够，判定完成' : '采购还差' + (demand - deltaFromEarliestAnchor)}
+      `.trim()
+    };
+  } finally {
+    releasePool(pool);
+  }
+}
+
+// ========== Secret 鉴权（供 pg_cron 定时任务绕过 JWT 调用） ==========
+const TASK_SECRET = Deno.env.get("TASK_SECRET") || "wszh_auto_sync_2026";
+
+function checkSecret(req: Request): boolean {
+  const provided = req.headers.get("x-task-secret") || req.headers.get("x-sync-secret") || "";
+  const auth = req.headers.get("authorization") || "";
+  // 允许: 自定义 secret header 匹配 / 或 Bearer service_role key（由 Supabase 自动处理 JWT）
+  return provided.trim() === TASK_SECRET.trim() || auth.startsWith("Bearer ");
+}
+
 // ========== HTTP Server ==========
 serve(async (req) => {
   const corsHeaders = getCorsHeaders(req);
@@ -485,18 +984,23 @@ serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
   
+  // 先解析 action，判断是否需要鉴权
+  let reqBody: any = {};
+  try { reqBody = await req.json(); } catch {
+    return new Response(JSON.stringify({ error: "请使用 POST + JSON 格式调用" }), {
+      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  const { action } = reqBody;
+  // health / get_last_sync / debug_check_code / run_detect_only 是只读查询或幂等操作，免鉴权
+  const PUBLIC_ACTIONS = ["health", "get_last_sync", "debug_check_code", "run_detect_only"];
+  if (!PUBLIC_ACTIONS.includes(action || "") && !checkSecret(req)) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  
   try {
-    let reqBody;
-    try {
-      reqBody = await req.json();
-    } catch {
-      return new Response(JSON.stringify({ error: "请使用 POST + JSON 格式调用" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-    
-    const { action } = reqBody;
     let result: any;
     
     switch (action) {
@@ -535,11 +1039,42 @@ serve(async (req) => {
         result = await healthCheck();
         break;
       }
+
+      case "get_last_sync": {
+        // 查询自动同步状态（上次自动同步时间 + 下次预计时间）
+        result = await getLastSyncInfo();
+        break;
+      }
+
+      case "debug_check_code": {
+        // DEBUG: 查单商品完成判定详情（缺货汇总 + 采购入库累计）
+        result = await debugCheckCode(reqBody.product_code || reqBody.code || '', reqBody.anchor);
+        break;
+      }
+
+      case "run_detect_only": {
+        // 仅跑完成判定逻辑（跳过存储过程，快速验证新逻辑）
+        console.log('[定时任务] run_detect_only: 仅跑自动判定...');
+        const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+        const pool = await getPool();
+        try {
+          const detectR = await preciseAutoDetectStatusV2(pool, supabase);
+          result = {
+            success: true,
+            mode: 'run_detect_only',
+            detected: detectR.detected,
+            detection_details: detectR.details
+          };
+        } finally {
+          releasePool(pool);
+        }
+        break;
+      }
       
       default:
         return new Response(JSON.stringify({ 
           error: `未知操作: ${action}`,
-          available_actions: ["full_sync", "sync_rqzt_cache", "sync_product", "sync_plan", "get_logs", "health"]
+          available_actions: ["full_sync", "sync_rqzt_cache", "sync_product", "sync_plan", "run_detect_only", "get_logs", "health", "get_last_sync", "debug_check_code"]
         }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },

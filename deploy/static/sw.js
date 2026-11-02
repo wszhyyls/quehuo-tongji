@@ -5,13 +5,11 @@ const STATIC_ASSETS = [
   '/login.html',
   '/store.html',
   '/admin.html',
-  '/procurement.html',
   '/manifest.json',
   '/static/css/style.css',
   '/static/js/utils.js',
   '/static/js/admin.js',
   '/static/js/store.js',
-  '/static/js/procurement.js',
   '/static/logo.jpg'
 ];
 

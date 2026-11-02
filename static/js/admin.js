@@ -43,7 +43,7 @@ var themeLabels = { purple: '💜 紫韵', blue: '🌊 海蓝', green: '🌿 翠
 var supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ========== 权限系统 ==========
-var defaultPermissions = { view_summary:true, edit_status:true, manage_order:true, manage_employees:true, manage_devices:true, manage_stores:true, manage_admins:false, sync_data:true, view_audit_log:true, manage_procurement:true };
+var defaultPermissions = { view_summary:true, edit_status:true, manage_order:true, manage_employees:true, manage_devices:true, manage_stores:true, manage_admins:false, sync_data:true, view_audit_log:true, notify_refresh:true, view_delivery_todo:true };
 function getPermissions() { return user.role === 'super_admin' ? Object.assign({}, defaultPermissions, { manage_admins:true }) : Object.assign({}, defaultPermissions, user.permissions || {}); }
 function hasPermission(perm) { return getPermissions()[perm] === true; }
 function checkPermission(perm, msg) { if (!hasPermission(perm)) { showAlert(msg || '您没有该操作的权限'); return false; } return true; }
@@ -55,10 +55,9 @@ function initPermissionUI() {
     var devTab = document.querySelector('[data-tab="devices"]'); if (devTab && !perms.manage_devices) devTab.style.display = 'none';
     var storeTab = document.querySelector('[data-tab="users"]'); if (storeTab && !perms.manage_stores) storeTab.style.display = 'none';
     var auditTab = document.querySelector('[data-tab="audit"]'); if (auditTab && !perms.view_audit_log) auditTab.style.display = 'none';
-    // 采购记录按钮：无权限则隐藏
-    var procBtn = document.querySelector('.tab-btn[onclick*="procurement"]');
-    if (procBtn && !perms.manage_procurement) procBtn.style.display = 'none';
     var syncBtn = document.getElementById('syncPlanBtn'); if (syncBtn && !perms.sync_data) syncBtn.style.display = 'none';
+    var notifyBtn = document.getElementById('notifyRefreshBtn'); if (notifyBtn && !perms.notify_refresh) notifyBtn.style.display = 'none';
+    var todoBtn = document.getElementById('deliveryTodoBtn'); if (todoBtn && !perms.view_delivery_todo) todoBtn.style.display = 'none';
     var selectAllTh = document.querySelector('#summaryTable th:first-child'); if (selectAllTh && !perms.edit_status) selectAllTh.style.display = 'none';
 }
 
@@ -118,7 +117,7 @@ window.batchSetStatus = async function() {
     var codes = Object.keys(selectedProducts); if (codes.length === 0) return;
     if (window.isBatchOperating) return;
     var sel = document.getElementById('batchTargetStatus');
-    var targetStatus = sel ? sel.value : '已到货';
+    var targetStatus = sel ? sel.value : '已完成';
     if (!targetStatus) { showAlert('请选择目标状态'); return; }
     if (!confirm('确定将选中 ' + codes.length + ' 个商品标记为「' + targetStatus + '」？')) return;
     window.isBatchOperating = true;
@@ -127,14 +126,14 @@ window.batchSetStatus = async function() {
         var result = await callEdgeFunction('batch_update_status', { product_codes: codes, target_status: targetStatus, operator: user.name || '管理员' });
         if (result.success) { showToast('批量标记完成！成功 ' + (result.data.success_count || codes.length) + ' 项', 'success'); }
         else { showAlert('批量标记失败：' + (result.error || '未知')); }
-        clearSelection(); loadSummary();
+        clearSelection(); loadSummary(true);
     } finally { window.isBatchOperating = false; restore(); }
 };
 
 // 弹窗事件
 document.getElementById('detailModalClose').addEventListener('click', function() { document.getElementById('detailModal').classList.remove('show'); });
 document.getElementById('detailModal').addEventListener('click', function(e) { if (e.target === this) this.classList.remove('show'); });
-document.getElementById('alertOkBtn').addEventListener('click', function() { document.getElementById('alertModal').classList.remove('show'); });
+document.getElementById('alertOkBtn').addEventListener('click', function() { var m = document.getElementById('alertModal'); m.classList.remove('show'); var mc = m.querySelector('.modal-content'); if (mc) mc.style.maxWidth = ''; });
 
 // ========== 需求明细实时配送数据刷新 ==========
 async function refreshTransitData(productCode, stores) {
@@ -272,25 +271,38 @@ document.getElementById('orderModal').addEventListener('click', function(e) { if
 document.getElementById('omCancelBtn').addEventListener('click', function() { document.getElementById('orderModal').classList.remove('show'); });
 document.getElementById('omSaveBtn').addEventListener('click', handleOrderSave);
 
-// ========== 一键同步（分步进度提示）==========
-// 页面加载时从缓存读取上次同步时间
+// ========== 一键同步（分步进度提示）v2：完成判定 ==========
+// 页面加载时从缓存读取上次手动同步时间 + 异步拉取自动同步状态
 (function() {
-    var lt = localStorage.getItem('lastSyncTime');
-    var desc = '按门店自动判定：仓库满足→已到货 / 门店满足→已完成';
-    if (lt) document.getElementById('syncPlanBtn').title = desc + '\n上次同步：' + new Date(parseInt(lt)).toLocaleString('zh-CN');
+    var desc = '自动判定：采购入库累计 ≥ 缺货汇总 → 已完成';
+    var btn = document.getElementById('syncPlanBtn');
+    var manualTime = localStorage.getItem('lastSyncTime');
+    var manualText = manualTime ? new Date(parseInt(manualTime)).toLocaleString('zh-CN') : '从未';
+    
+    // 先显示本地缓存的手动同步时间（秒开）
+    btn.title = desc + '\n手动同步：' + manualText + '\n自动同步：加载中...';
+    
+    // 异步拉取自动同步状态
+    fetch('https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/scheduled-task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get_last_sync' })
+    }).then(function(r) { return r.json(); }).then(function(data) {
+        if (!data.success) { btn.title = desc + '\n手动同步：' + manualText; return; }
+        var autoText = data.auto_sync && data.auto_sync.start_time ? data.auto_sync.start_time + (data.auto_sync.status === 'succeeded' ? ' ✅' : ' ⚠️') : '暂无记录';
+        var nextText = data.next_sync_beijing || '';
+        var tip = desc + '\n手动同步：' + manualText + '\n自动同步：' + autoText;
+        if (nextText) tip += '\n下次自动：' + nextText;
+        btn.title = tip;
+    }).catch(function() {
+        btn.title = desc + '\n手动同步：' + manualText;
+    });
 })();
 document.getElementById('syncPlanBtn').addEventListener('click', async function() {
     if (!checkPermission('sync_data', '您没有同步数据的权限')) return;
     var btn = this, restore = setBtnLoading(btn);
     btn.classList.add('btn-loading');
-    // 动态切换按钮文案（按常见顺序估算每个阶段）
-    var stages = [
-        '① 商品缓存同步...',
-        '② 写入 staging...',
-        '③ SP 判定中...',
-        '④ 更新状态...',
-        '同步完成...'
-    ];
+    var stages = ['① 商品缓存同步...', '② 完成判定中...', '同步完成...'];
     var stageIdx = 0;
     var stageTimer = setInterval(function() {
         if (stageIdx < stages.length) {
@@ -298,13 +310,11 @@ document.getElementById('syncPlanBtn').addEventListener('click', async function(
         }
     }, 1200);
     try {
-        // 一键同步用更长超时：180s 首次 + 60s 重试（冷启动 SQL Server + SP 可能需要 2-3 分钟）
         var r = await callEdgeFunction('sync_with_auto_status', {}, { timeout: 180000, maxRetries: 1 });
         clearInterval(stageTimer);
         if (!r.success) {
             var errMsg = r.error || '未知';
             if (errMsg.indexOf('超时') >= 0) {
-                // 超时不弹窗报错：SP 可能在后台已执行完成，静默加载看结果
                 showToast('同步请求超时，正在尝试加载最新数据...', 'info');
                 btn.classList.remove('btn-loading'); restore();
                 localStorage.setItem('lastSyncTime', Date.now());
@@ -318,46 +328,13 @@ document.getElementById('syncPlanBtn').addEventListener('click', async function(
         btn.classList.remove('btn-loading'); btn.classList.add('btn-success');
         var now = Date.now();
         localStorage.setItem('lastSyncTime', now);
-        btn.title = '按门店自动判定：仓库满足→已到货 / 门店满足→已完成\n上次同步：' + new Date(now).toLocaleString('zh-CN');
+        btn.title = '自动判定：采购入库累计 ≥ 缺货汇总 → 已完成\n上次同步：' + new Date(now).toLocaleString('zh-CN');
+        showToast(r.message || '完成判定完成！', 'success');
         var detail = r.data?.detect_details || [];
-        var stepHtml = '<div style="text-align:left;font-size:13px;line-height:1.8;max-height:300px;overflow-y:auto;">'
-            + '<div style="font-weight:600;color:#4caf50;margin-bottom:4px;">✅ SP 判定已完成，正在后台同步到数据库…</div>'
-            + detail.map(function(s) { return '<div>• ' + safeText(s) + '</div>'; }).join('')
-            + '</div>';
-        showToast(r.message || 'SP 判定完成！后台正在同步…', 'success');
-        showAlert('同步完成', stepHtml);
-        // 阶段二：后台异步将 SP 结果同步到 Supabase（不影响用户操作）
-        var completedPairs = r.data?.completedPairs || [];
-        var arrivedPairs = r.data?.arrivedPairs || [];
-        if (completedPairs.length > 0 || arrivedPairs.length > 0) {
-            await callEdgeFunction('apply_status_sync', {
-                completed_pairs: completedPairs,
-                arrived_pairs: arrivedPairs
-            }, { timeout: 60000 }).then(function(syncResult) {
-                if (syncResult.success) {
-                    var updated = syncResult.data?.updated || 0;
-                    var notified = syncResult.data?.notified || 0;
-                    if (updated > 0 || notified > 0) {
-                        showToast('同步完成！更新 ' + updated + ' 条报告，' + notified + ' 条通知', 'success');
-                    }
-                } else {
-                    console.warn('[SyncPhase2] Supabase 同步未完成:', syncResult.error);
-                }
-                return;
-            }).catch(function(err) {
-                console.warn('[SyncPhase2] Supabase 同步异常:', err);
-            });
+        if (detail.length > 0) {
+            var modal = document.getElementById('alertModal'), msgEl = document.getElementById('alertMsg');
+            if (modal && msgEl) { msgEl.textContent = detail.join('\n'); modal.classList.add('show'); }
         }
-        // 阶段三：二次校验（库存=0 的回退），并等它完成后才刷新页面
-        await callEdgeFunction('second_check', {}, { timeout: 90000 }).then(function(scResult) {
-            if (scResult.success) {
-                console.log('[SyncPhase3] 二次校验完成');
-            } else {
-                console.warn('[SyncPhase3] 二次校验未完成:', scResult.error);
-            }
-        }).catch(function(err) {
-            console.warn('[SyncPhase3] 二次校验异常:', err);
-        });
         localStorage.removeItem('summaryData');
         await loadSummary();
     } catch(e) {
@@ -368,6 +345,147 @@ document.getElementById('syncPlanBtn').addEventListener('click', async function(
     }
     finally { setTimeout(function() { restore(); btn.classList.remove('btn-success'); }, 1500); }
 });
+
+// ========== 通知刷新（独立按钮：手动触发到货通知） ==========
+document.getElementById('notifyRefreshBtn').addEventListener('click', async function() {
+    if (!checkPermission('notify_refresh', '您没有发送通知的权限')) return;
+    var btn = this, restore = setBtnLoading(btn, '通知发送中...');
+    try {
+        var r = await callEdgeFunction('notify_refresh', {}, { timeout: 180000, maxRetries: 1 });
+        if (!r.success) { showAlert('通知刷新失败：' + (r.error || '未知')); restore(); return; }
+        showToast('通知刷新完成：发送 ' + (r.data?.notified || 0) + ' 条，跳过 ' + (r.data?.skipped || 0) + ' 条', 'success');
+    } catch(e) {
+        showToast('通知刷新异常，请重试', 'error');
+    } finally { restore(); }
+});
+
+// ========== 配送待办：数据/筛选/导出辅助 ==========
+var deliveryTodoData = [];
+
+function todoRowHtml(t, i) {
+    var bg = (i % 2 === 1) ? ' style="background:#fafafa;"' : '';
+    return '<tr' + bg + '><td style="padding:4px 8px;border:1px solid #d9d9d9;white-space:nowrap;">' + safeText(t.product_code) + '</td>'
+        + '<td style="padding:4px 8px;border:1px solid #d9d9d9;"><div style="max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + escapeHtml(t.product_name || '') + '">' + safeText(t.product_name) + '</div></td>'
+        + '<td style="padding:4px 8px;border:1px solid #d9d9d9;white-space:nowrap;">' + safeText(t.product_spec || '-') + '</td>'
+        + '<td style="padding:4px 8px;border:1px solid #d9d9d9;"><div style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + escapeHtml(t.manufacturer || '') + '">' + safeText(t.manufacturer || '-') + '</div></td>'
+        + '<td style="padding:4px 8px;border:1px solid #d9d9d9;white-space:nowrap;">' + safeText(t.store_name) + '</td>'
+        + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + t.demand + '</td>'
+        + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + t.store_stock + '</td>'
+        + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + (t.transit || 0) + '</td>'
+        + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + t.wh_stock + '</td></tr>';
+}
+
+function getFilteredTodo(filter) {
+    return filter ? deliveryTodoData.filter(function(t) { return t.store_name === filter; }) : deliveryTodoData;
+}
+
+function redrawTodoRows(filter) {
+    var tbody = document.querySelector('#alertModal table tbody');
+    if (!tbody) return;
+    var rows = getFilteredTodo(filter);
+    if (rows.length === 0) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#999;padding:20px;">该门店暂无待配送商品</td></tr>'; return; }
+    tbody.innerHTML = rows.map(function(t, i) { return todoRowHtml(t, i); }).join('');
+}
+
+function exportDeliveryTodoExcel(filter) {
+    var rows = getFilteredTodo(filter);
+    if (rows.length === 0) { showToast('没有可导出的数据', 'error'); return; }
+    var data = rows.map(function(t, i) {
+        return { '序号': i + 1, '编码': t.product_code || '', '品名': t.product_name || '', '规格': t.product_spec || '', '厂家': t.manufacturer || '', '门店': t.store_name || '', '需求': t.demand, '门店库存': t.store_stock, '在途': t.transit || 0, '仓库库存': t.wh_stock };
+    });
+    var fname = '配送待办' + (filter ? '_' + filter : '') + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
+    if (typeof XLSX !== 'undefined') {
+        try {
+            var ws = XLSX.utils.json_to_sheet(data);
+            ws['!cols'] = [{wch:5},{wch:10},{wch:26},{wch:12},{wch:30},{wch:14},{wch:6},{wch:9},{wch:6},{wch:9}];
+            var wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, '配送待办');
+            XLSX.writeFile(wb, fname);
+            return;
+        } catch (e) { /* 降级 CSV */ }
+    }
+    var headers = Object.keys(data[0]);
+    var csv = '\ufeff' + headers.join(',') + '\n' + data.map(function(row) {
+        return headers.map(function(h) { var v = String(row[h] == null ? '' : row[h]); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(',');
+    }).join('\n');
+    var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname.replace('.xlsx', '.csv');
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+// ========== 配送待办（已完成但未配送到店） ==========
+document.getElementById('deliveryTodoBtn').addEventListener('click', async function() {
+    if (!checkPermission('view_delivery_todo', '您没有查看配送待办的权限')) return;
+    var btn = this, restore = setBtnLoading(btn, '加载中...');
+    try {
+        var r = await callEdgeFunction('get_delivery_todo', {}, { timeout: 180000, maxRetries: 1 });
+        if (!r.success) { showAlert('加载待办失败：' + (r.error || '未知')); restore(); return; }
+        var todo = r.data?.todo || [];
+        deliveryTodoData = todo || [];
+        var html;
+        if (todo.length === 0) {
+            html = '<div style="text-align:center;color:#999;padding:20px;">暂无待配送商品</div>';
+        } else {
+            html = '<div style="max-height:60vh;overflow-y:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #d9d9d9;">'
+                + '<thead><tr style="background:#f5f5f5;"><th style="padding:5px 8px;text-align:left;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">编码</th><th style="padding:5px 8px;text-align:left;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">品名</th><th style="padding:5px 8px;text-align:left;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">规格</th><th style="padding:5px 8px;text-align:left;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">厂家</th><th style="padding:5px 8px;text-align:left;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">门店</th><th style="padding:5px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">需求</th><th style="padding:5px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">门店库存</th><th style="padding:5px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">在途</th><th style="padding:5px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;position:sticky;top:0;z-index:1;background:#f5f5f5;box-shadow:inset -1px 0 0 #d9d9d9,inset 0 -1px 0 #d9d9d9;">仓库库存</th></tr></thead><tbody>';
+            todo.forEach(function(t, i) {
+                var bg = (i % 2 === 1) ? ' style="background:#fafafa;"' : '';
+                html += '<tr' + bg + '><td style="padding:4px 8px;border:1px solid #d9d9d9;white-space:nowrap;">' + safeText(t.product_code) + '</td>'
+                    + '<td style="padding:4px 8px;border:1px solid #d9d9d9;"><div style="max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + escapeHtml(t.product_name || '') + '">' + safeText(t.product_name) + '</div></td>'
+                    + '<td style="padding:4px 8px;border:1px solid #d9d9d9;white-space:nowrap;">' + safeText(t.product_spec || '-') + '</td>'
+                    + '<td style="padding:4px 8px;border:1px solid #d9d9d9;"><div style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + escapeHtml(t.manufacturer || '') + '">' + safeText(t.manufacturer || '-') + '</div></td>'
+                    + '<td style="padding:4px 8px;border:1px solid #d9d9d9;white-space:nowrap;">' + safeText(t.store_name) + '</td>'
+                    + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + t.demand + '</td>'
+                    + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + t.store_stock + '</td>'
+                    + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + (t.transit || 0) + '</td>'
+                    + '<td style="padding:4px 8px;text-align:center;border:1px solid #d9d9d9;white-space:nowrap;">' + t.wh_stock + '</td></tr>';
+            });
+            html += '</tbody></table></div>';
+        }
+        var modal = document.getElementById('alertModal'), msgEl = document.getElementById('alertMsg');
+        if (modal && msgEl) {
+            var mc = modal.querySelector('.modal-content'); if (mc) mc.style.maxWidth = '1100px';
+            msgEl.innerHTML = html; modal.classList.add('show');
+            // 工具栏：门店筛选 + 导出 Excel
+            var stores = [];
+            deliveryTodoData.forEach(function(t) { if (t.store_name && stores.indexOf(t.store_name) < 0) stores.push(t.store_name); });
+            stores.sort();
+            var opts = '<option value="">全部门店（' + deliveryTodoData.length + ' 条）</option>';
+            stores.forEach(function(s) {
+                var cnt = deliveryTodoData.filter(function(t) { return t.store_name === s; }).length;
+                opts += '<option value="' + escapeHtml(s) + '">' + escapeHtml(s) + '（' + cnt + ' 条）</option>';
+            });
+            var bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;';
+            bar.innerHTML = '<span style="font-size:13px;color:#666;">门店筛选：</span>'
+                + '<select id="todoStoreFilter" style="padding:4px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px;min-width:150px;">' + opts + '</select>'
+                + '<button id="todoExportBtn" style="margin-left:auto;padding:5px 16px;background:#27ae60;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">导出 Excel</button>';
+            msgEl.insertBefore(bar, msgEl.firstChild);
+            var sel = bar.querySelector('#todoStoreFilter');
+            if (sel) sel.onchange = function() { redrawTodoRows(sel.value); };
+            var exp = bar.querySelector('#todoExportBtn');
+            if (exp) exp.onclick = function() { exportDeliveryTodoExcel(sel ? sel.value : ''); };
+        }
+    } catch(e) {
+        showToast('加载待办异常，请重试', 'error');
+    } finally { restore(); }
+});
+
+// ========== 配送待办数量角标（静默刷新，60秒节流） ==========
+var _todoCountLast = 0;
+async function refreshDeliveryTodoCount() {
+    var now = Date.now();
+    if (now - _todoCountLast < 60000) return;
+    _todoCountLast = now;
+    try {
+        var r = await callEdgeFunction('get_delivery_todo', {}, { timeout: 60000, maxRetries: 0 });
+        var el = document.getElementById('arrivedCount');
+        if (el && r && r.success && r.data) el.textContent = String((r.data.todo || []).length);
+    } catch(e) { /* 静默失败，保持 '-' */ }
+}
 
 async function refreshWarehouseStock() {
     var activeItems = (summaryData && summaryData.shortage_by_product) || [];
@@ -618,8 +736,12 @@ async function loadSummary(keepFilters) {
             } else {
                 np.push({ store_id:r.store_id, store_name:storeNames[r.store_id]||r.store_id, product_name:r.new_product_name, specification:r.new_specification, manufacturer:r.new_manufacturer, price_min:r.price_min, price_max:r.price_max, demand_quantity:r.demand_quantity, remark:r.remark, reporter:ri });
                 var gk = r.new_product_name+'|'+r.new_specification;
-                if (!npg[gk]) npg[gk] = { product_code: gk, product_name:r.new_product_name, specification:r.new_specification, manufacturer:r.new_manufacturer, total_demand:0, stores:[] };
+                var sn = storeNames[r.store_id] || r.store_id;
+                if (!npg[gk]) npg[gk] = { product_code: gk, product_name:r.new_product_name, specification:r.new_specification, manufacturer:r.new_manufacturer, total_demand:0, stores:[], latest_report_time:'', store_names:{}, reporter_names:{} };
                 npg[gk].total_demand += r.demand_quantity; npg[gk].stores.push({ store_id:r.store_id, demand:r.demand_quantity });
+                if ((r.created_at||'') > (npg[gk].latest_report_time||'')) npg[gk].latest_report_time = r.created_at||'';
+                if (sn) npg[gk].store_names[sn] = true;
+                if (ri) npg[gk].reporter_names[ri] = true;
             }
         });
 
@@ -639,14 +761,14 @@ async function loadSummary(keepFilters) {
         var payment = allForStats.filter(function(p) { return p.replenish_status === '待付款'; }).length;
         var completedTotal = completedForStats.length;
         var pending = allForStats.filter(function(p) { return p.replenish_status === '待处理'; }).length;
-        var arrived = allForStats.filter(function(p) { return p.replenish_status === '已到货'; }).length;
         var today = new Date().toISOString().slice(0,10);
         var todayReports = reports.filter(function(r) { return (r.created_at||'').slice(0,10) === today; }).length;
         document.getElementById('orderedCount').textContent = ordered;
         document.getElementById('paymentCount').textContent = payment;
         document.getElementById('completedTotalCount').textContent = completedTotal;
         document.getElementById('pendingCount').textContent = pending;
-        document.getElementById('arrivedCount').textContent = arrived;
+        document.getElementById('arrivedCount').textContent = '-';
+        refreshDeliveryTodoCount();
         document.getElementById('todayCount').textContent = todayReports;
         document.getElementById('newTotalCount').textContent = summaryData.new_products.reduce(function(s,n) { return s+n.demand_quantity; }, 0);
         document.getElementById('newProductCount').textContent = summaryData.new_products_grouped.length;
@@ -685,8 +807,6 @@ async function loadSummary(keepFilters) {
             document.getElementById('statusFilter').value = '';
             renderSummaryPage(); renderCompletedSection();
         }
-        document.getElementById('statusFilter').value = '';
-        renderSummaryPage(); renderCompletedSection();
         renderNewProductsTable();
 
         // v5.8.1+ 分批加载：削减并发峰值，避免 SQL 连接池争抢
@@ -730,7 +850,10 @@ function renderNewProductsTable() {
                 : '<span class="badge badge-pending">待处理</span>';
         }
         var delBtn = '<button class="btn-detail" style="color:#f44336;" onclick="deleteNewProduct(\'' + escapeHtml(g.product_code) + '\',\'' + escapeHtml(g.product_name || '') + '\')">删除</button>';
-        tbody.innerHTML += '<tr><td>'+safeText(g.product_name)+'</td><td>'+safeText(g.specification)+'</td><td>'+safeText(g.manufacturer)+'</td><td>'+getUrgencyBadge('普通')+'</td><td><span class="type-badge type-new">'+safeText(g.total_demand)+'</span></td><td>'+statusHtml+'</td><td><button class="btn-detail" onclick="showNewDetail('+idx+')">明细</button></td><td>'+delBtn+'</td></tr>';
+        var reportDate = (g.latest_report_time || '').slice(0, 10);
+        var stores = Object.keys(g.store_names || {}).join('、');
+        var reporters = Object.keys(g.reporter_names || {}).join('、');
+        tbody.innerHTML += '<tr><td>'+safeText(g.product_name)+'</td><td>'+safeText(g.specification)+'</td><td>'+safeText(g.manufacturer)+'</td><td>'+getUrgencyBadge('普通')+'</td><td><span class="type-badge type-new">'+safeText(g.total_demand)+'</span></td><td>'+safeText(reportDate)+'</td><td title="'+escapeHtml(stores)+'">'+safeText(stores)+'</td><td>'+safeText(reporters)+'</td><td>'+statusHtml+'</td><td>'+delBtn+'</td></tr>';
     });
 }
 
@@ -1284,9 +1407,13 @@ window.showShortageDetail = function(idx, fromCompleted) {
                 changed = true;
             }
         });
-        // 同时刷新对应单元格的 data-transit 已被 refreshTransitData 内部完成
-        // 汇总行重新渲染，让 displayDemand 反映最新的 transit
-        if (changed) { try { renderSummaryPage(); } catch(e) {} }
+        // 汇总行重新渲染：直接用内存里更新后的 transit 值重绘
+        // 不触发全量 loadSummary——明细弹窗只是临时查询实时配送数据，
+        // replenish_status 变化由自动刷新(60s轮询)/手动刷新/批量操作后同步
+        // 【v23 修复】之前调 loadSummary(true) 导致打开明细瞬间触发全量刷新，
+        // 若此时 scheduled-task 正好运行，某些门店被标记已完成/已关闭，
+        // 前端重新分组后从 shortage_by_product 消失 → 列表需求数量闪烁
+        if (changed) { try { renderSummaryPage(); renderCompletedSection(); } catch(e) {} }
 
         // 已完成列表里的明细弹窗不再触发自动转入（避免重复弹 toast + 移除行导致空白）
         if (fromCompleted) return;
