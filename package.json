@@ -1,7 +1,7 @@
 {
   "name": "wszh-shortage-store",
-  "version": "5.9.0",
-  "description": "微山县众和医药连锁有限公司 - 门店缺货上报客户端",
+  "version": "5.15.11",
+  "description": "微山县众和医药连锁有限公司 - 门店缺货上报客户端（本地加载版 · 自动卸载旧版）",
   "main": "electron-main.js",
   "scripts": {
     "start": "electron .",
@@ -15,30 +15,38 @@
       "output": "dist"
     },
     "win": {
-      "target": [
-        "nsis"
-      ],
+      "target": ["nsis"],
       "icon": "static/icon-512.png"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "shortcutName": "众和医药缺货订购系统"
+      "shortcutName": "众和医药缺货订购系统",
+      "include": "installer.nsh",
+      "runAfterFinish": false
     },
     "files": [
       "electron-main.js",
       "preload.js",
-      "store.html",
-      "login.html",
       "static/**/*",
-      "!static/**/*.map"
+      "!static/**/*.map",
+      "!deploy/**/*"
     ],
     "extraResources": [
       {
         "from": "static/",
         "to": "static/",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "deploy/",
+        "to": "deploy/",
         "filter": [
-          "**/*"
+          "admin.html",
+          "login.html",
+          "store.html",
+          "manifest.json",
+          "static/**/*"
         ]
       }
     ],
@@ -48,7 +56,9 @@
     }
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.118.0",
     "electron-updater": "^6.1.7",
+    "mssql": "^12.7.13",
     "pptxgenjs": "^4.0.1",
     "xlsx": "^0.18.5"
   },

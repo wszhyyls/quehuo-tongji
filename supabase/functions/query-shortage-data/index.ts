@@ -1,11 +1,40 @@
-// Supabase Edge Function - 查询缺货系统数据
+﻿// Supabase Edge Function - 查询缺货系统数据
 // v3.12: 连接池预热 + 查询超时保护 + 状态查询修复
+// v374: 逐笔 report 独立判定 + 采购不重复消耗
+// v375: P0 安全修复 — ZHYYLS 只读断言 + action 级别鉴权
 import { serve } from "https://deno.land/std@0.192.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import sql from "https://esm.sh/mssql@9";
+// 【2026-11-08 放开锚点】所有判定核心函数直接内联，避免 Deno import 打包问题
 
-// 默认员工密码（从环境变量读取，安全性增强）
+// ========== P0-2: ZHYYLS 只读断言（2026-11-07 新增）==========
+// ZHYYLS 是 ERP 业务库，Edge Function 只允许 SELECT + EXEC 只读存储过程
+// 任何 INSERT/UPDATE/DELETE/MERGE/TRUNCATE 涉及 ZHYYLS 的一律拒绝
+const ZHYYLS_WRITE_PATTERNS = [
+  /\bINSERT\s+(INTO\s+)?ZHYYLS\b/i,
+  /\bUPDATE\s+ZHYYLS\b/i,
+  /\bDELETE\s+FROM\s+ZHYYLS\b/i,
+  /\bMERGE\s+INTO\s+ZHYYLS\b/i,
+  /\bTRUNCATE\s+TABLE\s+ZHYYLS\b/i,
+];
+function assertZhyylsReadOnly(sqlText: string | undefined): void {
+  if (!sqlText) return;
+  const hasZhylsRef = /ZHYYLS/i.test(sqlText);
+  if (!hasZhylsRef) return; // 不涉及 ZHYYLS 库，不用检查
+  for (const pattern of ZHYYLS_WRITE_PATTERNS) {
+    if (pattern.test(sqlText)) {
+      const msg = `[安全拦截] ZHYYLS 库只读，但检测到写操作关键字: ${sqlText.substring(0, 200)}`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+  }
+}
+
+// ========== 默认员工密码（从环境变量读取，安全性增强）==========
 const DEFAULT_EMPLOYEE_PASSWORD = Deno.env.get("DEFAULT_EMPLOYEE_PASSWORD") || "wszh123456";
+// ========== P0-1: 鉴权密钥 ==========
+const TASK_SECRET = Deno.env.get("TASK_SECRET") || "wszh_auto_sync_2026"; // 定时任务专用
+const ADMIN_USERS = ['admin', '15305479520']; // 管理员白名单（用于写操作鉴权）
 
 // ========== 特殊账号配置 ==========
 // 这些账号不受设备授权和单设备登录限制
@@ -132,6 +161,22 @@ const SYNC_RATE_WINDOW_MS = 60000;   // 1 分钟窗口
 const SYNC_RATE_MAX_ALLOW = 5;        // 最多 5 次
 
 
+// ========== P0-2: SQL 查询安全代理（2026-11-07 新增）==========
+// 代理 ConnectionPool.request()，让所有 .query() 自动过 assertZhyylsReadOnly
+function createSafePool(pool: sql.ConnectionPool): sql.ConnectionPool {
+  const origRequest = pool.request.bind(pool);
+  (pool as any).request = function (...args: any[]) {
+    const req = origRequest(...args);
+    const origQuery = (req as any).query.bind(req);
+    (req as any).query = function (sqlText: string, ...rest: any[]) {
+      assertZhyylsReadOnly(sqlText);
+      return origQuery(sqlText, ...rest);
+    };
+    return req;
+  };
+  return pool;
+}
+
 // 获取连接池（带缓存）
 async function getPool(dbName: string = SQL_SERVER_DB): Promise<sql.ConnectionPool> {
   const cacheKey = dbName;
@@ -154,7 +199,7 @@ async function getPool(dbName: string = SQL_SERVER_DB): Promise<sql.ConnectionPo
   if (existing && !existing.inUse && now - existing.lastUsed < POOL_TTL) {
     existing.inUse = true;
     existing.lastUsed = now;
-    return existing.pool;
+    return createSafePool(existing.pool); // P0-2: 返回前包一层安全代理
   }
   
   // 如果缓存已满，等待可用连接或创建新连接
@@ -178,7 +223,7 @@ async function getPool(dbName: string = SQL_SERVER_DB): Promise<sql.ConnectionPo
   let lastErr: unknown;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const pool = await sql.connect(config);
+      const pool = createSafePool(await sql.connect(config)); // P0-2: 创建后立即包安全代理
       poolCache.set(cacheKey, { pool, lastUsed: now, inUse: true });
       if (attempt > 1) console.log(`[getPool] 第${attempt}次重试连接成功 (${dbName})`);
       return pool;
@@ -408,6 +453,7 @@ async function preciseAutoDetectStatus(
       .from("reports")
       .select("product_code, store_name, demand_quantity, created_at, replenish_status, store_id")
       .eq("order_type", "缺货订购")
+      .gt("demand_quantity", 0)
       .not("product_code", "is", null)
       .order("created_at", { ascending: false })
       .limit(2000);
@@ -418,7 +464,7 @@ async function preciseAutoDetectStatus(
     for (const r of (allOrdered || [])) {
       if (!r.product_code || !r.store_name) continue;
       const status = r.replenish_status || '待处理';
-      if (status === '已完成' || status === '厂家断货' || status === '已关闭') continue;
+      if (status === '已完成' || status === '厂家断货' || status === '已关闭' || status === '已配送') continue;
       if (!sqlCodes.has(r.product_code)) {
         sqlItems.push({ 商品编码: r.product_code, 补货状态: status, 订货数量: r.demand_quantity || 0 });
         sqlCodes.add(r.product_code);
@@ -432,6 +478,7 @@ async function preciseAutoDetectStatus(
       .from("reports")
       .select("product_code, store_name, demand_quantity, created_at, replenish_status")
       .eq("order_type", "缺货订购")
+      .gt("demand_quantity", 0)
       .not("product_code", "is", null)
       .order("created_at", { ascending: false })
       .limit(1200);
@@ -443,7 +490,7 @@ async function preciseAutoDetectStatus(
         // 不过滤"已完成"状态：保留最新 demand 记录
         // 修复：之前过滤掉已完成的报告，导致 staging 用了老的需求（demand=1），SP 误判
         if (!storeDemandMap[r.product_code]) storeDemandMap[r.product_code] = {};
-        const sinceDate = r.created_at ? r.created_at.toString().substring(0, 10) : new Date().toISOString().substring(0, 10);
+        const sinceDate = toBjDate(r.created_at) || bjToday();
         if (!storeDemandMap[r.product_code][r.store_name]) {
           // 第一次见此 (product, store)：因为按 created_at desc 排序，这是最新一次
           // 修复：之前 demand 只用最新一份的需求，since 用最早的，导致 staging 和 UI 不一致
@@ -535,8 +582,8 @@ async function preciseAutoDetectStatus(
     }
 
     // 6. 调用 SP，全部计算在 RQZT 完成
-    const today = new Date().toISOString().substring(0, 10);
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().substring(0, 10);
+    const today = bjToday();
+    const thirtyDaysAgo = bjDaysAgo(30);
     const req = pool.request();
     req.input("StartDate", sql.VarChar(10), thirtyDaysAgo);
     req.input("EndDate", sql.VarChar(10), today);
@@ -783,21 +830,29 @@ const STORE_NAME_TO_ID_V2: Record<string, string> = {
   '14第十四药店': 'wszhyy14', '16凤凰山药店': 'wszhyy16', '17益丰店': 'wszhyy17', '21富源店': 'wszhyy21',
 };
 
-// 查单商品采购入库累计（BillType=34，入库到仓库 krec='3'，锚点之后）
-async function queryPurchaseQty(pool: sql.ConnectionPool, code: string, anchor: string): Promise<number> {
+// 返回某商品所有采购入库明细（BillType=34, InKRec='3'），按 BillDate 升序
+// 用于逐笔消耗：每条 report 用自己的上报日做锚点，只消耗锚点之后未被前序消耗的入库
+async function queryPurchaseDetails(
+  pool: sql.ConnectionPool,
+  code: string
+): Promise<{ date: string; qty: number }[]> {
   const req = pool.request();
   req.input("code", sql.NVarChar(50), code);
-  req.input("anchor", sql.VarChar(10), (anchor || STATUS_MIGRATION_EPOCH).substring(0, 10));
   const res = await req.query(`
-    SELECT ISNULL(SUM(ABS(vs.Qty)), 0) as purchase_qty
+    SELECT CONVERT(VARCHAR(10), vs.BillDate, 120) as [date],
+           ISNULL(ABS(vs.Qty), 0) as qty
     FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
     JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
     WHERE v.usercode = @code
       AND vs.BillType = 34
       AND vs.InKRec = '3'
-      AND vs.BillDate > @anchor
+      AND vs.BillDate >= '2025-01-01'
+    ORDER BY vs.BillDate ASC
   `);
-  return Number(res.recordset?.[0]?.purchase_qty || 0);
+  return (res.recordset || []).map((r: any) => ({
+    date: String(r.date || ''),
+    qty: Number(r.qty || 0)
+  })).filter(r => r.qty > 0 && r.date);
 }
 
 async function preciseAutoDetectStatusV2(
@@ -805,124 +860,129 @@ async function preciseAutoDetectStatusV2(
   supabaseClient: any
 ): Promise<{ detected: number; details: string[]; completedCodes: string[]; completedCount: number }> {
   const details: string[] = [];
+  const now = new Date().toISOString();
   try {
-    // 1. 获取所有未完成（非「已完成/厂家断货/已关闭」）的缺货订购上报
-    //    过滤必须下推到服务端（PostgREST 单次最多返回 1000 行，客户端过滤会截掉老记录）
-    const { data: allOrdered } = await supabaseClient
-      .from("reports")
-      .select("id, product_code, store_id, store_name, demand_quantity, created_at, replenish_status, status_changed_at")
-      .eq("order_type", "缺货订购")
-      .not("product_code", "is", null)
-      .neq("replenish_status", "已完成")
-      .neq("replenish_status", "厂家断货")
-      .neq("replenish_status", "已关闭")
-      .order("created_at", { ascending: false })
-      .limit(2000);
+    // ====== Step 1: 分页拉全量未完成 reports（和 scheduled-task 完全一致的分页写法）======
+    let allItems: any[] = [];
+    let from = 0;
+    const PAGE_SIZE = 1000;
+    while (true) {
+      const { data: page, error } = await supabaseClient
+        .from("reports")
+        .select("id, product_code, store_id, store_name, demand_quantity, created_at, replenish_status, status_changed_at")
+        .eq("order_type", "缺货订购")
+        .not("product_code", "is", null)
+        .gt("demand_quantity", 0)
+        .neq("replenish_status", "已完成")
+        .neq("replenish_status", "厂家断货")
+        .neq("replenish_status", "已关闭")
+        .neq("replenish_status", "已配送")  // ★ 已配送是终态，绝对不能被 FIFO 重判覆盖！
+        .order("created_at", { ascending: false })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) { console.warn('[preciseAutoDetectV2] 分页查询失败:', error.message); break; }
+      if (!page || page.length === 0) break;
+      allItems = allItems.concat(page);
+      if (page.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
+    }
+    details.push(`未完成缺货: ${allItems.length} 条`);
 
-    const activeItems = (allOrdered || []).filter((r: any) => {
-      const s = r.replenish_status || '待处理';
-      return s !== '已完成' && s !== '厂家断货' && s !== '已关闭';
-    });
-    const activeCodes = [...new Set(activeItems.map((r: any) => r.product_code).filter(Boolean))];
+    const activeCodes = [...new Set(allItems.map((r: any) => r.product_code).filter(Boolean))];
     details.push(`待检测商品: ${activeCodes.length} 个`);
     if (activeCodes.length === 0) {
       return { detected: 0, details, completedCodes: [], completedCount: 0 };
     }
 
-    // 2. 读取各商品完成周期锚点
-    const completionMap: Record<string, string> = {};
-    for (let i = 0; i < activeCodes.length; i += 200) {
-      const batch = activeCodes.slice(i, i + 200);
-      const { data: compRows } = await supabaseClient
-        .from("product_completion")
-        .select("product_code, last_completed_at")
-        .in("product_code", batch);
-      (compRows || []).forEach((c: any) => {
-        if (c.last_completed_at) completionMap[c.product_code] = c.last_completed_at;
-      });
-    }
-
-    // 3. 构建缺货汇总：累计所有未完成上报的需求（含迁移前存量老记录）
-    //    采购锚点：优先完成周期锚点；无完成记录用最早未完成上报日
-    const demandByCode: Record<string, number> = {};
-    const earliestActiveAt: Record<string, string> = {};
-    for (const r of activeItems) {
-      const code = r.product_code;
-      if (!code) continue;
-      demandByCode[code] = (demandByCode[code] || 0) + (Number(r.demand_quantity) || 0);
-      if (r.created_at) {
-        const c = new Date(r.created_at).toISOString();
-        if (!earliestActiveAt[code] || c < earliestActiveAt[code]) earliestActiveAt[code] = c;
+    // ====== Step 2: 批量查全部商品的采购入库明细（一次性 SQL，和 scheduled-task 完全一致）======
+    const codesList = activeCodes.map(c => `N'${c.replace(/'/g, "''")}'`).join(',');
+    let purchaseByCode: Record<string, Array<{ date: string; qty: number }>> = {};
+    try {
+      const purchaseRes = await pool.request().query(`
+        SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+        FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+        JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+        WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+      `);
+      for (const row of purchaseRes.recordset) {
+        const r = row as any;
+        if (!purchaseByCode[r.usercode]) purchaseByCode[r.usercode] = [];
+        purchaseByCode[r.usercode].push({ date: r.BillDate, qty: Number(r.qty || 0) });
       }
+    } catch (e: any) {
+      console.error('[preciseAutoDetectV2] 批量采购入库查询失败:', e?.message || e);
+      details.push('⚠ SQL异常跳过全部判定');
+      return { detected: 0, details, completedCodes: [], completedCount: 0 };
     }
 
-    // 4. 查询采购入库累计（分批并发，避免逐个串行超时）
-    const purchaseByCode: Record<string, number> = {};
-    const CONCURRENCY = 5;
-    for (let i = 0; i < activeCodes.length; i += CONCURRENCY) {
-      const batch = activeCodes.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map(async (code) => {
-        try {
-          purchaseByCode[code] = await queryPurchaseQty(pool, code, completionMap[code] || earliestActiveAt[code] || STATUS_MIGRATION_EPOCH);
-        } catch (e) {
-          purchaseByCode[code] = 0;
-        }
-      }));
-    }
-
-    // 5. 判定：采购入库累计 ≥ 缺货汇总 → 已完成（商品级）
-    const completedCodes: string[] = [];
+    // ====== Step 3: 调用共享 runFIFO（和 scheduled-task 完全一致的核心算法）======
+    // 共享模块：../_shared/fifo.ts —— 两边都调它，保证判定结果一致
+    // 锚点规则：商品级 earliestTs → 北京时间日期严格门槛
+    const reportsForRunFIFO = allItems.map((r: any) => ({
+      id: r.id, product_code: r.product_code,
+      demand_quantity: Number(r.demand_quantity) || 0, created_at: r.created_at
+    }));
+    const fifoRes = runFIFO(reportsForRunFIFO, purchaseByCode); // 默认 sameDayCounts=true（2026-11-08 放开锚点）
+    const toCompleteIds = fifoRes.toCompleteIds;
+    const purchaseEnoughMap = fifoRes.purchaseEnoughMap;
+    details.push(...fifoRes.details);
     let completedCount = 0;
-    const now = new Date().toISOString();
-    for (const code of activeCodes) {
-      const demand = demandByCode[code] || 0;
-      const purchase = purchaseByCode[code] || 0;
-      if (demand > 0 && purchase >= demand) {
-        completedCodes.push(code);
-        try {
+
+    details.push(`FIFO 采购入库扣减: ${toCompleteIds.length} 条 report 有机会被自动完成`);
+
+    // ====== Step 4: 批量 UPDATE（分批 500，和 scheduled-task 一致）======
+    // newlyCompletedCodes = 被 runFIFO 判定为已完成的 report 对应的商品集合
+    // 不同 report 可能 remark 不同（含/不含"含当天入库"），按 remark 分组后各自 batch update
+    const newlyCompletedCodes = new Set<string>();
+    const remarkMap = fifoRes.remarkMap;
+    if (toCompleteIds.length > 0) {
+      for (const id of toCompleteIds) {
+        const r = allItems.find(x => x.id === id);
+        if (r) newlyCompletedCodes.add(r.product_code);
+      }
+      // 按 remark 分组
+      const idsByRemark: Record<string, string[]> = {};
+      for (const id of toCompleteIds) {
+        const rm = remarkMap[id] || '自动判定：仓库采购入库满足（FIFO 先上报先满足）';
+        if (!idsByRemark[rm]) idsByRemark[rm] = [];
+        idsByRemark[rm].push(id);
+      }
+      for (const [remark, ids] of Object.entries(idsByRemark)) {
+        for (let i = 0; i < ids.length; i += 500) {
+          const batch = ids.slice(i, i + 500);
           const { error: updErr } = await supabaseClient.from("reports").update({
             replenish_status: '已完成',
-            status_remark: '自动',
+            status_remark: remark,
             status_changed_at: now,
             status_changed_by: '系统自动',
             settled_at: now
-          })
-            .eq("product_code", code)
-            .eq("order_type", "缺货订购")
-            .neq("replenish_status", "已完成");
-          if (!updErr) {
-            await supabaseClient.from("product_completion").upsert({
-              product_code: code,
-              last_completed_at: now,
-              updated_at: now
-            }, { onConflict: 'product_code' });
-            // 新周期重置通知去重：清空该商品 notified_at，允许下个周期再次通知
-            try {
-              await supabaseClient.from("store_notifications").update({ notified_at: null })
-                .eq("product_code", code);
-            } catch (_) { /* 清空通知去重失败不阻断 */ }
-            completedCount++;
-          }
-        } catch (e) {
-          console.warn(`[preciseAutoDetectV2] 商品 ${code} 标记完成失败:`, e);
+          }).in("id", batch).neq("replenish_status", "已完成").neq("replenish_status", "已配送");
+          if (!updErr) completedCount += batch.length;
         }
       }
+      // 更新 product_completion + 清通知
+      for (const code of newlyCompletedCodes) {
+        try {
+          await supabaseClient.from("product_completion").upsert({
+            product_code: code, last_completed_at: now, fail_count: 0, updated_at: now
+          }, { onConflict: 'product_code' });
+        } catch (_) {}
+        try { await supabaseClient.from("store_notifications").update({ notified_at: null }).eq("product_code", code); } catch (_) {}
+      }
     }
-    details.push(`完成判定: ${completedCount} 个商品（采购入库 ≥ 缺货汇总）`);
 
-    // 6. 手工状态超时回退：已订购/待付款 超过 30 天且采购仍不够 → 待处理
+    details.push(`FIFO 扣减完成: ${completedCount} 条 report`);
+
+    // ====== Step 5: 30 天超时回退（采购已够则不回退的保护直接来自 fifoRes.purchaseEnoughMap）======
     const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
     let revertedCount = 0;
     const nowTs = Date.now();
-    for (const r of activeItems) {
+    for (const r of allItems) {
       const s = r.replenish_status;
       if (s !== '已订购' && s !== '待付款') continue;
       const changedAt = r.status_changed_at ? new Date(r.status_changed_at).getTime() : 0;
       if (!changedAt || (nowTs - changedAt) < THIRTY_DAYS_MS) continue;
-      const code = r.product_code;
-      const demand = demandByCode[code] || 0;
-      const purchase = purchaseByCode[code] || 0;
-      if (purchase >= demand) continue; // 采购已够，交给完成判定升级
+      // 采购已够就不回退（共享 runFIFO 返回的 purchaseEnoughMap 已用相同锚点规则计算）
+      if (purchaseEnoughMap[r.product_code]) continue;
       try {
         const { error: revErr } = await supabaseClient.from("reports").update({
           replenish_status: '待处理',
@@ -934,10 +994,10 @@ async function preciseAutoDetectStatusV2(
       } catch (e) { /* 回退失败不阻断 */ }
     }
     if (revertedCount > 0) {
-      details.push(`超时回退: ${revertedCount} 条已订购/待付款(30天未到货) → 待处理`);
+      details.push(`超时回退: ${revertedCount} 条(30天未到货) → 待处理`);
     }
 
-    return { detected: completedCount, details, completedCodes, completedCount };
+    return { detected: completedCount, details, completedCodes: [...newlyCompletedCodes], completedCount };
   } catch (err) {
     console.error("[preciseAutoDetectV2] 错误:", err);
     return { detected: 0, details: [String(err)], completedCodes: [], completedCount: 0 };
@@ -996,8 +1056,8 @@ async function queryInventoryMaps(
 
   // 在途（实时：Gp_SendDoing 存储过程，一次返回全部在途记录）
   try {
-    const d30 = new Date(Date.now() - 30 * 86400000).toISOString().substring(0, 10);
-    const today = new Date().toISOString().substring(0, 10);
+    const d30 = bjDaysAgo(30);
+    const today = bjToday();
     const gReq = pool.request();
     gReq.input('sd', sql.VarChar(10), d30);
     gReq.input('ed', sql.VarChar(10), today);
@@ -1083,11 +1143,14 @@ async function queryDeliveredMap(
 }
 
 // 允许的来源域名列表（安全增强）
+// v442: 加 http://127.0.0.1 支持 Electron 本地静态加载版
 const ALLOWED_ORIGINS = [
   "https://wszhyy.pages.dev",   // Cloudflare Pages 正式环境
   "https://wslzhyy.pages.dev",  // Cloudflare Pages 备用域名
   "http://localhost:8780",       // 本地开发环境
   "http://localhost:3000",        // 本地开发环境
+  "http://localhost:5173",        // Vite 默认端口
+  "null",                         // file:// 协议 Origin 为 null
 ];
 
 // 门店名称 → ZHYYLS krec 映射
@@ -1120,10 +1183,12 @@ const USER_STORE_MAP: Record<string, string> = {
 
 function getCorsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("Origin") || "";
-  // 允许 *.wszhyy.pages.dev 所有部署子域名 + localhost
+  // 允许 *.wszhyy.pages.dev 所有部署子域名 + localhost + 127.0.0.1 (Electron 本地版) + null (file:// 协议)
   const isAllowed = ALLOWED_ORIGINS.includes(origin) ||
                     /^https:\/\/[\w-]+\.wszhyy\.pages\.dev$/.test(origin) ||
-                    origin.startsWith("http://localhost");
+                    origin.startsWith("http://localhost") ||
+                    origin.startsWith("http://127.0.0.1") ||
+                    origin.startsWith("http://0.0.0.0");
   const allowedOrigin = isAllowed ? origin : ALLOWED_ORIGINS[0];
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
@@ -1141,6 +1206,153 @@ function validateInput(input: any, fieldName: string, maxLength: number = 100): 
   }
   // 特殊字符转义
   return str.replace(/[<>'"]/g, '');
+}
+
+// ========== P0-3: 时区统一 — 北京时间口径（2026-11-07 新增）==========
+// Supabase reports.created_at 存 UTC ISO 8601；SQL Server ZHYYLS.BillDate 是北京时间
+// 所有业务日期判定（锚点、since、30天窗口、今天）都必须用北京时间
+function toBjDate(utcInput: string | Date | undefined | null): string {
+  if (!utcInput) return '';
+  const d = typeof utcInput === 'string' ? new Date(utcInput) : utcInput;
+  if (isNaN(d.getTime())) return '';
+  const bjMs = d.getTime() + 8 * 3600000; // UTC → 北京
+  return new Date(bjMs).toISOString().substring(0, 10);
+}
+function bjToday(): string { return toBjDate(new Date()); }
+function bjDaysAgo(n: number): string { return toBjDate(new Date(Date.now() - n * 86400000)); }
+
+// ========== FIFO 锚点门槛判定（唯一一处，可配置 sameDayCounts）==========
+// 采购入库 BillDate（北京时间 YYYY-MM-DD）是否计入该商品 pending reports 的 FIFO 采购池
+// 参数：
+//   billDateBj     — 采购入库日期（北京时间 YYYY-MM-DD，SQL Server BillDate 直接用）
+//   anchorDateBj   — 锚点日期（北京时间 YYYY-MM-DD，来自 toBjDate(最早 pending report.created_at)）
+//   sameDayCounts  — true=当天入库算当天报的缺（宽松）；false=当天入库不算（严格）
+// 默认严格口径（sameDayCounts=false）：BillDate 必须严格晚于 anchorDateBj
+// 要放宽当天入库，只需全局改 sameDayCounts 默认值为 true，其余调用点无需动
+function isPurchaseEligible(
+  billDateBj: string,
+  anchorDateBj: string,
+  sameDayCounts: boolean = true   // 【2026-11-08 放开锚点】默认宽松：BillDate >= 锚点日期（当天入库算）
+): boolean {
+  if (!billDateBj || !anchorDateBj) return false;
+  if (sameDayCounts) {
+    return billDateBj >= anchorDateBj;   // 宽松：日期相等也算
+  } else {
+    return billDateBj > anchorDateBj;    // 严格：日期必须严格晚于
+  }
+}
+
+// ========== 内联 runFIFO（放开锚点后默认宽松口径，与 scheduled-task 共享逻辑）==========
+// 2026-11-08 改版：采购池按"历史入库/当天入库"分池子，FIFO 先扣历史再扣当天，
+// 每条被完成的 report 在 remarkMap 里带对应 remark（含/不含"含当天入库"）
+function runFIFO(
+  pendingReports: any[],
+  purchaseByCode: Record<string, any[]>,
+  sameDayCounts: boolean = true   // 默认宽松
+): {
+  toCompleteIds: string[];
+  details: string[];
+  purchaseEnoughMap: Record<string, boolean>;
+  skippedNoEligible: number;
+  remarkMap: Record<string, string>;   // 新增：reportId -> 该条的 status_remark
+} {
+  const details: string[] = [];
+  const toCompleteIds: string[] = [];
+  const remarkMap: Record<string, string> = {};
+  const purchaseEnoughMap: Record<string, boolean> = {};
+  let skippedNoEligible = 0;
+
+  const itemsByCode: Record<string, any[]> = {};
+  for (const r of pendingReports) {
+    const code = r.product_code;
+    if (!code) continue;
+    if (!itemsByCode[code]) itemsByCode[code] = [];
+    itemsByCode[code].push(r);
+  }
+  for (const code of Object.keys(itemsByCode)) {
+    itemsByCode[code].sort((a, b) =>
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+  }
+
+  const activeCodes = Object.keys(itemsByCode);
+  details.push(`待检测商品: ${activeCodes.length} 个`);
+
+  for (const code of activeCodes) {
+    const myReports = itemsByCode[code];
+    if (myReports.length === 0) continue;
+
+    const purchaseRows = purchaseByCode[code] || [];
+    if (purchaseRows.length === 0) {
+      skippedNoEligible += myReports.length;
+      purchaseEnoughMap[code] = false;
+      continue;
+    }
+
+    // 【2026-11-09 修复】每条 report 用自己的 created_at 当 anchor
+    const poolEntries = purchaseRows
+      .map(p => ({ bill_date_bj: toBjDate(p.date), orig_qty: Number(p.qty || 0), remain: Number(p.qty || 0) }))
+      .sort((a, b) => a.bill_date_bj.localeCompare(b.bill_date_bj));
+
+    let passed = 0, demandSum = 0;
+    let usedSame = false;
+    for (const r of myReports) {
+      const demand = Number(r.demand_quantity) || 0;
+      if (demand <= 0) continue;
+      demandSum += demand;
+      const myAnchor = toBjDate(r.created_at);
+
+      let eligibleRemain = 0;
+      for (const pe of poolEntries) {
+        if (isPurchaseEligible(pe.bill_date_bj, myAnchor, sameDayCounts)) eligibleRemain += pe.remain;
+      }
+
+      if (eligibleRemain >= demand) {
+        // 判断是否吃到了"当天入库"（BillDate == myAnchor）
+        let need = demand;
+        let ateSameDay = false;
+        for (const pe of poolEntries) {
+          if (need <= 0) break;
+          if (!isPurchaseEligible(pe.bill_date_bj, myAnchor, sameDayCounts)) continue;
+          if (pe.bill_date_bj === myAnchor) ateSameDay = true;
+          const take = Math.min(pe.remain, need);
+          pe.remain -= take;
+          need -= take;
+        }
+        toCompleteIds.push(r.id);
+        remarkMap[r.id] = ateSameDay
+          ? '自动判定：仓库采购入库满足（FIFO 先上报先满足，含当天入库）'
+          : '自动判定：仓库采购入库满足（FIFO 先上报先满足）';
+        if (ateSameDay) usedSame = true;
+        passed++;
+      } else break;
+    }
+
+    const latestAnchorBj = toBjDate(myReports[myReports.length - 1].created_at);
+    let latestAnchorEligible = 0;
+    for (const pe of poolEntries) {
+      if (isPurchaseEligible(pe.bill_date_bj, latestAnchorBj, sameDayCounts)) latestAnchorEligible += pe.orig_qty;
+    }
+    purchaseEnoughMap[code] = latestAnchorEligible >= demandSum;
+
+    if (passed > 0) {
+      let latestRemainAfter = 0;
+      for (const pe of poolEntries) {
+        if (isPurchaseEligible(pe.bill_date_bj, latestAnchorBj, sameDayCounts)) latestRemainAfter += pe.remain;
+      }
+      const tag = usedSame ? ' ⚠含当天入库' : '';
+      details.push(
+        `  ${code}: ${passed}/${myReports.length} 完成（最新anchor后采购池剩 ${latestRemainAfter}, 总需求 ${demandSum}）${tag}`
+      );
+    }
+  }
+
+  details.push(`FIFO 完成判定: ${toCompleteIds.length} 条 report`);
+  if (skippedNoEligible > 0) {
+    details.push(`无可用采购跳过: ${skippedNoEligible} 条`);
+  }
+
+  return { toCompleteIds, details, purchaseEnoughMap, skippedNoEligible, remarkMap };
 }
 
 // 格式化日期（用于提示文案）
@@ -1173,6 +1385,82 @@ serve(async (req) => {
       });
     }
     const { action, params } = reqBody;
+
+    // ========== P0-1: Action 级别鉴权（2026-11-07 新增）==========
+    // 写操作 action 必须满足其一：x-task-secret 正确（定时任务）/ operator 在 admin_users 表且角色为 admin
+    const ADMIN_WRITABLE_ACTIONS = new Set([
+      'manual_update_status', 'batch_update_status', 'recheck_auto_completed',
+      'rebuild_feedback_from_supabase', 'apply_status_sync', 'revert_false_completed',
+      'fix_zero_order_qty', 'second_check', 'sync_with_auto_status', 'sync_integration',
+      'sync_realtime_only', 'sync_cache', 'sync_inventory_full', 'notify_refresh',
+      'delete_new_product', 'set_actual_order_qty', 'mark_store_completed',
+      'restore_reports', 'backfill_status_time', 'sync_product_cache',
+      'sync_inventory_incremental', 'auto_detect_status', 'sync_integration',
+      'check_single_product',
+      'batch_authorize', 'authorize_device', 'revoke_device', 'clear_all_device_auth',
+      'approve_report', 'unbind_device', 'add_employee', 'toggle_employee',
+      'update_employee_password', 'reset_employee_password', 'add_admin_user',
+      'update_admin_user', 'toggle_admin_user', 'delete_admin_user',
+      'log_admin_action'
+    ]);
+    if (ADMIN_WRITABLE_ACTIONS.has(action)) {
+      // 方式 1: 定时任务专用密钥（x-task-secret header）
+      const taskSecret = req.headers.get("x-task-secret") || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+      const bearerAuth = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+      if (taskSecret === TASK_SECRET || bearerAuth === TASK_SECRET) {
+        // ✅ 定时任务
+      } else {
+        // 方式 2: 管理员身份 — operator 查 admin_users 表（同时支持 username 和 user_id 两种标识）
+        const operator = params?.operator as string | undefined;
+        let authPassed = false;
+        if (operator) {
+          try {
+            // ★ 2026-11-10 修复：之前用 .or(`username.eq.${op},user_id.eq.${op}`)
+            // 对 username 不是字面 "admin" 的账号查不到（admin_users 表用的是 id 不是 user_id，
+            // 且 .or() 里一个条件不匹配会让 maybeSingle 返回空）
+            // 改成两次独立查询（先 username，再 id），谁先命中用谁
+            const op = String(operator).trim();
+            const q1 = await supabase
+              .from("admin_users")
+              .select("role")
+              .eq("is_active", true)
+              .eq("username", op)
+              .maybeSingle();
+            let role: string | null = null;
+            if (!q1.error && q1.data) role = (q1.data as any).role;
+            if (!role) {
+              const q2 = await supabase
+                .from("admin_users")
+                .select("role")
+                .eq("is_active", true)
+                .eq("id", op)
+                .maybeSingle();
+              if (!q2.error && q2.data) role = (q2.data as any).role;
+            }
+            if (role && ['admin', 'super_admin'].includes(role)) {
+              authPassed = true;
+            } else {
+              console.warn(`[P0鉴权] operator=${op} 查询到的 role=${role || 'null'}, is_active=true`);
+            }
+          } catch (e) {
+            console.warn(`[P0鉴权] admin_users 查询异常: ${String(e)}`);
+          }
+        }
+        if (!authPassed) {
+          // 兼容 admin 硬编码账号（store_login 里 username='admin' 直接返回 super_admin，不查 admin_users 表）
+          if (operator === 'admin') {
+            authPassed = true;
+          }
+        }
+        if (!authPassed) {
+          console.warn(`[P0鉴权拦截] action=${action}, operator=${operator || '(无)'}, header=task-secret=${taskSecret === TASK_SECRET}`);
+          return new Response(JSON.stringify({ success: false, error: "无权限执行此操作（需要管理员身份或定时任务密钥）", code: "FORBIDDEN" }), {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+    }
 
     let result;
     let lastRefreshTime: string | null = null;
@@ -1556,7 +1844,8 @@ serve(async (req) => {
         const pool = await getPool();
         try {
           const request = pool.request()
-            .input("商品编码", sql.NVarChar, product_code);
+            .input("商品编码", sql.NVarChar, product_code)
+            .input("门店名称", sql.NVarChar, store_name || "");
           
           const sqlQuery = `
             SELECT
@@ -1609,8 +1898,115 @@ serve(async (req) => {
             }));
           }
           
-          result = [records];
-          console.log(`✅ get_product_detail 从SQL Server返回商品 ${product_code}，共 ${records.length} 条门店记录（降级模式）`);
+          // === 方案 B：终极降级（SPFXB_Result 也查不到时，直接查原始采购入库表聚合）===
+          // 背景：SPFXB_Result 是定时同步的结果表，超过 ~365 天没采购的商品会消失
+          // 修复：直接查 vBuySendSumDetail（BillType=34, InKRec='3'），无时间窗口限制
+          let _fallbackError = null;  // 必须在 if 外声明，后面要用
+          if (records.length === 0) {
+            console.log(`⚠️ SPFXB_Result 无数据，终极降级到原始采购表（商品 ${product_code}）`);
+            try {
+              const normCode = (product_code || '').trim().replace(/^0+/, '');
+              const rawReq = pool.request()
+                .input("raw", sql.NVarChar, product_code)
+                .input("norm", sql.NVarChar, normCode);
+              // Step 1: 先查 Vptype 确认商品存在，拿到 rec（SQL 主键）
+              // 注意：Vptype 只有 rec + usercode 两列，商品名称等在 SPFXB_Result
+              const vptypeQuery = `
+                SELECT TOP 1 rec, LTRIM(RTRIM(ISNULL(usercode,''))) as real_code
+                FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) 
+                WHERE LTRIM(RTRIM(usercode)) = @raw
+                   OR LTRIM(RTRIM(usercode)) = @norm
+                   OR (LEN(usercode) = LEN(@norm) 
+                       AND RIGHT(usercode, LEN(@norm)) = @norm)   -- 处理前导零
+                ORDER BY CASE 
+                  WHEN LTRIM(RTRIM(usercode)) = @raw THEN 0 
+                  WHEN LTRIM(RTRIM(usercode)) = @norm THEN 1 
+                  WHEN RIGHT(usercode, LEN(@norm)) = @norm THEN 2 
+                  ELSE 3 
+                END;
+              `;
+              const vRes = await rawReq.query(vptypeQuery);
+              const vinfo = vRes.recordset?.[0];
+              console.log(`[fallback] Vptype lookup for ${product_code}: found=${!!vinfo}, rec=${vinfo?.rec}, code=${vinfo?.real_code}`);
+              
+              if (vinfo && vinfo.rec) {
+                // Step 2: 用 rec 查所有采购入库记录（BillType=34, InKRec='3'）
+                const rawReq2 = pool.request()
+                  .input("prec", sql.BigInt, vinfo.rec);
+                const aggQuery = `
+                  SELECT 
+                    ISNULL(SUM(ABS(vs.Qty)), 0) as total_purchased,
+                    MAX(vs.BillDate) as latest_purchase_date,
+                    COUNT(*) as total_rows
+                  FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+                  WHERE vs.PRec = @prec AND vs.BillType = 34 AND vs.InKRec = '3';
+                `;
+                const aggRes = await rawReq2.query(aggQuery);
+                const agg = aggRes.recordset?.[0];
+                console.log(`[fallback] Purchase agg prec=${vinfo.rec}: qty=${agg?.total_purchased}, date=${agg?.latest_purchase_date}, rows=${agg?.total_rows}`);
+                
+                if (agg && Number(agg.total_purchased) > 0) {
+                  const dcQty = Number(agg.total_purchased) || 0;
+                  const lastDate = agg.latest_purchase_date ? new Date(agg.latest_purchase_date).toISOString().slice(0, 10) : '未知';
+                  const realCode = vinfo.real_code || product_code;
+                  records = [{
+                    门店名称: store_name || "仓库库存池（降级查询）",
+                    商品编码: realCode,
+                    商品名称: vinfo.pname || "商品（原始表降级）",
+                    规格: vinfo.pspec || "-",
+                    生产企业: vinfo.pfactory || "-",
+                    库存数量: 0, 在途数量: 0, 门店库存汇总: 0,
+                    配送中心库存数量: dcQty,
+                    前30天销售数量: 0, 前90天销售数量: 0, 月均销售数量: 0,
+                    标准库存数量: 0, 门店计划: 0, 建议订货数量: 0,
+                    _source: 'fallback_raw',
+                    _fallback_reason: `商品已从采购库存池消失，但历史总采购 ${dcQty} 件（最近采购：${lastDate}）。允许上报需求，判定侧自动从原始表读取入库数据。`
+                  }];
+                  console.log(`✅ 终极降级成功：${product_code}→${realCode} 累计采购 ${dcQty}，最近 ${lastDate}`);
+                } else {
+                  // Step 3: 也没标准采购入库 → 看看这个商品到底有什么类型的流水
+                  const diagQuery = `
+                    SELECT TOP 10 vs.BillType, vs.InKRec, vs.OutKRec, vs.BillDate, ABS(vs.Qty) as qty
+                    FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+                    WHERE vs.PRec = @prec
+                    ORDER BY vs.BillDate DESC;
+                  `;
+                  const dReq = pool.request().input("prec", sql.BigInt, vinfo.rec);
+                  const diagRes = await dReq.query(diagQuery);
+                  const diagRows = diagRes.recordset || [];
+                  console.log(`⚠️ 商品 ${product_code} 存在于 Vptype（rec=${vinfo.rec}）但无标准采购入库。最近 10 条流水: ${JSON.stringify(diagRows)}`);
+                  // 仍构造一条降级记录，让门店能上报——判定侧的 FIFO 查的也是 BillType=34/InKRec='3'
+                  // 如果这个商品真没有任何标准采购入库记录，FIFO 也判不到——但这至少让门店能报上去
+                  records = [{
+                    门店名称: store_name || "仓库库存池（降级查询）",
+                    商品编码: vinfo.real_code || product_code,
+                    商品名称: vinfo.pname || "商品（原始表降级）",
+                    规格: vinfo.pspec || "-",
+                    生产企业: vinfo.pfactory || "-",
+                    库存数量: 0, 在途数量: 0, 门店库存汇总: 0,
+                    配送中心库存数量: 0,
+                    前30天销售数量: 0, 前90天销售数量: 0, 月均销售数量: 0,
+                    标准库存数量: 0, 门店计划: 0, 建议订货数量: 0,
+                    _source: 'fallback_raw',
+                    _fallback_reason: `商品在主表存在（编码 ${vinfo.real_code}），但近 N 年无标准采购入库记录。您仍可提交需求，仓库会人工跟进。`
+                  }];
+                  console.log(`✅ 终极降级（无标准采购）: ${product_code}→${vinfo.real_code}，允许上报`);
+                }
+              } else {
+                console.log(`❌ Vptype 里也找不到 ${product_code}（norm=${normCode}）——商品主表都不存在`);
+              }
+            } catch (rawErr) {
+              _fallbackError = String(rawErr?.message || rawErr);
+              console.error(`❌ 终极降级查询失败：`, rawErr);
+            }
+          }
+          
+          if (_fallbackError) {
+            result = [{ _debug: true, _fallback_error: _fallbackError, _hint: 'fallback_sql_failed' }];
+          } else {
+            result = [records];
+          }
+          console.log(`✅ get_product_detail 从SQL Server返回商品 ${product_code}，共 ${records.length} 条门店记录（降级模式）${_fallbackError ? ' [ERROR: ' + _fallbackError + ']' : ''}`);
         } finally {
           releasePool(pool);
         }
@@ -1643,25 +2039,31 @@ serve(async (req) => {
             planResult = planList.recordsets;
           }
 
-          // === 关键修复：用 Shortage_OrderFeedback 真实状态覆盖存储过程可能错误的自动判断 ===
-          // usp_GetPurchasePlanWithFeedback 有时会根据库存自行计算状态，
-          // 导致"只回填订货数量、无库存"时错误显示为"已到货"
+          // === [v3.20+ 加固] 补货状态从 Supabase reports 汇总，订货数量保留 SQL Server ===
+          // TODO: 排查 v368 部署后 503 问题后重新启用 Supabase 查询部分
+          // 暂时回退到 Shortage_OrderFeedback 同时覆盖补货状态和订货数量
           if (planResult && planResult[0] && Array.isArray(planResult[0]) && planResult[0].length > 0) {
-            const codes = planResult[0].map((r: any) => r.商品编码).filter(Boolean);
-            if (codes.length > 0) {
-              const codesStr = codes.map((c: string) => `'${c.replace(/'/g, "''")}'`).join(",");
-              const realStatusResult = await pool.request()
-                .query(`SELECT 商品编码, 补货状态 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 IN (${codesStr})`);
-              const realStatusMap: Record<string, string> = {};
-              if (realStatusResult.recordset) {
-                realStatusResult.recordset.forEach((row: any) => {
-                  realStatusMap[row.商品编码] = row.补货状态;
+            const planCodes = planResult[0].map((r: any) => r.商品编码).filter(Boolean);
+            if (planCodes.length > 0) {
+              const pCodesStr = planCodes.map((c: string) => `'${c.replace(/'/g, "''")}'`).join(",");
+              try {
+                const fbRes = await pool.request().query(
+                  `SELECT 商品编码, ISNULL(实际订货数量, 0) as 实际订货数量, 补货状态 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 IN (${pCodesStr})`
+                );
+                const statusMap: Record<string, string> = {};
+                const qtyMap: Record<string, number> = {};
+                (fbRes.recordset || []).forEach((row: any) => {
+                  statusMap[row.商品编码] = row.补货状态;
+                  qtyMap[row.商品编码] = Number(row.实际订货数量) || 0;
                 });
+                planResult[0] = planResult[0].map((r: any) => ({
+                  ...r,
+                  补货状态: statusMap[r.商品编码] || r.补货状态 || '待处理',
+                  实际订货数量: qtyMap[r.商品编码] || r.实际订货数量 || 0
+                }));
+              } catch (_e) {
+                // SQL Server 查询失败不阻断
               }
-              planResult[0] = planResult[0].map((r: any) => ({
-                ...r,
-                补货状态: realStatusMap[r.商品编码] || r.补货状态 || '待处理'
-              }));
             }
           }
 
@@ -2335,37 +2737,133 @@ serve(async (req) => {
         break;
       }
 
-      case "sync_with_auto_status": {
-        // 一键：商品缓存同步 + 自动检测状态
+      case "recheck_auto_completed": {
+        // 用新逐笔逻辑重新核查：只看 created_at >= 2026-10-01 且 status_changed_by='系统自动' 的已完成 report
+        // 新逻辑判定不满足的 → 回退为待处理
         const pool = await getPool();
         try {
-          // ① 先刷新 RQZT 缓存表（从 ZHYYLS 拉最新商品）再同步到 Supabase
-          let syncedProducts = 0;
-          try {
-            // 刷新 RQZT.ProductCache_RQZT（从 ZHYYLS.Vptype 获取 leveal=3/4 且有销售或有库存的商品）
-            await pool.request().execute("usp_Sync_ProductCache_RQZT");
-            const productsResult = await pool.request()
-              .query(`SELECT product_code, product_name, spec as product_spec, manufacturer, pinyin_code FROM dbo.ProductCache_RQZT WITH (NOLOCK) ORDER BY product_code`);
-            const productMap = new Map();
-            productsResult.recordset.forEach((p: any) => {
-              const pc = (p.product_code || '').trim();
-              if (pc && !productMap.has(pc)) {
-                productMap.set(pc, { product_code: pc, product_name: p.product_name || '', product_spec: p.product_spec || '', manufacturer: p.manufacturer || '', pinyin_code: (p.pinyin_code || '').trim().toLowerCase() });
+          // 1. 查出需要核查的已完成 report（10月后 + 系统自动标记）
+          const { data: autoDone, error: q1err } = await supabase
+            .from("reports")
+            .select("id, product_code, demand_quantity, created_at, replenish_status, status_remark")
+            .eq("order_type", "缺货订购")
+            .eq("replenish_status", "已完成")
+            .eq("status_changed_by", "系统自动")
+            .gte("created_at", "2026-10-01")
+            .order("created_at", { ascending: true });
+
+          if (q1err) { result = { success: false, error: String(q1err) }; break; }
+          const toRecheck = autoDone || [];
+          const targetCodes = [...new Set(toRecheck.map(r => r.product_code).filter(Boolean))];
+          result = { success: true, target_count: toRecheck.length, codes: targetCodes.length, details: [] };
+          if (targetCodes.length === 0) break;
+
+          // 2. 批量查这些商品的采购入库明细
+          const purchaseMap: Record<string, { date: string; qty: number; remaining: number }[]> = {};
+          const BATCH = 5;
+          for (let i = 0; i < targetCodes.length; i += BATCH) {
+            const batch = targetCodes.slice(i, i + BATCH);
+            await Promise.all(batch.map(async (code) => {
+              try {
+                const details = await queryPurchaseDetails(pool, code);
+                purchaseMap[code] = details.map(d => ({ ...d, remaining: d.qty }));
+              } catch (_) {
+                purchaseMap[code] = [];
               }
-            });
-            const productList = Array.from(productMap.values());
-            const batchSize = 200;
-            for (let i = 0; i < productList.length; i += batchSize) {
-              const batch = productList.slice(i, i + batchSize);
-              const { error: upsertErr } = await supabase.from("product_cache").upsert(batch, { onConflict: 'product_code' });
-              if (!upsertErr) syncedProducts += batch.length;
-            }
-            console.log(`[sync_with_auto_status] 商品缓存已同步 ${syncedProducts} 个`);
-          } catch (e) {
-            console.warn('[sync_with_auto_status] 商品缓存同步失败（不阻断后续）:', e);
+            }));
           }
 
-          // ② 完成判定（v2：采购入库累计 ≥ 缺货汇总，商品级，永不回退）
+          // 3. 对每个涉及商品，查出该商品所有活跃 report
+          const { data: allActive, error: q2err } = await supabase
+            .from("reports")
+            .select("id, product_code, demand_quantity, created_at, replenish_status, status_remark")
+            .eq("order_type", "缺货订购")
+            .in("product_code", targetCodes)
+            .in("replenish_status", ["已完成", "待处理", "已订购", "待付款"])
+            .order("created_at", { ascending: true });
+
+          if (q2err) { result = { success: false, error: String(q2err) }; break; }
+
+          // 4. 按商品分组 + created_at 升序（逐笔消耗）
+          const itemsByCode: Record<string, any[]> = {};
+          for (const r of (allActive || [])) {
+            const code = r.product_code;
+            if (!itemsByCode[code]) itemsByCode[code] = [];
+            itemsByCode[code].push(r);
+          }
+
+          // 5. 逐笔判定：新逐笔逻辑满足的保持已完成，不满足的改回待处理
+          const now = new Date().toISOString();
+          const toRevert: string[] = [];
+          const toKeep: string[] = [];
+          for (const code of targetCodes) {
+            const purchasePool = purchaseMap[code] || [];
+            const reports = itemsByCode[code] || [];
+            for (const report of reports) {
+              const anchorDate = toBjDate(report.created_at);
+              const shortage = Number(report.demand_quantity) || 0;
+              if (shortage <= 0) continue;
+
+              let consumed = 0;
+              for (const entry of purchasePool) {
+                if (entry.date <= anchorDate) continue;
+                if (entry.remaining <= 0) continue;
+                const take = Math.min(entry.remaining, shortage - consumed);
+                entry.remaining -= take;
+                consumed += take;
+                if (consumed >= shortage) break;
+              }
+
+              const isSatisfied = consumed >= shortage;
+              if (report.replenish_status === '已完成') {
+                if (isSatisfied) {
+                  toKeep.push(report.id);
+                } else {
+                  toRevert.push(report.id);
+                }
+              }
+            }
+          }
+
+          // 6. 执行回退
+          if (toRevert.length > 0) {
+            const BATCH_SIZE = 100;
+            let reverted = 0;
+            for (let i = 0; i < toRevert.length; i += BATCH_SIZE) {
+              const batch = toRevert.slice(i, i + BATCH_SIZE);
+              const { error: uerr } = await supabase
+                .from("reports")
+                .update({
+                  replenish_status: '待处理',
+                  status_remark: '旧版本误判回退',
+                  status_changed_at: now,
+                  status_changed_by: '系统自动'
+                })
+                .in("id", batch);
+              if (!uerr) reverted += batch.length;
+            }
+            result.reverted = reverted;
+          }
+          result.kept = toKeep.length;
+          result.details = [
+            `核查目标: ${toRecheck.length} 条已完成 report`,
+            `涉及商品: ${targetCodes.length} 个`,
+            `新逻辑保持: ${toKeep.length} 条`,
+            `新逻辑回退: ${toRevert.length} 条 → 待处理`
+          ];
+        } catch (e: any) {
+          result = { success: false, error: String(e), detail: e?.message };
+        } finally {
+          releasePool(pool);
+        }
+        break;
+      }
+
+      case "sync_with_auto_status": {
+        // 一键：只跑 FIFO 自动判定，不再刷商品缓存
+        // 商品缓存刷新改由 scheduled-task 每天 00:30 定时执行（usp_Sync_ProductCache_RQZT）
+        const pool = await getPool();
+        try {
           let autoDetectCount = 0;
           let completedPairCount = 0;
           let autoDetectDetails: string[] = [];
@@ -2383,11 +2881,110 @@ serve(async (req) => {
             autoDetectDetails = [String(detectErr)];
           }
 
-          result = { success: true, message: `完成判定：${completedPairCount} 个商品已自动完成`, synced_products: syncedProducts, auto_detected: autoDetectCount, detect_details: autoDetectDetails };
+          result = { success: true, message: `完成判定：${completedPairCount} 个商品已自动完成（配送口径升级改由「配送待办」按钮单独触发）`, synced_products: 0, auto_detected: autoDetectCount, detect_details: autoDetectDetails };
+
+          // ★ 已移除自调用 upgrade_to_delivered：一键同步只做入库判定，
+          // 配送口径升级（已完成→已配送）改由用户点「配送待办」按钮单独触发，
+          // 避免两次重活叠加导致 WORKER_LIMIT 超限（1078 条全量拉 + 每批 400 建临时表）
+          // 之前的设计：sync_with_auto_status → 自调用 upgrade_to_delivered（同步阻塞）
         } catch (e1) {
           throw e1;
         }
         releasePool(pool);
+        break;
+      }
+
+      // ========== 单商品立即判定（行级按钮触发）==========
+      // 只对指定商品跑 FIFO 判定，满足的改成已完成并写元数据
+      case "check_single_product": {
+        const { product_code, operator } = params;
+        if (!product_code) {
+          return new Response(JSON.stringify({ success: false, error: "product_code 必填" }), {
+            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        const pool = await getPool();
+        const now = new Date().toISOString();
+        const details: string[] = [];
+        try {
+          // ① 拉该商品所有非终态 pending reports
+          const { data: items, error: qErr } = await supabase
+            .from("reports")
+            .select("id, product_code, demand_quantity, created_at, replenish_status")
+            .eq("product_code", product_code)
+            .eq("order_type", "缺货订购")
+            .gt("demand_quantity", 0)
+            .neq("replenish_status", "已完成")
+            .neq("replenish_status", "厂家断货")
+            .neq("replenish_status", "已关闭")
+            .neq("replenish_status", "已配送")
+            .order("created_at", { ascending: true });
+          if (qErr) throw qErr;
+          if (!items || items.length === 0) {
+            result = { success: true, checked: 0, completed: 0, skipped: '无待处理上报', details };
+            break;
+          }
+          details.push(`待判定: ${items.length} 条 report`);
+
+          // ② 查该商品采购入库（和 preciseAutoDetectStatusV2 完全一致的 SQL）
+          const req = pool.request();
+          req.input("code", sql.NVarChar(50), product_code);
+          const pRes = await req.query(`
+            SELECT vs.BillDate, ABS(vs.Qty) as qty
+            FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+            JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+            WHERE v.usercode = @code AND vs.BillType = 34 AND vs.InKRec = '3'
+          `);
+          const purchaseRows = (pRes.recordset || []).map((r: any) => ({ date: r.BillDate, qty: Number(r.qty || 0) }));
+          details.push(`采购入库: ${purchaseRows.length} 条`);
+
+          // ③ FIFO 判定（直接调用共享 runFIFO，和 preciseAutoDetectStatusV2 / scheduled-task 完全一致）
+          const purchaseByCode = { [product_code]: purchaseRows };
+          const fifoRes = runFIFO(
+            items.map((r: any) => ({ id: r.id, product_code: r.product_code, demand_quantity: Number(r.demand_quantity) || 0, created_at: r.created_at })),
+            purchaseByCode
+          ); // 默认 sameDayCounts=true（2026-11-08 放开锚点）
+          const toCompleteIds = fifoRes.toCompleteIds;
+          details.push(...fifoRes.details);
+
+          // ④ 按 remark 分组批量 UPDATE（不同 report 可能含/不含"当天入库"）
+          let completed = 0;
+          if (toCompleteIds.length > 0) {
+            const remarkMap = fifoRes.remarkMap;
+            const idsByRemark: Record<string, string[]> = {};
+            for (const id of toCompleteIds) {
+              const base = remarkMap[id] || '自动判定：仓库采购入库满足（FIFO 先上报先满足）';
+              // 行级判定：额外加上"行级立即判定"后缀，和定时/一键同步区分
+              const rm = base.includes('含当天入库')
+                ? base.replace('先上报先满足）', '先上报先满足，行级立即判定）')
+                : base.replace('先上报先满足）', '先上报先满足，行级立即判定）');
+              if (!idsByRemark[rm]) idsByRemark[rm] = [];
+              idsByRemark[rm].push(id);
+            }
+            for (const [remark, ids] of Object.entries(idsByRemark)) {
+              const { error: updErr } = await supabase.from("reports").update({
+                replenish_status: '已完成',
+                status_remark: remark,
+                status_changed_at: now,
+                status_changed_by: operator || '系统自动',
+                settled_at: now
+              }).in("id", ids).neq("replenish_status", "已完成").neq("replenish_status", "已配送");
+              if (updErr) throw updErr;
+              completed += ids.length;
+            }
+            // 更新 product_completion
+            try { await supabase.from("product_completion").upsert({ product_code, last_completed_at: now, updated_at: now, fail_count: 0 }, { onConflict: 'product_code' }); } catch (_) {}
+            try { await supabase.from("store_notifications").update({ notified_at: null }).eq("product_code", product_code); } catch (_) {}
+          }
+          details.push(`判定完成: ${completed}/${items.length} 条 → 已完成，剩余 ${items.length - completed} 条`);
+
+          result = { success: true, checked: items.length, completed, remaining: items.length - completed, details, product_code };
+        } catch (e: any) {
+          console.error(`[check_single_product] ${product_code} 判定失败:`, e);
+          result = { success: false, error: e?.message || String(e), product_code };
+        } finally {
+          releasePool(pool);
+        }
         break;
       }
 
@@ -2400,9 +2997,9 @@ serve(async (req) => {
         try {
           const { data: activeReports } = await supabase
             .from("reports")
-            .select("product_code, store_id, store_name, demand_quantity")
+            .select("product_code, store_id, store_name, demand_quantity, replenish_status")
             .eq("order_type", "缺货订购")
-            .neq("replenish_status", "已完成")
+            .not("replenish_status", "in", "(已完成,已配送,厂家断货,已关闭)")
             .not("product_code", "is", null);
 
           if (!activeReports || activeReports.length === 0) {
@@ -2479,7 +3076,7 @@ serve(async (req) => {
           for (const r of completedReports) {
             const key = r.product_code + '||' + r.store_id;
             demandMap[key] = (demandMap[key] || 0) + (Number(r.demand_quantity) || 0);
-            const curSince = String(r.created_at || '').substring(0, 10);
+            const curSince = toBjDate(r.created_at);
             if (!keyInfo[key]) {
               keyInfo[key] = { product_code: r.product_code, store_id: r.store_id, store_name: r.store_name, product_name: r.product_name || '', product_spec: r.specification || '', manufacturer: r.manufacturer || '', since: curSince || '2020-01-01' };
             } else if (curSince && curSince < keyInfo[key].since) {
@@ -2725,7 +3322,7 @@ serve(async (req) => {
           const { data: needBackfill } = await supabase
             .from("reports")
             .select("product_code, store_id, replenish_status, status_remark")
-            .in("replenish_status", ["已完成", "厂家断货", "已到货"])
+            .in("replenish_status", ["已完成", "厂家断货", "已到货", "已配送"])
             .neq("status_remark", "手动")
             .eq("order_type", "缺货订购")
             .limit(1000);
@@ -2961,7 +3558,7 @@ serve(async (req) => {
               ISNULL(标准库存数量确认, 0) as standard_stock,
               ISNULL(门店计划, 0) as store_plan,
               LTRIM(RTRIM(ISNULL(标记, ''))) as flag,
-              LTRIM(RTRIM(ISNULL(分类组, ''))) as category,
+              CASE WHEN 标记 IN ('A','B','C','D','E') THEN 'A-E类' ELSE '其他类' END as category,
               GETDATE() as last_updated
             FROM dbo.SPFXB_Result WITH (NOLOCK)
             WHERE 商品编码 IS NOT NULL AND LTRIM(RTRIM(商品编码)) <> ''
@@ -2984,7 +3581,7 @@ serve(async (req) => {
                 ISNULL(标准库存数量确认, 0) as standard_stock,
                 ISNULL(门店计划, 0) as store_plan,
                 LTRIM(RTRIM(ISNULL(标记, ''))) as flag,
-                LTRIM(RTRIM(ISNULL(分类组, ''))) as category,
+                CASE WHEN 标记 IN ('A','B','C','D','E') THEN 'A-E类' ELSE '其他类' END as category,
                 GETDATE() as last_updated
               FROM dbo.SPFXB_Result WITH (NOLOCK)
               WHERE 商品编码 IS NOT NULL AND LTRIM(RTRIM(商品编码)) <> ''
@@ -3124,7 +3721,7 @@ serve(async (req) => {
               ISNULL(标准库存数量确认, 0) as standard_stock,
               ISNULL(门店计划, 0) as store_plan,
               LTRIM(RTRIM(ISNULL(标记, ''))) as flag,
-              LTRIM(RTRIM(ISNULL(分类组, ''))) as category,
+              CASE WHEN 标记 IN ('A','B','C','D','E') THEN 'A-E类' ELSE '其他类' END as category,
               GETDATE() as last_updated
             FROM dbo.SPFXB_Result WITH (NOLOCK)
             WHERE 商品编码 IS NOT NULL AND LTRIM(RTRIM(商品编码)) <> ''
@@ -3540,212 +4137,87 @@ serve(async (req) => {
           break;
         }
         
-        // 3. 非管理员账号：设备授权 + 设备数量限制
+        // ========== 15305479520 完整豁免：不查也不写设备绑定表 ==========
+        if (validUsername === '15305479520') {
+          console.log('[store_login] 15305479520 豁免账号，跳过所有设备校验');
+          // 直接组装 store 角色返回（USER_STORE_MAP → wszhyy02）
+          const exemptStoreId = USER_STORE_MAP['15305479520'] || 'wszhyy02';
+          result = {
+            user: {
+              id: userData.id,
+              username: validUsername,
+              role: 'store',
+              store_id: exemptStoreId,
+              store_name: STORE_NAME_MAP[exemptStoreId] || '02第二药店',
+              is_employee: false
+            },
+            session: signInData.session
+          };
+          break;
+        }
+
+        // ========== 普通门店账号：设备绑定四规则（回到 5.9 模式）==========
+        // 规则① 无任何绑定记录 → 自动绑定当前设备（is_authorized=true），放行
+        // 规则② 有绑定且 device_id 匹配 → 放行
+        // 规则③ 有绑定但 device_id 不匹配 → 拒绝
+        // 规则④ 例外账号（admin_users 管理员、15305479520、username='admin'）已在上方 break
         const validDeviceId = validateInput(device_id, "设备ID", 100);
         
-        // 检查是否是例外账号（不受设备限制）
-        const isExempt = isExemptAccount(validUsername);
+        console.log('[store_login] 普通门店账号设备校验:', validUsername, '设备:', validDeviceId);
         
-        // 3.1 设备绑定锁定检查（授权后锁定设备，换电脑必须管理员解绑）
-        if (!isExempt) {
-          // 查询该门店所有已授权设备（不管是否活跃，授权即锁定）
-          const { data: allAuthorized } = await adminClient
-            .from("store_authorized_devices")
-            .select("device_id")
-            .eq("username", validUsername)
-            .eq("is_authorized", true);
-          
-          const boundDevices = allAuthorized || [];
-          const isCurrentDeviceBound = boundDevices.some(d => d.device_id === validDeviceId);
-          
-          // 已有授权设备且当前设备不在其中 → 拒绝，必须管理员解绑
-          if (boundDevices.length > 0 && !isCurrentDeviceBound) {
-            console.log(`[store_login] ${validUsername} 已绑定 ${boundDevices.length} 台设备，当前设备不在列表中`);
-            return new Response(JSON.stringify({
-              success: false, 
-              error: "该账号已绑定其他设备，不允许登录。如需更换设备，请联系管理员解除原设备绑定。"
-            }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-          }
-        }
-        
-        // 3.2 查当前设备的记录（优先匹配当前用户自己的记录）
-        let { data: existingDevices } = await adminClient
+        // 查询该门店所有已授权且活跃的设备绑定
+        const { data: boundRecords, error: boundErr } = await adminClient
           .from("store_authorized_devices")
-          .select("id, is_authorized, username, is_active")
-          .eq("device_id", validDeviceId)
+          .select("id, device_id, is_authorized, is_active")
           .eq("username", validUsername)
-          .order("id", { ascending: false })
-          .limit(1);
+          .eq("is_authorized", true)
+          .eq("is_active", true);
         
-        // 如果没找到当前用户的记录，再查该设备的通用记录
-        if (!existingDevices || existingDevices.length === 0) {
-          const { data: anyDevices } = await adminClient
-            .from("store_authorized_devices")
-            .select("id, is_authorized, username, is_active")
-            .eq("device_id", validDeviceId)
-            .order("id", { ascending: false })
-            .limit(1);
-          existingDevices = anyDevices;
+        if (boundErr) {
+          console.error('[store_login] 查询绑定记录失败:', boundErr);
+          return new Response(JSON.stringify({
+            success: false, error: "设备绑定检查失败，请稍后重试"
+          }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
         
-        console.log("[store_login] 设备记录:", JSON.stringify(existingDevices));
-
-        if (existingDevices && existingDevices.length > 0) {
-          const device = existingDevices[0];
-          
-          // 如果是当前用户自己的记录（username匹配）
-          if (device.username === validUsername) {
-            // 自己退出再登录：直接激活
-            await adminClient
-              .from("store_authorized_devices")
-              .update({ is_active: true, last_login_at: new Date().toISOString() })
-              .eq("id", device.id);
-            // 跳过授权检查，直接返回成功
-          } else if (!isExempt && !device.is_authorized) {
-            // 设备未授权（别人的记录），允许申请
-            await adminClient
-              .from("store_authorized_devices")
-              .update({ 
-                is_active: true,
-                last_login_at: new Date().toISOString(),
-                username: validUsername
-              })
-              .eq("id", device.id);
+        const bound = boundRecords || [];
+        const currentMatch = bound.find(d => d.device_id === validDeviceId);
+        
+        if (bound.length === 0) {
+          // 规则① 无绑定记录 → 自动绑
+          console.log('[store_login] 无绑定记录，自动绑定设备', validDeviceId);
+          const { data: autoBound, error: autoErr } = await adminClient
+            .from("store_authorized_devices")
+            .insert([{
+              device_id: validDeviceId,
+              username: validUsername,
+              is_authorized: true,
+              is_active: true,
+              authorized_at: new Date().toISOString(),
+              last_login_at: new Date().toISOString()
+            }])
+            .select();
+          if (autoErr) {
+            console.error('[store_login] 自动绑定失败:', autoErr);
             return new Response(JSON.stringify({
-              success: false, error: "该设备未授权，请联系管理员授权后使用",
-              pending_device_id: validDeviceId,
-              pending_username: validUsername
-            }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-          } else if (device.username !== validUsername && device.is_authorized) {
-            console.log("[store_login] 设备绑定账号不匹配:", device.username, "vs", validUsername);
-            
-            // 为当前账号创建一条待授权记录，以便管理员能看到并处理
-            try {
-              const { data: existingPending } = await adminClient
-                .from("store_authorized_devices")
-                .select("id")
-                .eq("device_id", validDeviceId)
-                .eq("username", validUsername)
-                .eq("is_active", true)
-                .limit(1);
-              
-              if (!existingPending || existingPending.length === 0) {
-                await adminClient
-                  .from("store_authorized_devices")
-                  .insert([{
-                    device_id: validDeviceId,
-                    username: validUsername,
-                    is_authorized: false,
-                    is_active: true,
-                    last_login_at: new Date().toISOString(),
-                    authorized_at: null
-                  }]);
-                console.log(`[store_login] 已为账号 ${validUsername} 创建待授权记录（设备被 ${device.username} 绑定）`);
-              }
-            } catch (e) {
-              console.warn("[store_login] 创建待授权记录失败:", e);
-            }
-            
-            return new Response(JSON.stringify({
-              success: false, 
-              error: "该设备已绑定账号「" + device.username + "」，已自动提交重新授权申请，请等待管理员处理",
-              pending_device_id: validDeviceId,
-              pending_username: validUsername,
-              bound_to: device.username
-            }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+              success: false, error: "设备绑定失败: " + autoErr.message
+            }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
-          
-          // 更新登录时间
+          console.log('[store_login] 自动绑定成功:', autoBound?.[0]?.id);
+        } else if (currentMatch) {
+          // 规则② 同机放行，更新 last_login_at
+          console.log('[store_login] 同机放行，更新登录时间');
           await adminClient
             .from("store_authorized_devices")
-            .update({ 
-              is_authorized: isExempt ? true : device.is_authorized,
-              is_active: true,
-              last_login_at: new Date().toISOString()
-            })
-            .eq("id", device.id);
+            .update({ last_login_at: new Date().toISOString() })
+            .eq("id", currentMatch.id);
         } else {
-          // 新设备（从未有过此设备记录）
-          console.log("[store_login] 新设备, isExempt:", isExempt);
-          if (isExempt) {
-            // 例外账号：自动授权
-            console.log("[store_login] 例外账号自动授权");
-            await adminClient
-              .from("store_authorized_devices")
-              .insert([{
-                device_id: validDeviceId,
-                username: validUsername,
-                is_authorized: true,
-                is_active: true,
-                authorized_at: new Date().toISOString(),
-                last_login_at: new Date().toISOString()
-              }]);
-          } else {
-            // 普通账号：创建待授权记录，等待管理员审批
-            
-            const { data: existingPending } = await adminClient
-              .from("store_authorized_devices")
-              .select("id")
-              .eq("device_id", validDeviceId)
-              .eq("username", validUsername)
-              .eq("is_active", true)
-              .limit(1);
-            
-            if (existingPending && existingPending.length > 0) {
-              // 已有待授权记录，更新一下时间即可，不重复创建
-              console.log("[store_login] 已存在待授权记录，更新登录时间");
-              await adminClient
-                .from("store_authorized_devices")
-                .update({ last_login_at: new Date().toISOString() })
-                .eq("id", existingPending[0].id);
-              
-              return new Response(JSON.stringify({
-                success: false, error: "该设备未授权，请联系管理员授权后使用",
-                pending_device_id: validDeviceId,
-                pending_username: validUsername
-              }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-            }
-            
-            const { data: insertedDevice, error: insertErr } = await adminClient
-              .from("store_authorized_devices")
-              .insert([{
-                device_id: validDeviceId,
-                username: validUsername,
-                is_authorized: false,
-                is_active: true,
-                last_login_at: new Date().toISOString()
-              }])
-              .select();
-            
-            if (insertErr) {
-              console.error("[store_login] 创建设备授权记录失败:", insertErr);
-              return new Response(JSON.stringify({
-                success: false, error: "设备授权记录创建失败: " + insertErr.message,
-                pending_device_id: validDeviceId,
-                pending_username: validUsername
-              }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-            }
-            
-            console.log("[store_login] 待授权设备记录已创建:", JSON.stringify(insertedDevice));
-            
-            // 验证插入是否成功
-            if (!insertedDevice || insertedDevice.length === 0) {
-              console.warn("[store_login] 警告：插入成功但select返回空，尝试直接查询验证");
-              const { data: verifyData } = await adminClient
-                .from("store_authorized_devices")
-                .select("*")
-                .eq("device_id", validDeviceId)
-                .eq("username", validUsername)
-                .eq("is_active", true);
-              console.log("[store_login] 验证查询结果:", JSON.stringify(verifyData));
-            }
-            
-            return new Response(JSON.stringify({
-              success: false, error: "该设备未授权，请联系管理员授权后使用",
-              pending_device_id: validDeviceId,
-              pending_username: validUsername
-            }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-          }
+          // 规则③ 异机拒绝
+          console.log('[store_login] 异机拒绝，已绑定设备:', bound.map(d => d.device_id).join(','));
+          return new Response(JSON.stringify({
+            success: false,
+            error: "该账号已在另一台电脑登录，请联系管理员解绑原设备后再试"
+          }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
         
         // ========== 修复 sub-account store_id ==========
@@ -3775,7 +4247,7 @@ serve(async (req) => {
           user: {
             id: userData.id,
             username: validUsername,
-            role: isExempt ? 'exempt_store' : 'store',
+            role: 'store',
             store_id: realStoreId,
             store_name: STORE_NAME_MAP[realStoreId] || STORE_NAME_MAP[validUsername] || validUsername,
             is_employee: false
@@ -4451,6 +4923,17 @@ serve(async (req) => {
         const reportData = params as Record<string, unknown>;
         delete (reportData as Record<string, unknown>).action;
         
+        // ========== 需求为 0 修复 Part 1: 后端 demand_quantity 校验（2026-11-07 新增）==========
+        const rawDemand = reportData.demand_quantity;
+        const demandQty = typeof rawDemand === 'number' ? rawDemand : Number(rawDemand);
+        if (!Number.isFinite(demandQty) || demandQty <= 0) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: `需求数量必须大于 0（当前值: ${rawDemand}）`
+          }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+        (reportData as any).demand_quantity = demandQty; // 规范化
+        
         const storeId = reportData.store_id as string;
         const productCode = reportData.product_code as string;
         
@@ -4529,51 +5012,13 @@ serve(async (req) => {
             replenish_status: r.replenish_status || "待处理"
           }));
           
-          // 2. 仅对 Supabase 没有状态或状态为默认"待处理"且非手动标记的记录，才考虑 SQL Server 兜底
-          try {
-            const pool = await getPool();
-            try {
-              const productCodes = finalReports
-                .filter(r => r.product_code)
-                .map(r => r.product_code);
-              
-              if (productCodes.length > 0) {
-                const codesStr = productCodes.map(c => `'${c.replace(/'/g, "''")}'`).join(",");
-                const statusResult = await pool.request()
-                  .query(`SELECT 商品编码, 补货状态 FROM dbo.Shortage_OrderFeedback WHERE 商品编码 IN (${codesStr})`);
-                
-                const statusMap: Record<string, string> = {};
-                if (statusResult.recordset) {
-                  statusResult.recordset.forEach(row => {
-                    statusMap[row.商品编码] = row.补货状态;
-                  });
-                }
-                
-                // 仅当 Supabase 状态为空或为默认"待处理"时，才考虑用 SQL Server 兜底
-                // 这样可以保留智能回退的效果（Supabase 是回退后的"待处理"，不会用 SQL Server 旧的"已到货"覆盖）
-                finalReports = finalReports.map(r => {
-                  const currentStatus = r.replenish_status;
-                  // 如果 Supabase 已经有手动标记的状态，绝不覆盖
-                  if (r.status_remark === '手动' || r.status_remark === '自动：仓库库存耗尽，已回退') {
-                    return r;
-                  }
-                  // 如果 Supabase 状态是"待处理"且没有特殊标记，尝试用 SQL Server 的更精确状态
-                  if (!currentStatus || currentStatus === '待处理') {
-                    const sqlStatus = statusMap[r.product_code];
-                    if (sqlStatus && sqlStatus !== '待处理') {
-                      return { ...r, replenish_status: sqlStatus };
-                    }
-                  }
-                  return r;
-                });
-              }
-            } finally {
-              releasePool(pool);
-            }
-          } catch (syncErr) {
-            console.error("同步补货状态失败（不影响主流程）:", syncErr);
-            // SQL Server 查询失败时仍返回 Supabase 数据
-          }
+          // 2. [v3.20+ 完全废弃] SQL Server Shortage_OrderFeedback 兜底逻辑
+          //    根因：Shortage_OrderFeedback 是商品级别的旧状态，不区分 report 级别的 FIFO 精确判定
+          //    scheduled-task v3.20 FIFO 跑过后，report 级状态才是真值；
+          //    而 SQL Server 商品级旧状态会把"正确的待处理"错误覆盖成商品级的"已订购"
+          //    → 典型表现：门店端显示"已订购"，admin 后台显示"待处理"（同一条 report）
+          //    修复：直接以 Supabase report 表状态为唯一数据源，彻底删除 SQL Server 兜底
+          console.log("[get_my_reports] v3.20+ 跳过 SQL Server Shortage_OrderFeedback 兜底，使用 Supabase 精确状态");
         }
         
         result = finalReports;
@@ -4950,6 +5395,869 @@ serve(async (req) => {
         break;
       }
 
+      // 【临时】查 SQL Server 存储过程定义（诊断用，用完删除）
+      case "debug_sproc": {
+        const sproc_name = params?.name as string;
+        const pool = await getPool();
+        try {
+          const q = `
+            SELECT 
+              OBJECT_DEFINITION(OBJECT_ID('dbo.${sproc_name.replace(/'/g, "''")}')) AS definition,
+              OBJECT_NAME(OBJECT_ID('dbo.${sproc_name.replace(/'/g, "''")}')) AS name,
+              SCHEMA_NAME(OBJECT_SCHEMA_ID(OBJECT_ID('dbo.${sproc_name.replace(/'/g, "''")}'))) AS schema_name
+          `;
+          const r = await pool.request().query(q);
+          if (r.recordset?.length > 0) {
+            result = { success: true, name: r.recordset[0].name, schema: r.recordset[0].schema_name, definition: r.recordset[0].definition };
+          } else {
+            result = { success: false, error: '存储过程不存在' };
+          }
+        } finally { releasePool(pool); }
+        break;
+      }
+
+      // ========== 只读试算：配送口径升级 v2（纯 SQL 聚合，一次搞定）==========
+      // 统计所有 replenish_status='已完成' 的 reports，按配送口径重新算一遍
+      // 只读，不 UPDATE
+      case "debug_delivery_audit": {
+        try {
+        const pool = await getPool();
+        try {
+          // 1. 从 Supabase 拉所有 replenish_status='已完成' 的 reports
+          const { data: completedReports, error } = await supabase
+            .from("reports")
+            .select("id, product_code, store_id, store_name, demand_quantity, created_at, replenish_status, status_remark")
+            .eq("replenish_status", "已完成")
+            .eq("order_type", "缺货订购")
+            .gt("demand_quantity", 0)
+            .order("created_at", { ascending: false });
+          
+          if (error) { result = { success: false, error: 'Supabase查询失败: ' + error.message }; break; }
+          
+          const total = completedReports?.length || 0;
+          if (total === 0) { result = { success: true, summary: { total_completed_reports: 0, to_upgrade: 0, to_stay: 0 } }; break; }
+          
+          // 2. 构建 Supabase→SQL Server 的映射
+          //    每条 report → (prec, krec, since_bj, demand, report_id, store_name)
+          //    prec = Vptype.rec（商品在 SQL Server 的主键）
+          //    krec = 门店在 SQL Server 的主键
+          type AuditRow = { prec: number; krec: string; since: string; demand: number; report_id: string; store_name: string; product_code: string };
+          const auditRows: AuditRow[] = [];
+          
+          for (const r of (completedReports || [])) {
+            if (!r.product_code || !r.store_name) continue;
+            const krec = STORE_KREC_MAP[r.store_name];
+            if (!krec) continue;
+            const created = new Date(r.created_at);
+            const bjMs = created.getTime() + 8 * 3600 * 1000;
+            const bjDate = new Date(bjMs);
+            const since = `${bjDate.getUTCFullYear()}-${String(bjDate.getUTCMonth()+1).padStart(2,'0')}-${String(bjDate.getUTCDate()).padStart(2,'0')}`;
+            auditRows.push({
+              prec: 0, // 先占位，后面查
+              krec: krec,
+              since: since,
+              demand: Number(r.demand_quantity) || 0,
+              report_id: r.id,
+              store_name: r.store_name,
+              product_code: r.product_code
+            });
+          }
+          
+          // 3. 查所有商品编码对应的 prec（Vptype.rec）
+          const codes = [...new Set(auditRows.map(a => a.product_code))];
+          const precMap: Record<string, number> = {};
+          for (let i = 0; i < codes.length; i += 400) {
+            const batch = codes.slice(i, i + 500);
+            const req = pool.request();
+            const ph = batch.map((c, idx) => { req.input(`c${idx}`, sql.NVarChar(50), c); return `@c${idx}`; }).join(',');
+            const res = await req.query(`SELECT usercode, rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode IN (${ph})`);
+            (res.recordset || []).forEach((r: any) => { precMap[r.usercode] = Number(r.rec); });
+          }
+          // 回填 prec
+          for (const a of auditRows) { a.prec = precMap[a.product_code] || 0; }
+          const mappedRows = auditRows.filter(a => a.prec > 0);
+          
+          // 4. 构建一条大 SQL：创建 #AUDIT 临时表 + JOIN 配送中心出库单算配送量
+          //    分批插入（每批 400 行 × 4 参数 = 1600 < 2100）
+          let fullRes: any[] = [];
+          const BATCH_SIZE = 400;
+          for (let i = 0; i < mappedRows.length; i += BATCH_SIZE) {
+            const batch = mappedRows.slice(i, i + BATCH_SIZE);
+            const req = pool.request();
+            const vals: string[] = [];
+            batch.forEach((a, idx) => {
+              req.input(`p${idx}`, sql.Int, a.prec);
+              req.input(`k${idx}`, sql.NVarChar(10), a.krec);
+              req.input(`s${idx}`, sql.VarChar(10), a.since);
+              req.input(`d${idx}`, sql.Int, a.demand);
+              vals.push(`(@p${idx}, @k${idx}, @s${idx}, @d${idx})`);
+            });
+            const q = `
+              CREATE TABLE #AUDIT (prec INT, krec NVARCHAR(10), since VARCHAR(10), demand INT);
+              INSERT INTO #AUDIT (prec, krec, since, demand) VALUES ${vals.join(',')};
+              SELECT a.prec, a.krec, a.since, a.demand,
+                     ISNULL(SUM(ABS(v.Qty)), 0) as delivered_qty
+              FROM #AUDIT a
+              LEFT JOIN ZHYYLS.dbo.vBuySendSumDetail v WITH(NOLOCK)
+                ON v.PRec = a.prec AND v.InKRec = a.krec AND v.OutKRec = '3'
+                AND v.BillDate >= a.since
+                AND (v.Comment IS NULL OR v.Comment NOT LIKE '%调货出库单%')
+              GROUP BY a.prec, a.krec, a.since, a.demand;
+              DROP TABLE #AUDIT;
+            `;
+            const res = await req.query(q);
+            fullRes = fullRes.concat(res.recordset || []);
+          }
+          
+          // 5. 匹配回 report（用 prec+krec+since+demand 四元组，同一个 report 是唯一的）
+          //    但要注意：同 (prec, krec) 可能有多个不同 since 的 report
+          //    所以用 (prec, krec, since, demand) 匹配
+          const resultMap = new Map<string, number>();
+          for (const row of fullRes) {
+            const key = `${row.prec}|${row.krec}|${row.since}|${row.demand}`;
+            resultMap.set(key, Number(row.delivered_qty));
+          }
+          
+          const toUpgrade: Array<any> = []; // 配送≥需求
+          const toStay: Array<any> = [];   // 配送<需求
+          
+          for (const a of mappedRows) {
+            const key = `${a.prec}|${a.krec}|${a.since}|${a.demand}`;
+            const delivered = resultMap.get(key) ?? 0;
+            const row = {
+              store_name: a.store_name,
+              product_code: a.product_code,
+              demand: a.demand,
+              delivered: delivered,
+              since: a.since,
+              report_id: a.report_id
+            };
+            if (delivered >= a.demand && a.demand > 0) {
+              toUpgrade.push(row);
+            } else {
+              toStay.push(row);
+            }
+          }
+          
+          // 6. 返回结果
+          result = {
+            success: true,
+            summary: {
+              total_completed_reports: total,
+              mapped_to_prec_krec: mappedRows.length,
+              skipped_no_prec: auditRows.length - mappedRows.length,
+              to_upgrade: toUpgrade.length,
+              to_stay: toStay.length,
+              anchor_logic: '配送中心出库单(vBuySendSumDetail OutKRec=3→InKRec=门店KRec 排除调货出库单 BillDate>=created_at北京时间)',
+              delivered_sql: `SELECT ISNULL(SUM(ABS(v.Qty)),0) FROM ZHYYLS.dbo.vBuySendSumDetail v WHERE v.PRec=@prec AND v.InKRec=@krec AND v.OutKRec='3' AND v.BillDate>=@since AND (v.Comment IS NULL OR v.Comment NOT LIKE '%调货出库单%')`
+            },
+            sample_upgrade: toUpgrade.slice(0, 5).map(r => ({
+              store_name: r.store_name, product_code: r.product_code,
+              demand: r.demand, delivered: r.delivered, since: r.since,
+              before: '已完成（显示为已入库）', after: '已配送（显示为已完成）'
+            })),
+            sample_stay: toStay.slice(0, 3).map(r => ({
+              store_name: r.store_name, product_code: r.product_code,
+              demand: r.demand, delivered: r.delivered, since: r.since,
+              reason: '配送量不足'
+            }))
+          };
+        } catch (innerErr: any) {
+          result = { success: false, error: '内部异常: ' + (innerErr?.message || String(innerErr)) + '\n' + (innerErr?.stack || '') };
+        } finally { try { releasePool(pool); } catch(_) {} }
+        } catch (outerErr: any) {
+          result = { success: false, error: '外部异常: ' + (outerErr?.message || String(outerErr)) };
+        }
+        break;
+      }
+      // ========== 写操作：配送口径升级（自动判定 replenish_status='已配送'）==========
+      // 条件：配送中心出库单(vBuySendSumDetail) 配送量 ≥ 需求数量
+      // 只读 ZHYYLS，只写 Supabase reports 表
+      // 支持分页：reqBody.max_records（默认 200）、reqBody.offset（默认 0）
+      // 返回 has_more / next_offset 供调用方循环
+      case "upgrade_to_delivered": {
+        try {
+        const pool = await getPool();
+        try {
+          // 兼容两种调用方：定时任务（扁平 body）和前端（body.params）
+          const _p = params || {};
+          const MAX_RECORDS = Math.min(
+            Math.max(1, Number(_p.max_records ?? reqBody?.max_records) || 200),
+            500  // 硬上限，防止爆
+          );
+          const OFFSET = Math.max(0, Number(_p.offset ?? reqBody?.offset) || 0);
+
+          // 1. 从 Supabase 分页拉 replenish_status='已完成' 的 reports
+          const { data: completedReports, error } = await supabase
+            .from("reports")
+            .select("id, product_code, store_id, store_name, demand_quantity, created_at, replenish_status, status_remark")
+            .eq("replenish_status", "已完成")
+            .eq("order_type", "缺货订购")
+            .gt("demand_quantity", 0)
+            .order("created_at", { ascending: false })
+            .range(OFFSET, OFFSET + MAX_RECORDS - 1);
+          
+          if (error) { result = { success: false, error: 'Supabase查询失败: ' + error.message }; break; }
+          
+          const total = completedReports?.length || 0;
+          if (total === 0) {
+            result = { success: true, upgraded: 0, message: '无可升级的已完成记录', has_more: false, next_offset: OFFSET };
+            break;
+          }
+          
+          // 2. 构建 Supabase→SQL Server 的映射
+          type UpgradeRow = { prec: number; krec: string; since: string; demand: number; report_id: string; store_name: string; product_code: string };
+          const upgradeRows: UpgradeRow[] = [];
+          
+          for (const r of (completedReports || [])) {
+            if (!r.product_code || !r.store_name) continue;
+            const krec = STORE_KREC_MAP[r.store_name];
+            if (!krec) continue;
+            const created = new Date(r.created_at);
+            const bjMs = created.getTime() + 8 * 3600 * 1000;
+            const bjDate = new Date(bjMs);
+            const since = `${bjDate.getUTCFullYear()}-${String(bjDate.getUTCMonth()+1).padStart(2,'0')}-${String(bjDate.getUTCDate()).padStart(2,'0')}`;
+            upgradeRows.push({
+              prec: 0,
+              krec: krec,
+              since: since,
+              demand: Number(r.demand_quantity) || 0,
+              report_id: r.id,
+              store_name: r.store_name,
+              product_code: r.product_code
+            });
+          }
+          
+          // 3. 查所有商品编码对应的 prec
+          const codes = [...new Set(upgradeRows.map(a => a.product_code))];
+          const precMap: Record<string, number> = {};
+          for (let i = 0; i < codes.length; i += 400) {
+            const batch = codes.slice(i, i + 500);
+            const req = pool.request();
+            const ph = batch.map((c, idx) => { req.input(`c${idx}`, sql.NVarChar(50), c); return `@c${idx}`; }).join(',');
+            const res = await req.query(`SELECT usercode, rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode IN (${ph})`);
+            (res.recordset || []).forEach((r: any) => { precMap[r.usercode] = Number(r.rec); });
+          }
+          for (const a of upgradeRows) { a.prec = precMap[a.product_code] || 0; }
+          const mappedRows = upgradeRows.filter(a => a.prec > 0);
+          
+          // 4. 分批查配送量
+          let fullRes: any[] = [];
+          const BATCH_SIZE = 400;
+          for (let i = 0; i < mappedRows.length; i += BATCH_SIZE) {
+            const batch = mappedRows.slice(i, i + BATCH_SIZE);
+            const req = pool.request();
+            const vals: string[] = [];
+            batch.forEach((a, idx) => {
+              req.input(`p${idx}`, sql.Int, a.prec);
+              req.input(`k${idx}`, sql.NVarChar(10), a.krec);
+              req.input(`s${idx}`, sql.VarChar(10), a.since);
+              req.input(`d${idx}`, sql.Int, a.demand);
+              vals.push(`(@p${idx}, @k${idx}, @s${idx}, @d${idx})`);
+            });
+            const q = `
+              CREATE TABLE #AUDIT (prec INT, krec NVARCHAR(10), since VARCHAR(10), demand INT);
+              INSERT INTO #AUDIT (prec, krec, since, demand) VALUES ${vals.join(',')};
+              SELECT a.prec, a.krec, a.since, a.demand,
+                     ISNULL(SUM(ABS(v.Qty)), 0) as delivered_qty
+              FROM #AUDIT a
+              LEFT JOIN ZHYYLS.dbo.vBuySendSumDetail v WITH(NOLOCK)
+                ON v.PRec = a.prec AND v.InKRec = a.krec AND v.OutKRec = '3'
+                AND v.BillDate >= a.since
+                AND (v.Comment IS NULL OR v.Comment NOT LIKE '%调货出库单%')
+              GROUP BY a.prec, a.krec, a.since, a.demand;
+              DROP TABLE #AUDIT;
+            `;
+            const res = await req.query(q);
+            fullRes = fullRes.concat(res.recordset || []);
+          }
+          
+          // 5. 匹配回 report，找出该升级的
+          const resultMap = new Map<string, number>();
+          for (const row of fullRes) {
+            const key = `${row.prec}|${row.krec}|${row.since}|${row.demand}`;
+            resultMap.set(key, Number(row.delivered_qty));
+          }
+          
+          const toUpgrade: string[] = [];
+          const toStay: Array<any> = [];
+          
+          for (const a of mappedRows) {
+            const key = `${a.prec}|${a.krec}|${a.since}|${a.demand}`;
+            const delivered = resultMap.get(key) ?? 0;
+            if (delivered >= a.demand && a.demand > 0) {
+              toUpgrade.push(a.report_id);
+            } else {
+              toStay.push({ store: a.store_name, code: a.product_code, demand: a.demand, delivered, report_id: a.report_id });
+            }
+          }
+          
+          // 6. 执行批量 UPDATE（只写 Supabase）
+          let upgraded = 0;
+          if (toUpgrade.length > 0) {
+            const UPGRADE_BATCH = 500;
+            for (let i = 0; i < toUpgrade.length; i += UPGRADE_BATCH) {
+              const batchIds = toUpgrade.slice(i, i + UPGRADE_BATCH);
+              const { error: uErr } = await supabase
+                .from("reports")
+                .update({
+                  replenish_status: "已配送",
+                  status_changed_by: "系统自动",
+                  status_remark: "自动升级为已配送（配送≥需求）"
+                })
+                .in("id", batchIds);
+              if (uErr) {
+                result = { success: false, error: 'UPDATE失败: ' + uErr.message };
+                break;
+              }
+              upgraded += batchIds.length;
+            }
+          }
+          
+          // 7. 返回结果（含分页游标）
+          // has_more: 本页拉满了 MAX_RECORDS，理论上后面还有
+          const has_more = total >= MAX_RECORDS;
+          const next_offset = OFFSET + total;
+          result = {
+            success: true,
+            total_completed: total,
+            mapped: mappedRows.length,
+            skipped_no_prec: upgradeRows.length - mappedRows.length,
+            to_upgrade: toUpgrade.length,
+            actually_upgraded: upgraded,
+            to_stay: toStay.length,
+            sample_stay: toStay.slice(0, 5),
+            // 分页控制（给循环调用方用）
+            has_more,
+            next_offset,
+            page_offset: OFFSET,
+            page_size: MAX_RECORDS
+          };
+        } catch (innerErr: any) {
+          result = { success: false, error: '内部异常: ' + (innerErr?.message || String(innerErr)) };
+        } finally { try { releasePool(pool); } catch(_) {} }
+        } catch (outerErr: any) {
+          result = { success: false, error: '外部异常: ' + (outerErr?.message || String(outerErr)) };
+        }
+        break;
+      }
+      // ========== DEBUG: 查单/多商品采购入库明细（vBuySendSumDetail）==========
+      case "debug_purchase_trace": {
+        const codesRaw = params?.codes as string[] | string | undefined;
+        const codes = Array.isArray(codesRaw) ? codesRaw : (codesRaw ? [codesRaw] : []);
+        if (codes.length === 0) { result = { success: false, error: 'codes 必填' }; break; }
+        const pool = await getPool();
+        try {
+          const codesList = codes.map(c => `N'${(c || '').replace(/'/g, "''")}'`).join(',');
+          const q = `
+            SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+            FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+            JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+            WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+            ORDER BY v.usercode, vs.BillDate
+          `;
+          const res = await pool.request().query(q);
+          const records = (res.recordset || []).map((r: any) => ({
+            product_code: (r.usercode || '').trim(),
+            bill_date: r.BillDate,
+            qty: Number(r.qty || 0)
+          }));
+          // 按 product_code 分组汇总
+          const byCode: Record<string, Array<any>> = {};
+          let totalByCode: Record<string, number> = {};
+          for (const rec of records) {
+            if (!byCode[rec.product_code]) { byCode[rec.product_code] = []; totalByCode[rec.product_code] = 0; }
+            byCode[rec.product_code].push(rec);
+            totalByCode[rec.product_code] += rec.qty;
+          }
+          result = { success: true, codes, records, byCode, totalByCode };
+        } catch (e: any) {
+          result = { success: false, error: e?.message || String(e) };
+        } finally { releasePool(pool); }
+        break;
+      }
+      // ========== DEBUG: 回退指定 ID 到待处理（临时用）==========
+      case "debug_reset_ids": {
+        const idsRaw = params?.ids;
+        const ids = Array.isArray(idsRaw) ? idsRaw : [];
+        if (ids.length === 0) { result = { success: false, error: 'ids 必填' }; break; }
+        const { error } = await supabase.from("reports").update({
+          replenish_status: '待处理',
+          status_remark: null,
+          status_changed_at: new Date().toISOString(),
+          status_changed_by: '系统自动(回退FIFO错判)'
+        }).in('id', ids);
+        if (error) { result = { success: false, error: error.message }; break; }
+        result = { success: true, reset_count: ids.length, ids };
+        break;
+      }
+      // ========== DEBUG: 公开版批量重跑 FIFO（手动触发一次）==========
+      case "debug_bulk_detect": {
+        try {
+          const pool = await getPool();
+          const res = await preciseAutoDetectStatusV2(pool, supabase);
+          result = { success: true, ...res };
+        } catch (e: any) {
+          result = { success: false, error: e?.message || String(e), stack: e?.stack };
+        }
+        break;
+      }
+      // ========== DEBUG: 精确版——按当前 status 分类统计 FIFO 影响范围 ==========
+      // 与 debug_fifo_full_compare 不同：这里把每条的"旧口径扣的采购单明细"也列出来
+      case "debug_fifo_precise_compare": {
+        const supabaseCl = supabase;
+        const pool = await getPool();
+        try {
+          const targetStatus = params?.status;  // null=全量, 传入字符串=只拉某状态
+          let q = supabaseCl.from("reports")
+            .select("id, product_code, store_name, demand_quantity, created_at, replenish_status, product_name")
+            .eq("order_type", "缺货订购").gt("demand_quantity", 0);
+          if (targetStatus) q = q.eq("replenish_status", targetStatus);
+          const { data: allReports, error: qErr } = await q.limit(2000);
+          if (qErr) throw qErr;
+
+          const codes = [...new Set((allReports || []).map(r => r.product_code).filter(Boolean))];
+          const codesList = codes.map(c => `N'${(c || '').replace(/'/g, "''")}'`).join(',');
+          const purchaseRes = await pool.request().query(`
+            SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+            FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+            JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+            WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+          `);
+          let purchaseByCode: Record<string, Array<{ date: any; qty: number }>> = {};
+          for (const row of purchaseRes.recordset || []) {
+            const r = row as any;
+            if (!purchaseByCode[r.usercode]) purchaseByCode[r.usercode] = [];
+            purchaseByCode[r.usercode].push({ date: r.BillDate, qty: Number(r.qty || 0) });
+          }
+
+          // 旧 FIFO：与原代码完全一致（历史池 > + 当天池 ==），返回每条完成 report 消耗的采购单明细
+          function oldFifoDetail(purchaseSorted: any[], sortedReports: any[]): { done: string[]; consumed: Record<string, string[]> } {
+            if (sortedReports.length === 0) return { done: [], consumed: {} };
+            const earliestAnchorBj = toBjDate(sortedReports[0].created_at);
+            const hist = purchaseSorted.filter(p => p.bill_date_bj > earliestAnchorBj).map(p => ({ ...p, remain: p.qty }));
+            const same = purchaseSorted.filter(p => p.bill_date_bj === earliestAnchorBj).map(p => ({ ...p, remain: p.qty }));
+            let histRemain = hist.reduce((s, e) => s + e.remain, 0);
+            let sameRemain = same.reduce((s, e) => s + e.remain, 0);
+            const consumed: Record<string, string[]> = {};
+            const allDone: string[] = [];
+            for (const r of sortedReports) {
+              const demand = Number(r.demand_quantity) || 0;
+              if (histRemain >= demand) {
+                let need = demand; const used: string[] = [];
+                for (const e of hist) { if (need <= 0) break; const take = Math.min(e.remain, need); if (take > 0) used.push(`${e.bill_date_bj}×${take}`); e.remain -= take; histRemain -= take; need -= take; }
+                allDone.push(r.id); consumed[r.id] = used;
+              } else if (histRemain + sameRemain >= demand) {
+                let need = demand; const used: string[] = [];
+                for (const e of hist) { if (need <= 0) break; const take = Math.min(e.remain, need); if (take > 0) used.push(`${e.bill_date_bj}×${take}`); e.remain -= take; histRemain -= take; need -= take; }
+                for (const e of same) { if (need <= 0) break; const take = Math.min(e.remain, need); if (take > 0) used.push(`${e.bill_date_bj}×${take}`); e.remain -= take; sameRemain -= take; need -= take; }
+                allDone.push(r.id); consumed[r.id] = used;
+              } else break;
+            }
+            return { done: allDone, consumed };
+          }
+
+          // 新 FIFO：每条独立 anchor
+          function newFifoDetail(purchaseSorted: any[], sortedReports: any[]): string[] {
+            if (sortedReports.length === 0) return [];
+            const entries = purchaseSorted.map(p => ({ bill_date_bj: p.bill_date_bj, remain: p.qty }));
+            const done: string[] = [];
+            for (const r of sortedReports) {
+              const d = Number(r.demand_quantity) || 0;
+              const myAnchor = toBjDate(r.created_at);
+              let eligibleRemain = 0;
+              for (const e of entries) if (e.bill_date_bj >= myAnchor) eligibleRemain += e.remain;
+              if (eligibleRemain >= d) {
+                let need = d;
+                for (const e of entries) { if (need <= 0) break; if (e.bill_date_bj >= myAnchor) { const take = Math.min(e.remain, need); e.remain -= take; need -= take; } }
+                done.push(r.id);
+              } else break;
+            }
+            return done;
+          }
+
+          const byCode: Record<string, any[]> = {};
+          for (const r of (allReports || [])) { if (!byCode[r.product_code]) byCode[r.product_code] = []; byCode[r.product_code].push(r); }
+
+          let s_completed = 0, s_delivered = 0, s_pending = 0, s_other = 0;
+          let affected_completed = 0, affected_delivered = 0, affected_pending_wrong = 0;
+          const zombieList: any[] = [];
+          const affectedDetail: any[] = [];
+
+          for (const code of codes) {
+            const sorted = [...(byCode[code] || [])].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+            if (sorted.length === 0) continue;
+            const purchaseRows = purchaseByCode[code] || [];
+            const purchaseSorted = purchaseRows.map(p => ({ bill_date_bj: toBjDate(p.date), qty: Number(p.qty || 0) })).sort((a, b) => a.bill_date_bj.localeCompare(b.bill_date_bj));
+
+            const old = oldFifoDetail(purchaseSorted, sorted);
+            const newDone = new Set(newFifoDetail(purchaseSorted, sorted));
+            const oldDoneSet = new Set(old.done);
+
+            // 僵尸 pending：最早那条 report 在新口径下都没法满足
+            const earliest = sorted[0];
+            const earliestAnchorBj = toBjDate(earliest.created_at);
+            let earliestEligible = 0;
+            for (const p of purchaseSorted) if (p.bill_date_bj >= earliestAnchorBj) earliestEligible += p.qty;
+            if (earliestEligible < Number(earliest.demand_quantity)) {
+              zombieList.push({ id: earliest.id, code, demand: earliest.demand_quantity, earliest_anchor_bj: earliestAnchorBj, eligible_pool_new: earliestEligible, current_status: earliest.replenish_status, store: earliest.store_name });
+            }
+
+            for (const r of sorted) {
+              // 分类统计当前 status
+              const cur = r.replenish_status;
+              if (cur === '已完成') s_completed++;
+              else if (cur === '已配送') s_delivered++;
+              else if (cur === '待处理') s_pending++;
+              else s_other++;
+
+              const wasOldFifoDone = oldDoneSet.has(r.id);
+              const isNewFifoDone = newDone.has(r.id);
+
+              // 影响：旧口径判定为完成（已完成/已配送）但新口径不满足 → 应退回
+              if (wasOldFifoDone && !isNewFifoDone) {
+                const myAnchor = toBjDate(r.created_at);
+                let myEligiblePool = 0;
+                for (const p of purchaseSorted) if (p.bill_date_bj >= myAnchor) myEligiblePool += p.qty;
+
+                if (cur === '已完成') affected_completed++;
+                else if (cur === '已配送') affected_delivered++;
+                else affected_pending_wrong++;
+
+                if (affectedDetail.length < 20) {
+                  affectedDetail.push({
+                    id: r.id, product_code: code, product_name: r.product_name, store: r.store_name,
+                    created_at_bj: myAnchor, demand: r.demand_quantity,
+                    current_status: cur,
+                    old_anchor_used_bj: earliestAnchorBj,
+                    consumed_by_old: old.consumed[r.id] || [],
+                    eligible_pool_new: myEligiblePool,
+                    eligible_pool_new_detail: purchaseSorted.filter(p => p.bill_date_bj >= myAnchor).map(p => `${p.bill_date_bj}×${p.qty}`)
+                  });
+                }
+              }
+            }
+          }
+
+          result = {
+            success: true,
+            summary_by_status: {
+              total: allReports?.length || 0,
+              db_已完成: s_completed,
+              db_已配送: s_delivered,
+              db_待处理: s_pending,
+              db_其他: s_other,
+              affected_已完成: affected_completed,
+              affected_已配送: affected_delivered,
+              affected_待处理中被错误判过: affected_pending_wrong,
+              affected_总计: affected_completed + affected_delivered + affected_pending_wrong,
+              zombie_pending_count: zombieList.length
+            },
+            affected_detail_20: affectedDetail,
+            zombie_samples: zombieList.slice(0, 20)
+          };
+        } catch (e: any) {
+          result = { success: false, error: e?.message || String(e), stack: e?.stack };
+        } finally { releasePool(pool); }
+        break;
+      }
+      // ========== DEBUG: 全量 FIFO 新旧口径对比（只读，用于预演回退范围）==========
+      case "debug_fifo_full_compare": {
+        const supabaseCl = supabase;
+        const pool = await getPool();
+        try {
+          // 拉全量 reports（无论状态）
+          const { data: allReports, error: qErr } = await supabaseCl
+            .from("reports")
+            .select("id, product_code, store_name, demand_quantity, created_at, replenish_status")
+            .eq("order_type", "缺货订购")
+            .gt("demand_quantity", 0)
+            .order("product_code, created_at", { ascending: true });
+          if (qErr) throw qErr;
+
+          const codes = [...new Set((allReports || []).map(r => r.product_code).filter(Boolean))];
+          const codesList = codes.map(c => `N'${(c || '').replace(/'/g, "''")}'`).join(',');
+          const purchaseRes = await pool.request().query(`
+            SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+            FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+            JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+            WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+          `);
+          let purchaseByCode: Record<string, Array<{ date: any; qty: number }>> = {};
+          for (const row of purchaseRes.recordset || []) {
+            const r = row as any;
+            if (!purchaseByCode[r.usercode]) purchaseByCode[r.usercode] = [];
+            purchaseByCode[r.usercode].push({ date: r.BillDate, qty: Number(r.qty || 0) });
+          }
+
+          function oldFifo(purchaseSorted: any[], sortedReports: any[]): string[] {
+            if (sortedReports.length === 0) return [];
+            const earliestAnchorBj = toBjDate(sortedReports[0].created_at);
+            let total = 0;
+            for (const p of purchaseSorted) { if (p.bill_date_bj > earliestAnchorBj) total += p.qty; }
+            const done: string[] = []; let rem = total;
+            for (const r of sortedReports) { const d = Number(r.demand_quantity) || 0; if (rem >= d) { rem -= d; done.push(r.id); } else break; }
+            return done;
+          }
+          function newFifo(purchaseSorted: any[], sortedReports: any[]): string[] {
+            if (sortedReports.length === 0) return [];
+            const entries = purchaseSorted.map(p => ({ bill_date_bj: p.bill_date_bj, remain: p.qty }));
+            const done: string[] = [];
+            for (const r of sortedReports) {
+              const d = Number(r.demand_quantity) || 0;
+              const myAnchor = toBjDate(r.created_at);
+              let eligibleRemain = 0;
+              for (const e of entries) if (e.bill_date_bj >= myAnchor) eligibleRemain += e.remain;
+              if (eligibleRemain >= d) {
+                let need = d;
+                for (const e of entries) { if (need <= 0) break; if (e.bill_date_bj >= myAnchor) { const take = Math.min(e.remain, need); e.remain -= take; need -= take; } }
+                done.push(r.id);
+              } else break;
+            }
+            return done;
+          }
+
+          const byCode: Record<string, any[]> = {};
+          for (const r of (allReports || [])) { if (!byCode[r.product_code]) byCode[r.product_code] = []; byCode[r.product_code].push(r); }
+
+          let globalAffected = 0, globalOldDone = 0, globalNewDone = 0;
+          const affectedById: any[] = [];
+          for (const code of codes) {
+            const sorted = [...(byCode[code] || [])].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+            if (sorted.length === 0) continue;
+            const purchaseRows = purchaseByCode[code] || [];
+            const purchaseSorted = purchaseRows.map(p => ({ bill_date_bj: toBjDate(p.date), qty: Number(p.qty || 0) })).sort((a, b) => a.bill_date_bj.localeCompare(b.bill_date_bj));
+            const oldDone = oldFifo(purchaseSorted, sorted);
+            const newDone = newFifo(purchaseSorted, sorted);
+            globalOldDone += oldDone.length; globalNewDone += newDone.length;
+            const oldSet = new Set(oldDone); const newSet = new Set(newDone);
+            for (const r of sorted) {
+              if (oldSet.has(r.id) && !newSet.has(r.id)) {
+                globalAffected++;
+                const myAnchor = toBjDate(r.created_at);
+                affectedById.push({
+                  id: r.id, product_code: code, store: r.store_name,
+                  created_at_bj: myAnchor, demand: r.demand_quantity,
+                  current_status: r.replenish_status
+                });
+              }
+            }
+          }
+          result = {
+            success: true,
+            summary: {
+              total_products: codes.length,
+              total_reports: allReports?.length || 0,
+              old_done_total: globalOldDone,
+              new_done_total: globalNewDone,
+              old_only_total: globalAffected,
+              new_only_total: globalNewDone - (globalOldDone - globalAffected)
+            },
+            affected: affectedById,
+            affected_samples_20: affectedById.slice(0, 20)
+          };
+        } catch (e: any) {
+          result = { success: false, error: e?.message || String(e), stack: e?.stack };
+        } finally { releasePool(pool); }
+        break;
+      }
+      // ========== DEBUG: 完整 FIFO 重算（用真实数据，绕过已完成状态过滤）==========
+      case "debug_fifo_recompute": {
+        const codesRaw = params?.codes as string[] | string | undefined;
+        const codes = Array.isArray(codesRaw) ? codesRaw : (codesRaw ? [codesRaw] : []);
+        if (codes.length === 0) { result = { success: false, error: 'codes 必填' }; break; }
+        const pool = await getPool();
+        const supabaseCl = supabase;
+        try {
+          // 拉指定商品的所有 reports（无论状态）
+          const { data: allReports, error: qErr } = await supabaseCl
+            .from("reports")
+            .select("id, product_code, store_name, demand_quantity, created_at, replenish_status")
+            .eq("order_type", "缺货订购")
+            .in("product_code", codes)
+            .gt("demand_quantity", 0)
+            .order("created_at", { ascending: true });
+          if (qErr) throw qErr;
+
+          // 查采购入库
+          const codesList = codes.map(c => `N'${(c || '').replace(/'/g, "''")}'`).join(',');
+          const purchaseRes = await pool.request().query(`
+            SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+            FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+            JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+            WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+          `);
+          let purchaseByCode: Record<string, Array<{ date: any; qty: number }>> = {};
+          for (const row of purchaseRes.recordset || []) {
+            const r = row as any;
+            if (!purchaseByCode[r.usercode]) purchaseByCode[r.usercode] = [];
+            purchaseByCode[r.usercode].push({ date: r.BillDate, qty: Number(r.qty || 0) });
+          }
+
+          // ========== 旧口径：商品级最早 anchor ==========
+          function oldFifo(purchaseSorted: Array<{ bill_date_bj: string; qty: number }>, sortedReports: any[]): string[] {
+            if (sortedReports.length === 0) return [];
+            const earliestAnchorBj = toBjDate(sortedReports[0].created_at);
+            let histRemain = 0, sameRemain = 0;
+            for (const p of purchaseSorted) {
+              if (p.bill_date_bj > earliestAnchorBj) histRemain += p.qty;
+              else if (p.bill_date_bj === earliestAnchorBj) sameRemain += p.qty;
+            }
+            const done: string[] = [];
+            for (const r of sortedReports) {
+              const demand = Number(r.demand_quantity) || 0;
+              if (histRemain >= demand) { histRemain -= demand; done.push(r.id); }
+              else if (histRemain + sameRemain >= demand) {
+                const left = demand - histRemain; histRemain = 0; sameRemain -= left; done.push(r.id);
+              } else break;
+            }
+            return done;
+          }
+
+          // ========== 新口径：每条 report 自己的 anchor ==========
+          function newFifo(purchaseSorted: Array<{ bill_date_bj: string; qty: number }>, sortedReports: any[]): string[] {
+            if (sortedReports.length === 0) return [];
+            const entries = purchaseSorted.map(p => ({ bill_date_bj: p.bill_date_bj, remain: p.qty }));
+            const done: string[] = [];
+            for (const r of sortedReports) {
+              const demand = Number(r.demand_quantity) || 0;
+              const myAnchor = toBjDate(r.created_at);
+              let eligibleRemain = 0;
+              for (const e of entries) if (e.bill_date_bj >= myAnchor) eligibleRemain += e.remain;
+              if (eligibleRemain >= demand) {
+                let need = demand;
+                for (const e of entries) {
+                  if (need <= 0) break;
+                  if (e.bill_date_bj >= myAnchor) { const take = Math.min(e.remain, need); e.remain -= take; need -= take; }
+                }
+                done.push(r.id);
+              } else break;
+            }
+            return done;
+          }
+
+          const byCode: Record<string, any[]> = {};
+          for (const r of (allReports || [])) {
+            if (!byCode[r.product_code]) byCode[r.product_code] = [];
+            byCode[r.product_code].push(r);
+          }
+
+          const trace: any[] = [];
+          let globalAffected = 0;
+          const affectedSamples: any[] = [];
+
+          for (const code of codes) {
+            const sorted = [...(byCode[code] || [])].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+            if (sorted.length === 0) continue;
+            const earliestAnchorBj = toBjDate(sorted[0].created_at);
+            const latestAnchorBj = toBjDate(sorted[sorted.length - 1].created_at);
+            const purchaseRows = purchaseByCode[code] || [];
+            const purchaseSorted = purchaseRows
+              .map(p => ({ bill_date_bj: toBjDate(p.date), qty: Number(p.qty || 0) }))
+              .sort((a, b) => a.bill_date_bj.localeCompare(b.bill_date_bj));
+
+            const oldDone = oldFifo(purchaseSorted, sorted);
+            const newDone = newFifo(purchaseSorted, sorted);
+            const oldSet = new Set(oldDone);
+            const newSet = new Set(newDone);
+
+            // 差异：old=true 但 new=false → 应退回
+            const oldOnly: any[] = [];
+            for (const r of sorted) {
+              const wasOldDone = oldSet.has(r.id);
+              const isNewDone = newSet.has(r.id);
+              const myAnchor = toBjDate(r.created_at);
+              // 算这条 report 在新口径下可用的采购（bill_date >= myAnchor）
+              let myEligiblePool = 0;
+              const myUsedPurchases: any[] = [];
+              for (const p of purchaseSorted) {
+                if (p.bill_date_bj >= myAnchor) { myEligiblePool += p.qty; myUsedPurchases.push(p); }
+              }
+              if (wasOldDone && !isNewDone) {
+                oldOnly.push({
+                  id: r.id, store: r.store_name, created_at_bj: myAnchor, demand: r.demand_quantity,
+                  current_status: r.replenish_status,
+                  eligible_pool_bj_new: myUsedPurchases.map(p => `${p.bill_date_bj}×${p.qty}`).join(', ') || '(无)',
+                  eligible_pool_total: myEligiblePool,
+                  old_anchor_used_bj: earliestAnchorBj,
+                  old_eligible_pool: purchaseSorted.filter(p => p.bill_date_bj >= earliestAnchorBj).reduce((s, p) => s + p.qty, 0)
+                });
+              }
+            }
+
+            globalAffected += oldOnly.length;
+            if (oldOnly.length > 0 && affectedSamples.length < 20) {
+              affectedSamples.push(...oldOnly.slice(0, 20 - affectedSamples.length).map(o => ({ code, ...o })));
+            }
+
+            trace.push({
+              code,
+              earliest_anchor_bj: earliestAnchorBj,
+              latest_anchor_bj: latestAnchorBj,
+              total_reports: sorted.length,
+              purchase_count: purchaseRows.length,
+              purchase_total_qty: purchaseSorted.reduce((s, p) => s + p.qty, 0),
+              purchase_last_bj: purchaseSorted.length > 0 ? purchaseSorted[purchaseSorted.length - 1].bill_date_bj : 'N/A',
+              old_done_count: oldDone.length,
+              new_done_count: newDone.length,
+              old_only_count: oldOnly.length,
+              old_only: oldOnly,
+              purchase_list: purchaseSorted.map(p => `${p.bill_date_bj}×${p.qty}`)
+            });
+          }
+
+          result = {
+            success: true,
+            summary: { total_products: codes.length, global_affected_reports: globalAffected },
+            trace,
+            affected_samples_20: affectedSamples
+          };
+        } catch (e: any) {
+          result = { success: false, error: e?.message || String(e), stack: e?.stack };
+        } finally { releasePool(pool); }
+        break;
+      }
+      case "debug_sql": {
+        const pool = await getPool();
+        try {
+          // 1. 确认当前连接的默认数据库
+          const dbCheck = await pool.request().query(`SELECT DB_NAME() AS current_db, @@SERVERNAME AS server_name`);
+          const db = dbCheck.recordset?.[0]?.current_db || 'unknown';
+          const svr = dbCheck.recordset?.[0]?.server_name || 'unknown';
+          
+          // 2. 查默认库 dbo.SPFXB_Result 的行数
+          let rqztCount = -1;
+          try {
+            const c = await pool.request().query(`SELECT COUNT(*) AS cnt FROM dbo.SPFXB_Result WITH (NOLOCK)`);
+            rqztCount = c.recordset?.[0]?.cnt ?? -1;
+          } catch (_e) { rqztCount = -1; }
+          
+          // 3. 查 ZHYYLS.dbo.SPFXB_Result 的行数（跨库）
+          let zhyylsCount = -1;
+          try {
+            const c = await pool.request().query(`SELECT COUNT(*) AS cnt FROM ZHYYLS.dbo.SPFXB_Result WITH (NOLOCK)`);
+            zhyylsCount = c.recordset?.[0]?.cnt ?? -1;
+          } catch (_e) { zhyylsCount = -1; }
+          
+          // 4. 查默认库里所有含 SPFXB 的对象名
+          let spfxObjs: any[] = [];
+          try {
+            const o = await pool.request().query(`SELECT [name], type_desc FROM sys.objects WHERE [name] LIKE '%SPFXB%' ORDER BY type_desc`);
+            spfxObjs = o.recordset || [];
+          } catch (_e) {}
+          
+          result = { 
+            success: true,
+            db_name: db,
+            server_name: svr,
+            rqzt_spfx_count: rqztCount,
+            zhyyls_spfx_count: zhyylsCount,
+            spfx_objects: spfxObjs
+          };
+        } finally { releasePool(pool); }
+        break;
+      }
+
       // v5.8.1+ 定时同步配送缓存表（仅供内部 cron / 管理员调用）
       case "sync_cache": {
         // 1. 鉴权：仅允许携带正确 SYNC_CACHE_SECRET 的请求
@@ -4990,21 +6298,185 @@ serve(async (req) => {
         break;
       }
 
+      // ========== FIFO 对齐对比（只读，内部直接跑两套逻辑）==========
+      // 拉全量 pending reports + 批量采购，在 Edge Function 内部跑 scheduled-task 旧逻辑 vs 新共享 runFIFO
+      case "fifo_diff_check": {
+        const pool = await getPool();
+        try {
+          // ① 分页拉 pending reports
+          let allItems: any[] = [];
+          let from = 0;
+          const PS = 1000;
+          while (true) {
+            const { data: page } = await supabase
+              .from("reports")
+              .select("id, product_code, demand_quantity, created_at, replenish_status, store_name, status_changed_at")
+              .eq("order_type", "缺货订购")
+              .not("product_code", "is", null)
+              .gt("demand_quantity", 0)
+              .neq("replenish_status", "已完成")
+              .neq("replenish_status", "厂家断货")
+              .neq("replenish_status", "已关闭")
+              .order("created_at", { ascending: false })
+              .range(from, from + PS - 1);
+            if (!page || page.length === 0) break;
+            allItems = allItems.concat(page);
+            if (page.length < PS) break;
+            from += PS;
+          }
+
+          // ② 批量拉采购
+          const codes = [...new Set(allItems.map(r => r.product_code).filter(Boolean))];
+          const codesList = codes.map(c => `N'${c.replace(/'/g, "''")}'`).join(',');
+          let purchaseByCode: Record<string, any[]> = {};
+          const pres = await pool.request().query(`
+            SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+            FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+            JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+            WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+          `);
+          for (const row of pres.recordset) {
+            const r: any = row;
+            const code = (r.usercode || '').trim();
+            if (!purchaseByCode[code]) purchaseByCode[code] = [];
+            purchaseByCode[code].push({ date: r.BillDate, qty: Number(r.qty || 0) });
+          }
+
+          // ====== 旧版 scheduled-task 逻辑（UTC 毫秒宽松）======
+          const oldResults = new Set<string>();
+          const itemsByCodeOld: Record<string, any[]> = {};
+          for (const r of allItems) { if (!itemsByCodeOld[r.product_code]) itemsByCodeOld[r.product_code] = []; itemsByCodeOld[r.product_code].push(r); }
+          for (const code of Object.keys(itemsByCodeOld)) {
+            itemsByCodeOld[code].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          }
+          for (const code of Object.keys(itemsByCodeOld)) {
+            const myReports = itemsByCodeOld[code];
+            if (myReports.length === 0) continue;
+            const earliestTs = new Date(myReports[0].created_at).getTime();
+            const rows = purchaseByCode[code] || [];
+            let remaining = 0;
+            for (const p of rows) {
+              // 旧版：SQL Server datetime → new Date() → UTC 毫秒
+              const pTs = new Date(p.date).getTime();
+              if (pTs >= earliestTs) remaining += Number(p.qty || 0); // 宽松：>=
+            }
+            for (const r of myReports) {
+              const demand = Number(r.demand_quantity);
+              if (remaining >= demand) { oldResults.add(r.id); remaining -= demand; } else break;
+            }
+          }
+
+          // ====== 新版共享 runFIFO（北京时间严格）======
+          const { runFIFO: _run } = await import("../_shared/fifo.ts");
+          const fifoRes = _run(allItems.map(r => ({ id: r.id, product_code: r.product_code, demand_quantity: r.demand_quantity, created_at: r.created_at })), purchaseByCode, false);
+          const newResults = new Set(fifoRes.toCompleteIds);
+
+          // ====== 逐行 diff ======
+          const diffs: any[] = [];
+          let oldCount = 0, newCount = 0, both = 0;
+          const allIds = [...new Set([...oldResults, ...newResults, ...allItems.map(r => r.id)])];
+          for (const id of allIds) {
+            const old = oldResults.has(id);
+            const nw = newResults.has(id);
+            if (old) oldCount++;
+            if (nw) newCount++;
+            if (old && nw) both++;
+            if (old !== nw) {
+              const r = allItems.find(x => x.id === id);
+              diffs.push({
+                id, product_code: r?.product_code, store_name: r?.store_name,
+                demand: r?.demand_quantity, created_at: r?.created_at,
+                earliest_ts_ms: itemsByCodeOld[r?.product_code || '']?.[0] ? new Date(itemsByCodeOld[r?.product_code || ''][0].created_at).getTime() : 0,
+                old_done: old, new_done: nw
+              });
+            }
+          }
+
+          result = {
+            success: true,
+            summary: { pending_count: allItems.length, codes: codes.length, old_done: oldCount, new_done: newCount, both_agree: both, diff_count: diffs.length },
+            diffs: diffs.slice(0, 50),
+            purchase_pools: fifoRes.details
+          };
+        } catch (e: any) {
+          console.error("[fifo_diff_check] 错误:", e);
+          result = { success: false, error: e?.message || String(e) };
+        } finally {
+          releasePool(pool);
+        }
+        break;
+      }
+
+      // ========== 批量拉原始采购明细（只读，用于 FIFO 对齐对比）==========
+      case "batch_purchase_check": {
+        const { codes } = params;
+        if (!codes || !Array.isArray(codes) || codes.length === 0) {
+          return new Response(JSON.stringify({ success: false, error: "codes 必填且是数组" }), {
+            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        const pool = await getPool();
+        const purchaseByCode: Record<string, any[]> = {};
+        try {
+          const codesList = codes.map(c => `N'${String(c).replace(/'/g, "''")}'`).join(',');
+          const res = await pool.request().query(`
+            SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+            FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+            JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+            WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesList})
+          `);
+          for (const row of res.recordset) {
+            const r: any = row;
+            const code = (r.usercode || '').trim();
+            if (!purchaseByCode[code]) purchaseByCode[code] = [];
+            purchaseByCode[code].push({
+              date: r.BillDate ? new Date(r.BillDate).toISOString().substring(0, 10) : null,
+              date_raw: r.BillDate,
+              qty: Number(r.qty || 0)
+            });
+          }
+          result = { success: true, purchaseByCode, codes_count: codes.length };
+        } catch (e: any) {
+          result = { success: false, error: e?.message || String(e) };
+        } finally {
+          releasePool(pool);
+        }
+        break;
+      }
+
       case "get_summary": {
-        // 管理后台汇总查询：优先返回 reports + plan + supplierLookup（失败时只返回 reports）
-        // 缺货订购与新品订购分开查询；分页拉全量（单次 limit 会被 PostgREST 1000 行上限截断，
-        // 导致老记录——如早已上报后完成的商品——在汇总里搜索不到）
-        async function fetchAllReports(ot: string) {
+        // ★ 2026-11-10 优化：支持 active_only 模式（首屏只查非终态 reports）
+        // 88.5% 的 reports 是终态（已完成/已配送/已关闭/厂家断货），不需要在首屏返回全量
+        // active_only=true 时：
+        //   - 只查非终态 reports（用于 shortage_by_product 聚合 + 主表）
+        //   - 额外返回 completed_summary（轻量版终态报告，每条约 200字节，只有核心字段）
+        //   - plan / supplierLookup / poolRemainingMap / warehouseStockMap / approvals 仍然全量返回
+        // 这样首屏响应体从 1.5MB → ~460KB，后端序列化 + 网络传输省 60%
+        const activeOnly = params?.active_only === true;
+        const TERMINAL_STATUSES = ['已完成', '厂家断货', '已关闭', '已配送'];
+
+        async function fetchAllReports(ot: string, terminalFilter?: 'active' | 'terminal') {
           const out: any[] = [];
           const PAGE = 1000;
           let from = 0;
           while (true) {
-            const res = await supabase
+            let q: any = supabase
               .from("reports")
               .select("*")
               .eq("order_type", ot)
-              .order("created_at", { ascending: false })
-              .range(from, from + PAGE - 1);
+              .gt("demand_quantity", 0);
+            if (terminalFilter === 'active') {
+              // ★ 2026-11-10 修复：Supabase JS v2 的 .not('in', [...]) 不生效，
+              // 改成链式 .neq() 实现 AND 逻辑（status != 已完成 AND status != 厂家断货 AND ...）
+              // 这比 .not('replenish_status', 'in', TERMINAL_STATUSES) 更可靠
+              for (const s of TERMINAL_STATUSES) {
+                q = q.neq('replenish_status', s);
+              }
+            } else if (terminalFilter === 'terminal') {
+              q = q.in('replenish_status', TERMINAL_STATUSES);
+            }
+            const res = await q.order("created_at", { ascending: false }).range(from, from + PAGE - 1);
+            if (res.error) { console.warn(`[fetchAllReports ${ot} ${terminalFilter}] Supabase error:`, res.error); break; }
             const rows = res.data || [];
             out.push(...rows);
             if (rows.length < PAGE) break;
@@ -5012,12 +6484,46 @@ serve(async (req) => {
           }
           return out;
         }
-        const reports = await fetchAllReports("缺货订购");
-        let newTypeReports: any[] = [];
-        try {
-          newTypeReports = await fetchAllReports("新品订购");
-        } catch (_) { /* 新品查询失败不阻断 */ }
-        const mergedReports = [...(reports || []), ...newTypeReports];
+
+        let reports: any[];
+        let completedSummary: any[] = [];
+        if (activeOnly) {
+          // 首屏模式：只查非终态
+          reports = await fetchAllReports("缺货订购", 'active');
+          let newActive: any[] = [];
+          try { newActive = await fetchAllReports("新品订购", 'active'); } catch (_) {}
+          reports = [...(reports || []), ...newActive];
+
+          // 轻量终态摘要：每条只带 cbp 聚合必需的字段
+          // 完整 fields: id, product_code, product_name, specification, manufacturer, store_id, store_name,
+          //             demand_quantity, replenish_status, status_changed_at, status_remark, status_changed_by,
+          //             created_at, reporter_id, reporter_name, reporter_phone, current_stock, in_transit
+          // 轻量 fields: 上面 - reporter 三件套 + product_name/spec/manufacturer（靠 plan/supplier 补）
+          // 预计每条从 ~800字节 → ~200字节，1543条从 1.2MB → 300KB
+          const term缺货 = await fetchAllReports("缺货订购", 'terminal');
+          let term新品: any[] = [];
+          try { term新品 = await fetchAllReports("新品订购", 'terminal'); } catch (_) {}
+          const allTerminal = [...term缺货, ...term新品];
+          completedSummary = allTerminal.map((r: any) => ({
+            id: r.id,
+            product_code: r.product_code,
+            store_id: r.store_id,
+            store_name: r.store_name,
+            demand_quantity: r.demand_quantity,
+            replenish_status: r.replenish_status,
+            status_changed_at: r.status_changed_at,
+            status_remark: r.status_remark,
+            status_changed_by: r.status_changed_by,
+            created_at: r.created_at,
+            order_type: r.order_type
+          }));
+        } else {
+          // 正常模式（手动刷新/不传参数）：全量返回
+          reports = await fetchAllReports("缺货订购");
+          let newTypeReports: any[] = [];
+          try { newTypeReports = await fetchAllReports("新品订购"); } catch (_) {}
+          reports = [...(reports || []), ...newTypeReports];
+        }
 
         let planRecords: any[] = [];
         let supplierLookup: Record<string, string> = {};
@@ -5025,87 +6531,256 @@ serve(async (req) => {
         try {
           const pool = await getPool();
           try {
-            const req = pool.request()
-              .input("关键字", sql.NVarChar, null)
-              .input("状态筛选", sql.NVarChar, null)
-              .input("仅缺货", sql.Bit, 1)
-              .input("Top", sql.Int, 500);
-            const pResult = await req.execute("usp_GetPurchasePlanWithFeedback");
-            planRecords = (pResult.recordsets?.[0] || pResult.recordset || []).map(r => ({
-              "商品编码": r.商品编码 || "",
-              "商品名称": r.商品名称 || "",
-              "规格": r.规格 || "",
-              "生产企业": r.生产企业 || "",
-              "库存数量": r.库存数量 || 0,
-              "在途数量": r.在途数量 || 0,
-              "门店库存汇总": r.门店库存汇总 || 0,
-              "配送中心库存数量": r.配送中心库存数量 || 0,
-              "前30天销售数量": r.前30天销售数量 || 0,
-              "前90天销售数量": r.前90天销售数量 || 0,
-              "月均销售数量": r.月均销售数量 || 0,
-              "标准库存数量": r.标准库存数量 || 0,
-              "门店计划": r.门店计划 || 0,
-              "建议订货数量": r.建议订货数量 || 0,
-              "标记": r.标记 || "",
-              "类别": r.类别 || "",
-              "门店名称": r.门店名称 || "",
-              "补货状态": r.补货状态 || "",
-              "实际订货数量": r.实际订货数量 || 0,
-              "供货商": r.供货商 || r.供应商 || "",
-              "仓库库存": r.仓库库存 || r.配送中心库存数量 || 0,
-            }));
+            // ====== ★ 2026-11-10 v3.21 并行化：提前算好 SQL 查询需要的 codes（纯内存，零耗时） ======
+            // 这些 codes 都只依赖已在内存的 reports / completedSummary，不需要等 SQL 查询结果
+            const pendingCodes = [...new Set(
+              reports
+                .filter(r => r.order_type === '缺货订购'
+                  && !['已完成', '厂家断货', '已关闭', '已配送'].includes(r.replenish_status || ''))
+                .map(r => (r.product_code || '').trim())
+                .filter(Boolean)
+            )];
+            // ★ 2026-11-10 修复：改前 summaryCodes 包含 planRecords 独有的 codes，
+            // 但 taskB 必须等 taskA 完成后才能拿 planRecords。
+            // 先只算 reports + completedSummary 的 codes，等 planRecords 出来后补独有的
+            const summaryCodesLite = [...new Set([
+              ...reports.map(r => (r.product_code || '').trim()),
+              ...completedSummary.map(r => (r.product_code || '').trim())
+            ].filter(Boolean))];
+            console.log(`[v3.21-debug] summaryCodesLite=${summaryCodesLite.length} pendingCodes=${pendingCodes.length} reports=${reports.length} completedSummary=${completedSummary.length}`);
 
-            // 补充供货商信息（Vptype.comment，只查 plan 中出现的商品）
-            function normalizeCode(code: string) {
-              return (code || '').trim().toUpperCase().replace(/^0+/, '');
-            }
-              if (planRecords.length > 0) {
-                try {
-                  function normalizeSupplierCode(code: string) {
-                    return (code || '').trim().toUpperCase().replace(/^0+/, '');
-                  }
-                  const rawCodes = [...new Set(planRecords.map(r => (r["商品编码"] || '').trim().toUpperCase()).filter(c => c))];
-                  const normCodes = [...new Set(rawCodes.map(c => normalizeSupplierCode(c)).filter(c => c))];
-                  const allCodes = [...new Set([...rawCodes, ...normCodes])];
-                  if (allCodes.length > 0) {
-                    const CODE_BATCH = 500;
-                    for (let i = 0; i < allCodes.length; i += CODE_BATCH) {
-                      const batch = allCodes.slice(i, i + CODE_BATCH);
-                      const suppReq = pool.request();
-                      const suppIn: string[] = [];
-                      batch.forEach((c, j) => { suppReq.input(`s${j}`, sql.NVarChar(50), c); suppIn.push(`@s${j}`); });
-                      const suppResult = await suppReq.query(
-                        `SELECT LTRIM(RTRIM(ISNULL(usercode, ''))) as 商品编码, LTRIM(RTRIM(ISNULL(comment, ''))) as 供货商 FROM ZHYYLS.dbo.Vptype WITH (NOLOCK) WHERE usercode IN (${suppIn.join(',')}) AND comment IS NOT NULL AND comment != ''`
-                      );
-                      (suppResult.recordset || []).forEach((raw: any) => {
-                        const rawCode = (raw.商品编码 || '').trim().toUpperCase();
-                        const norm = normalizeSupplierCode(rawCode);
-                        if (rawCode && !supplierLookup[rawCode]) supplierLookup[rawCode] = raw.供货商 || '';
-                        if (norm && !supplierLookup[norm]) supplierLookup[norm] = raw.供货商 || '';
-                      });
+            // ====== ★ 三查询并行：Promise.all([usp+supplier, warehouse, FIFO]) ======
+            // usp+supplier 之间有依赖（supplier 要 planRecords 的 codes），但和另外两个完全独立
+            // warehouse 和 FIFO 的 codes 已提前算好，零依赖
+            const _normSupCode = (code: string) => (code || '').trim().toUpperCase().replace(/^0+/, '');
+
+            // --- 任务 A：usp_GetPurchasePlanWithFeedback + 供货商 + 补货状态汇总 ---
+            const taskA = (async () => {
+              try {
+                const req = pool.request()
+                  .input("关键字", sql.NVarChar, null)
+                  .input("状态筛选", sql.NVarChar, null)
+                  .input("仅缺货", sql.Bit, 1)
+                  .input("Top", sql.Int, 500);
+                const pResult = await req.execute("usp_GetPurchasePlanWithFeedback");
+                const records = (pResult.recordsets?.[0] || pResult.recordset || []).map(r => ({
+                  "商品编码": r.商品编码 || "",
+                  "商品名称": r.商品名称 || "",
+                  "规格": r.规格 || "",
+                  "生产企业": r.生产企业 || "",
+                  "库存数量": r.库存数量 || 0,
+                  "在途数量": r.在途数量 || 0,
+                  "门店库存汇总": r.门店库存汇总 || 0,
+                  "配送中心库存数量": r.配送中心库存数量 || 0,
+                  "前30天销售数量": r.前30天销售数量 || 0,
+                  "前90天销售数量": r.前90天销售数量 || 0,
+                  "月均销售数量": r.月均销售数量 || 0,
+                  "标准库存数量": r.标准库存数量 || 0,
+                  "门店计划": r.门店计划 || 0,
+                  "建议订货数量": r.建议订货数量 || 0,
+                  "标记": r.标记 || "",
+                  "类别": r.类别 || "",
+                  "门店名称": r.门店名称 || "",
+                  "补货状态": r.补货状态 || "",
+                  "实际订货数量": r.实际订货数量 || 0,
+                  "供货商": r.供货商 || r.供应商 || "",
+                  "仓库库存": r.仓库库存 || r.配送中心库存数量 || 0,
+                }));
+
+                // 供货商查询（Vptype.comment），串行在 usp 之后（依赖 planRecords codes）
+                if (records.length > 0) {
+                  try {
+                    const rawCodes = [...new Set(records.map(r => (r["商品编码"] || '').trim().toUpperCase()).filter(c => c))];
+                    const normCodes = [...new Set(rawCodes.map(c => _normSupCode(c)).filter(c => c))];
+                    const allCodes = [...new Set([...rawCodes, ...normCodes])];
+                    if (allCodes.length > 0) {
+                      const CODE_BATCH = 500;
+                      for (let i = 0; i < allCodes.length; i += CODE_BATCH) {
+                        const batch = allCodes.slice(i, i + CODE_BATCH);
+                        const suppReq = pool.request();
+                        const suppIn: string[] = [];
+                        batch.forEach((c, j) => { suppReq.input(`s${j}`, sql.NVarChar(50), c); suppIn.push(`@s${j}`); });
+                        const suppResult = await suppReq.query(
+                          `SELECT LTRIM(RTRIM(ISNULL(usercode, ''))) as 商品编码, LTRIM(RTRIM(ISNULL(comment, ''))) as 供货商 FROM ZHYYLS.dbo.Vptype WITH (NOLOCK) WHERE usercode IN (${suppIn.join(',')}) AND comment IS NOT NULL AND comment != ''`
+                        );
+                        (suppResult.recordset || []).forEach((raw: any) => {
+                          const rawCode = (raw.商品编码 || '').trim().toUpperCase();
+                          const norm = _normSupCode(rawCode);
+                          if (rawCode && !supplierLookup[rawCode]) supplierLookup[rawCode] = raw.供货商 || '';
+                          if (norm && !supplierLookup[norm]) supplierLookup[norm] = raw.供货商 || '';
+                        });
+                      }
                     }
+                    let matchedCount = 0;
+                    const finalRecords = records.map(r => {
+                      const rawKey = (r["商品编码"] || '').trim().toUpperCase();
+                      const normKey = _normSupCode(rawKey);
+                      const sup = supplierLookup[rawKey] || supplierLookup[normKey] || '';
+                      if (sup) matchedCount++;
+                      return { ...r, 供货商: sup };
+                    });
+                    console.log(`[供货商] 查询匹配 ${matchedCount}/${finalRecords.length}`);
+                    return finalRecords;
+                  } catch (e) {
+                    console.error('获取供货商信息失败:', e);
+                    return records;
                   }
-                  let matchedCount = 0;
-                  planRecords = planRecords.map(r => {
-                    const rawKey = (r["商品编码"] || '').trim().toUpperCase();
-                    const normKey = normalizeSupplierCode(rawKey);
-                    const sup = supplierLookup[rawKey] || supplierLookup[normKey] || '';
-                    if (sup) matchedCount++;
-                    return { ...r, 供货商: sup };
-                  });
-                  console.log(`[供货商] 查询 ${allCodes.length} 个编码，成功匹配 ${matchedCount}/${planRecords.length} 条`);
-                } catch (e) {
-                  console.error('获取供货商信息失败:', e);
                 }
+                return records;
+              } catch (e) {
+                console.error('[get_summary] usp_GetPurchasePlanWithFeedback 失败:', e);
+                return [];
               }
+            })();
+
+            // --- 任务 B：仓库实时库存（dc_stock 快照，用 GoodsStocks 和 get_warehouse_stock 一致） ---
+            const taskB = (async (): Promise<Record<string, number>> => {
+              if (summaryCodesLite.length === 0) return {};
+              try {
+                const BATCH = 500;
+                const whMap: Record<string, number> = {};
+                for (let i = 0; i < summaryCodesLite.length; i += BATCH) {
+                  const batch = summaryCodesLite.slice(i, i + BATCH);
+                  const req = pool.request();
+                  const codeIn: string[] = [];
+                  batch.forEach((c, j) => { req.input(`c${j}`, sql.NVarChar(50), c); codeIn.push(`@c${j}`); });
+                  const res = await req.query(`
+                    SELECT v.usercode, ISNULL(SUM(gs.qty), 0) as wh_qty
+                    FROM ZHYYLS.dbo.Vptype v WITH(NOLOCK)
+                    LEFT JOIN ZHYYLS.dbo.GoodsStocks gs WITH(NOLOCK) ON gs.prec = v.rec AND gs.krec = '3'
+                    WHERE v.usercode IN (${codeIn.join(',')})
+                    GROUP BY v.usercode
+                  `);
+                  (res.recordset || []).forEach((row: any) => { whMap[row.usercode] = row.wh_qty || 0; });
+                }
+                console.log(`[warehouseStockMap] GoodsStocks 查询 ${summaryCodesLite.length} 个商品，命中 ${Object.keys(whMap).length}`);
+                return whMap;
+              } catch (e) { console.warn('[get_summary] warehouseStockMap 查询失败:', e); return {}; }
+            })();
+
+            // --- 任务 C：FIFO 剩余采购池（采购入库明细，后续内存算 poolRemainingMap） ---
+            const taskC = (async () => {
+              if (pendingCodes.length === 0) return null;
+              try {
+                const req = pool.request();
+                const codesBatch = pendingCodes.map(c => `N'${c.replace(/'/g, "''")}'`).join(',');
+                return await req.query(`
+                  SELECT v.usercode, vs.BillDate, ABS(vs.Qty) as qty
+                  FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH(NOLOCK)
+                  JOIN ZHYYLS.dbo.Vptype v WITH(NOLOCK) ON v.rec = vs.PRec
+                  WHERE vs.BillType = 34 AND vs.InKRec = '3' AND v.usercode IN (${codesBatch})
+                `);
+              } catch (e) { console.warn('[get_summary] FIFO purchase 查询失败:', e); return null; }
+            })();
+
+            // ====== 等待三查询全部完成 ======
+            const [planRecordsRaw, whMap, purchaseRes] = await Promise.all([taskA, taskB, taskC]);
+            planRecords = planRecordsRaw;
+
+            // ====== 补货状态从 Supabase reports 汇总（v3.20+ 加固，纯内存） ======
+            if (planRecords.length > 0 && reports.length > 0) {
+              const isTerminal = (s: string) => ['已完成', '厂家断货', '已关闭', '已配送'].includes(s || '');
+              const supStatusMap: Record<string, string> = {};
+              for (const r of reports) {
+                const code = (r.product_code || '').trim();
+                if (!code || supStatusMap[code]) continue;
+                const s = r.replenish_status || '待处理';
+                if (!isTerminal(s)) supStatusMap[code] = s;
+              }
+              for (const r of reports) {
+                const code = (r.product_code || '').trim();
+                if (!code || supStatusMap[code]) continue;
+                supStatusMap[code] = r.replenish_status || '待处理';
+              }
+              planRecords = planRecords.map(r => ({
+                ...r,
+                "补货状态": supStatusMap[(r["商品编码"] || '').trim()] || r["补货状态"] || '待处理'
+              }));
+            }
+
+            // ====== 初始化 result ======
+            result = { reports, completed_summary: completedSummary, plan: [planRecords], supplierLookup };
+
+            // ★ warehouseStockMap：无条件挂（即使是空对象也要挂）
+            (result as any).warehouseStockMap = whMap || {};
+
+            // ====== FIFO poolRemainingMap（纯内存计算，purchaseRes 已拿到） ======
+            if (purchaseRes && pendingCodes.length > 0) {
+              const purchaseByCode: Record<string, Array<{ date: string; qty: number }>> = {};
+              (purchaseRes.recordset || []).forEach((row: any) => {
+                if (!purchaseByCode[row.usercode]) purchaseByCode[row.usercode] = [];
+                purchaseByCode[row.usercode].push({ date: row.BillDate, qty: Number(row.qty || 0) });
+              });
+
+              const poolRemainingMap: Record<string, number> = {};
+              const effectivePurchaseMap: Record<string, number> = {};
+              for (const code of pendingCodes) {
+                const myReports = reports
+                  .filter(r => (r.product_code || '').trim() === code
+                    && r.order_type === '缺货订购'
+                    && !['已完成', '厂家断货', '已关闭', '已配送'].includes(r.replenish_status || '')
+                    && Number(r.demand_quantity) > 0)
+                  .sort((a: any, b: any) =>
+                    new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+                if (myReports.length === 0) { poolRemainingMap[code] = 0; effectivePurchaseMap[code] = 0; continue; }
+
+                const earliestAnchorBj = toBjDate(myReports[0].created_at);
+                const purchaseRows = purchaseByCode[code] || [];
+                let effectivePurchase = 0;
+                for (const p of purchaseRows) {
+                  if (isPurchaseEligible(toBjDate(p.date), earliestAnchorBj)) effectivePurchase += p.qty;
+                }
+                effectivePurchaseMap[code] = effectivePurchase;
+
+                let remainingPurchase = effectivePurchase;
+                for (const r of myReports) {
+                  const demand = Number(r.demand_quantity);
+                  if (remainingPurchase >= demand) {
+                    remainingPurchase -= demand;
+                  } else {
+                    break;
+                  }
+                }
+                poolRemainingMap[code] = remainingPurchase;
+              }
+              (result as any).poolRemainingMap = poolRemainingMap;
+              (result as any).effectivePurchaseMap = effectivePurchaseMap;
+              console.log(`[poolRemainingMap] 计算 ${pendingCodes.length} 个待处理商品，同时返回 effectivePurchaseMap`);
+            }
+
           } finally {
             releasePool(pool);
           }
         } catch (e) {
           console.error('[get_summary] SQL Server 查询失败，只返回 reports:', e);
+          // ★ 2026-11-10 修复：如果 SQL 整个 try 块崩了，result 可能还没初始化
+          // 给个兜底值，不让下面的 approvals 挂属性时报 undefined 错误
+          if (!result) result = { reports, completed_summary: completedSummary, plan: [], supplierLookup: {} };
         }
 
-        result = { reports: mergedReports, plan: [planRecords], supplierLookup };
+        // 注意：result 已在上面 Line 6681 初始化过，warehouseStockMap 和 poolRemainingMap 也已挂上去
+        // 这里千万不要再 result = {...} 覆盖，否则两个 Map 全部丢失！
+
+        try {
+          // ② 新品审批列表（纯 Supabase 查询，极快）
+          const { data: approvals } = await supabase
+            .from("report_approvals")
+            .select("*")
+            .order("created_at", { ascending: false });
+          (result as any).approvals = approvals || [];
+        } catch (e) { console.warn('[get_summary] approvals 合并查询失败:', e); }
+
+        try {
+          // ③ 配送待办角标（只需要数量，完整列表前端仍可调 get_delivery_todo）
+          const { data: completedReports } = await supabase
+            .from("reports")
+            .select("product_code")
+            .eq("order_type", "缺货订购")
+            .eq("replenish_status", "已完成")
+            .not("product_code", "is", null);
+          (result as any).deliveryTodoCount = (completedReports || []).length;
+        } catch (e) { console.warn('[get_summary] deliveryTodo 合并查询失败:', e); }
         break;
       }
 
@@ -5157,7 +6832,7 @@ serve(async (req) => {
             const pk = `${r.product_code}||${krec}`;
             if (!seen.has(pk)) {
               seen.add(pk);
-              const d = String(r.created_at || '').substring(0, 10) || '2020-01-01';
+              const d = toBjDate(r.created_at) || '2020-01-01';
               stockPairs.push({ code: r.product_code, krec, since: d });
             }
           }
@@ -5367,7 +7042,63 @@ serve(async (req) => {
       }
 
       // ========== 实时配送量查询（需求明细用）==========
+      // v5.9.0+ 支持批量：product_codes + all_items → 一次 SQL 查全部商品
       case "get_realtime_transit": {
+        const batchMode = !!(params as any).product_codes;
+        if (batchMode) {
+          // ===== 批量模式：一次 SQL 查所有商品的所有门店配送 =====
+          // 前端传 { product_codes: ['020643',...], all_items: [{product_code, store_name, since},...] }
+          const { product_codes, all_items } = params as {
+            product_codes: string[];
+            all_items: Array<{ product_code: string; store_name: string; since: string }>;
+          };
+          const resultMap: Record<string, Record<string, number>> = {};
+          try {
+            if (!product_codes?.length || !all_items?.length) break;
+            const storeKrec: Record<string, string> = {
+              '02第二药店':'5','03第三药店':'6','04第四药店':'7',
+              '06常口店':'9','08第八药店':'66','09第九药店':'11',
+              '14第十四药店':'36','16凤凰山药店':'50','17益丰店':'13','21富源店':'63',
+            };
+            const pool = await getPool();
+            try {
+              const codesList = product_codes.map(c => `N'${c.replace(/'/g, "''")}'`).join(',');
+              // 所有 since 里最小的那个（SQL 层面先用它粗过滤，再 JS 里精过滤）
+              const minSince = all_items.reduce((m, it) => !m || it.since < m ? it.since : m, '9999-12-31');
+              const req = pool.request();
+              req.input('minSince', sql.VarChar(10), minSince);
+              const res = await req.query(`
+                SELECT v.usercode as code, vs.InKRec as krec, vs.BillDate as bill_date, ABS(vs.Qty) as qty
+                FROM ZHYYLS.dbo.vBuySendSumDetail vs WITH (NOLOCK)
+                JOIN ZHYYLS.dbo.Vptype v WITH (NOLOCK) ON v.rec = vs.PRec
+                WHERE vs.OutKRec = '3'
+                  AND vs.BillDate >= @minSince
+                  AND (vs.Comment IS NULL OR vs.Comment NOT LIKE '%调货出库单%')
+                  AND v.usercode IN (${codesList})
+              `);
+              // 内存处理：按 (code, krec) 分组，再按每个门店自己的 since 过滤
+              for (const it of all_items) {
+                resultMap[it.product_code] = resultMap[it.product_code] || {};
+                const krec = storeKrec[it.store_name];
+                if (!krec) continue;
+                let sum = 0;
+                for (const row of res.recordset) {
+                  const r = row as any;
+                  if (r.code === it.product_code && String(r.krec) === krec) {
+                    if (new Date(r.bill_date).getTime() >= new Date(it.since).getTime()) {
+                      sum += Number(r.qty || 0);
+                    }
+                  }
+                }
+                resultMap[it.product_code][it.store_name] = sum;
+              }
+            } finally { releasePool(pool); }
+          } catch (e) { console.warn('[get_realtime_transit 批量] 查询失败:', e); }
+          result = { batchResult: resultMap };
+          break;
+        }
+
+        // ===== 原单商品模式（保留给明细弹窗用）=====
         const { product_code, items } = params as {
           product_code: string;
           items: Array<{ store_name: string; since: string }>;
@@ -5529,7 +7260,7 @@ serve(async (req) => {
             const sinceStoreMap: Record<string, Record<string, string>> = {};
             (reportDates || []).forEach((r: any) => {
               if (!r.product_code || !r.created_at || !r.store_id) return;
-              const d = String(r.created_at).substring(0, 10);
+              const d = toBjDate(r.created_at);
               if (!sinceStoreMap[r.product_code]) sinceStoreMap[r.product_code] = {};
               if (!sinceStoreMap[r.product_code][r.store_id] || d < sinceStoreMap[r.product_code][r.store_id]) {
                 sinceStoreMap[r.product_code][r.store_id] = d;
@@ -5795,13 +7526,13 @@ serve(async (req) => {
       responseBody.last_refresh = lastRefreshTime;
     }
     return new Response(JSON.stringify(responseBody), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" },
     });
   } catch (err) {
     console.error("Edge Function 错误:", err);
     return new Response(JSON.stringify({ error: friendlyError(err) }), {
       status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" },
     });
   }
 });
