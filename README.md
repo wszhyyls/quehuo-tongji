@@ -1,7 +1,76 @@
 # 缺货统计系统 — 完整项目文档
 
-> **适用版本**：v5.9.1 | **更新日期**：2026-10-26  
+> **适用版本**：v5.10.1 | **更新日期**：2026-11-08  
 > **项目名称**：WSZH-ShortageStore | **所属**：微山县众和医药连锁有限公司
+
+---
+
+## 🔥 v5.10.1 核心升级（2026-11-08）
+
+### 锚点规则放开 + FIFO 判定收敛 + 行级立即判定 + 一键同步瘦身
+
+#### 1. 当天入库计入判定（锚点口径放开）
+
+| 项目 | 旧口径（v5.10.0 及以前） | 新口径（v5.10.1 起） |
+|------|------------------------|---------------------|
+| 锚点门槛 | 采购 BillDate（北京时间）**必须严格晚于**上报日 | 采购 BillDate（北京时间）**不早于**上报日（当天入库算） |
+| 判定函数 | 各判定入口内联 `BillDate > anchorDateBj` | 统一调用 `isPurchaseEligible(billDateBj, anchorDateBj)`，默认宽松 |
+| 影响 | 同天先报先得不生效——当天入库的货永远轮不到当天上报的需求 | 同天先报先得；"需求明明有采购却永远待处理"的异常现象消失 |
+
+> 锚点判断函数 `isPurchaseEligible(billDateBj, anchorDateBj, sameDayCounts=true)` 收敛为单一实现：  
+> `supabase/functions/_shared/fifo.ts`（共享模块）+ 两边 Edge Function 内部各 import 同一份，保证判定结果 0 漂移。  
+> 前端 `admin.js` 的 `toBjDate()` 北京时间换算逻辑与后端完全一致。
+
+#### 2. 列表上的「📦已入库 + 立即判定」按钮
+
+| 项 | 说明 |
+|----|------|
+| **出现条件** | 某商品汇总行：存在 pending report，且该商品当天或近期有新采购入库（由后端 `check_single_product` 返回的 `eligible_purchase_qty > 0` 触发前端打标） |
+| **按钮行为** | 调后端 `check_single_product` action——对单商品跑完整 FIFO 判定，返回哪些 report 应标已完成，仅更新这一个商品的记录，不影响其他商品 |
+| **与一键同步区别** | 一键同步拉全量 pending reports 翻页（见下），立即判定只判当前商品 |
+| **后端鉴权** | `check_single_product` 已加入 `ADMIN_WRITABLE_ACTIONS`，admin_users 里 role∈{admin, super_admin} 可调用 |
+
+#### 3. 一键同步瘦身 + 翻页全量 + 北京时间口径
+
+| 改动 | 旧行为 | 新行为 |
+|------|--------|--------|
+| **商品缓存刷新** | `sync_with_auto_status` 每次同步都全量刷 `product_cache`（重 SQL + 冗余） | 移除。统一由每天北京时间 **00:30 的 scheduled-task**（pg_cron jobid=11）刷新，一键同步不再重复 |
+| **判定范围** | `preciseAutoDetectStatusV2` 拉 pending reports 用 `limit(2000)` 截断 | 改为 `range` 分页 1000 条/页，翻页直到拉完所有 pending reports |
+| **前端"今日上报"** | 裸用 `new Date().toISOString().slice(0,10)`（北京时间 0-7 点会显示前一天） | 统一用 `bjToday()` / `toBjDate()` 北京时间口径 |
+
+#### 4. FIFO 判定入口统一（三入口一套口径）
+
+| 判定入口 | 调用方式 | 锚点门槛 |
+|----------|---------|---------|
+| **定时任务（每天 00:30）** | `scheduled-task` → import `_shared/fifo.ts` 的 `runFIFO()` | 宽松（当天入库算） |
+| **一键同步（手动触发）** | `query-shortage-data` → import `_shared/fifo.ts` 的 `runFIFO()` | 宽松（当天入库算） |
+| **行级立即判定（按钮）** | `check_single_product` action → 直接调共享 `runFIFO()` | 宽松（当天入库算） |
+
+> 三套入口共用同一份 `toBjDate` / `isPurchaseEligible` / `runFIFO` 代码，杜绝代码漂移。
+
+**误判回退**：无——本次是口径收敛（从"严格 >"改为"宽松 >="），只会让部分原来待处理的 report 变成已完成，不会反过来让已完成回退。
+
+---
+
+## 🔥 v5.10.0 核心升级（2026-11-07）
+
+### 补货判定逻辑大重构：商品级汇总 → 逐笔独立 + 采购不重复消耗
+
+| 项目 | 旧逻辑（v3.17 ~ v373） | 新逻辑（v374） |
+|------|----------------------|---------------|
+| **判定粒度** | 商品级（一个商品所有 report 共用结果） | **逐笔 report 独立判定**（每条需求用自己的上报日做锚点） |
+| **锚点** | 最早/最新未完成上报日（三版本反复切换） | **每条 report 自己的 created_at**（上报日） |
+| **采购消耗** | 汇总对比（可能被多笔需求共享） | **不重复消耗**（同一份入库只能被一条 report 吃掉，先报先得 FIFO） |
+| **锚点门槛** | BillDate > 锚点（一致） | BillDate **严格 >** 锚点（一致） |
+| **判定结果** | 要么全商品已完成、要么全待处理 | **早报早结，晚报晚结**，每条需求独立判定 |
+
+**误判回退**：
+- 10 月后被旧版本自动标记已完成的 **176 条** → 新逻辑重新核查
+- 其中 **282 条保持已完成**、**2 条回退待处理**（典型场景：同商品前几条 report 先吃光了采购入库，后面的轮不到）
+
+**自动判定 action 新增**：
+- `recheck_auto_completed` — 用新逐笔逻辑随时重新核查历史已完成 report
+- `preciseAutoDetectStatusV2` — 重写为逐笔判定核心
 
 ---
 
@@ -29,13 +98,12 @@
 | 项 | 旧规则 | 新规则 |
 |----|--------|--------|
 | 状态机 | 待处理/已订购/已到货/已完成/厂家断货/待付款 | 待处理/已订购/已完成/厂家断货/待付款（**取消「已到货」**） |
-| 「已完成」含义 | 货已配送到门店 | **采购入库累计 ≥ 缺货汇总**（货到仓，配送由人工跟进） |
-| 完成判定 | 门店/仓库库存满足 + 智能回退 | **单调递增、永不回退**（采购入库只增不减） |
+| 「已完成」含义 | 货已配送到门店 | 采购入库满足对应需求（逐笔独立判定，v5.10 进一步细化） |
 | 到货通知 | 绑在一键同步里自动发 | **独立「通知刷新」按钮**手动触发 + `notified_at` 去重 |
 | 配送跟进 | 无 | 新增「配送待办」列表 |
 
 **新增功能与按钮**：
-- **一键同步**：商品缓存同步 + 完成判定（采购入库累计 ≥ 缺货汇总 → 已完成）
+- **一键同步**：商品缓存同步 + 完成判定（v5.10 改为逐笔 report 独立判定，详见 CHANGELOG v374）
 - **通知刷新**：未完成上报 + 仓库有货 + 门店库存+在途 < 需求 → 发通知（本周期一次）
 - **配送待办**：已完成 + 仓库有货 + 门店库存+在途 < 需求 → 待配送清单
 - **门店上报**：一周期只允许上报一次（未完成前）
@@ -182,14 +250,14 @@
 **核心架构**：
 ```
 门店客户端 (Electron/login.html → store.html) 
-    ↓ Edge Function (query-shortage-data: 44 action, ~4700行)
+    ↓ Edge Function (query-shortage-data: 74 action, ~6000行)
     ↓ SQL Server RQZT (读写/SP) + ZHYYLS (只读: GoodsStocks+Vptype+vBuySendSumDetail) + Supabase (reports/认证/通知)
 管理后台 (admin.html) → 一键同步（完成判定） → 通知刷新（到货通知） → 配送待办（人工配送）
     ↓ Supabase Realtime
 门店端通知中心 ← 实时推送
 ```
 - **状态机**：待处理 / 已订购 / 已完成 / 厂家断货 / 待付款（取消「已到货」）
-- **一键同步**：商品缓存同步 + `preciseAutoDetectStatusV2`（采购入库累计 ≥ 缺货汇总 → 已完成，永不回退）
+- **一键同步**：商品缓存同步 + `preciseAutoDetectStatusV2`（**逐笔 report 独立判定**：每条需求用自己的上报日做锚点，消耗锚点后未被前序消耗的采购入库，够了就标记这条已完成）
 - **通知刷新**：未完成上报 + 仓库有货 + 门店库存+在途 < 需求 → 写 `store_notifications`（`notified_at` 去重）
 - **配送待办**：已完成 + 仓库有货 + 门店库存+在途 < 需求 → 待配送清单
 - **状态主数据源**：`reports.replenish_status`（Supabase）
@@ -246,7 +314,7 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
   │                                       ├─ 查看各门店缺货汇总
   │                                       ├─ 订货管理（设置实际订货数量）
   │                                       ├─ 修改补货状态（待处理/已订购/已完成/厂家断货/待付款）
-  │                                       ├─ 一键同步（完成判定：采购入库≥缺货汇总）
+  │                                       ├─ 一键同步（完成判定：逐笔独立 + 采购不重复消耗）
   │                                       ├─ 通知刷新（到货通知，含在途判断）
   │                                       ├─ 配送待办（人工跟进配送）
   │  ◀──────── 通知中心 (Realtime) ────────┤  ├─ 推送"商品已到仓"通知
@@ -364,7 +432,7 @@ gh release upload v3.19.0 "dist/*.exe" "dist/*.yml" "dist/*.blockmap" --clobber
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐                          │
 │  │ 门店端    │  │ 管理后台  │  │ 桌面客户端│                          │
 │  │ store    │  │ admin    │  │ Electron │                          │
-│  │ v3.19.0  │  │ v3.19.0  │  │ v3.19.0  │                          │
+│  │ v5.10.0  │  │ v5.10.0  │  │ v5.10.0  │                          │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘                          │
 └───────┼─────────────┼─────────────┼────────────────────────────────┘
         └─────────────┼─────────────┘
@@ -712,7 +780,7 @@ SPFXB_Result 更新为最新
 
 | 函数 | 路径 | 用途 |
 |------|------|------|
-| `query-shortage-data` | `supabase/functions/query-shortage-data/index.ts` | **主函数**，44 个 action，处理所有业务逻辑 |
+| `query-shortage-data` | `supabase/functions/query-shortage-data/index.ts` | **主函数**，74 个 action，处理所有业务逻辑（含 `preciseAutoDetectStatusV2` 逐笔判定核心 + `recheck_auto_completed` 误判回退） |
 | `check-update` | `supabase/functions/check-update/` | 版本检查（返回最新版本号） |
 | `scheduled-task` | `supabase/functions/scheduled-task/` | **定时任务核心**：full_sync（RQZT缓存+商品缓存+采购计划+自动完成判定），pg_cron 每天 00:30 北京时间自动触发，支持 Bearer service_role_key + x-task-secret 双通道鉴权（config.toml: verify_jwt=false） |
 
@@ -740,7 +808,17 @@ SPFXB_Result 更新为最新
 | `get_purchase_plan` | `keyword`, `status_filter` | 采购计划列表 | 调用 usp_GetPurchasePlanWithFeedback |
 | `set_actual_order_qty` | `product_code`, `actual_qty`, `operator` | 更新结果 | 自动改状态为"已订购" |
 | `manual_update_status` | `product_code`, `target_status`, `operator` | 更新结果 | 手动修改补货状态 |
-| `auto_detect_status` | 无 | 检测结果 | 自动检测所有商品补货状态变化 |
+| `auto_detect_status` | 无 | 检测结果 | 检测入口（内部调 preciseAutoDetectStatusV2） |
+| `preciseAutoDetectStatusV2` | 无 | 逐笔判定结果 | **v5.10 核心**：逐笔 report 独立判定 + 采购入库不重复消耗 |
+| `recheck_auto_completed` | 无 | `{checked, kept, reverted}` | 用新逐笔逻辑重新核查历史已完成 report，误判的回退待处理 |
+| `mark_store_completed` | `product_code`, `store_id` | 更新结果 | 按门店标记已完成（v5.8.2 明细弹窗自动转已完成） |
+| `batch_update_status` | `product_codes`, `target_status`, `operator` | `{success_count, fail_count}` | 批量标记补货状态（N→1请求） |
+| `revert_false_completed` | 无 | `{checked, reverted, kept}` | 撤销旧逻辑误判的"已完成" |
+| `fix_zero_order_qty` | 无 | 修复结果 | 修复订货数量为 0 的异常记录 |
+| `apply_status_sync` | 无 | 同步结果 | SQL Server Shortage_OrderFeedback → Supabase reports 状态同步 |
+| `second_check` | 无 | 校验结果 | 二次校验库存状态 |
+| `restore_reports` | 无 | 恢复结果 | 从备份恢复 reports 表 |
+| `check_order_status` | `product_code` | 状态查询 | 检查指定商品的订货状态详情 |
 
 #### 数据同步
 
@@ -748,9 +826,17 @@ SPFXB_Result 更新为最新
 |--------|------|------|------|
 | `sync_product_cache` | 无 | `{synced: N}` | 同步商品数据到 Supabase product_cache |
 | `sync_cache` | 无 | 存储过程输出 | 标准同步 SPFXB_Result |
-| `sync_with_auto_status` | 无 | `{success, supabase_synced}` | **一键**：同步+状态检测+更新 Supabase 库存缓存 |
+| `sync_with_auto_status` | 无 | `{success, supabase_synced}` | **一键同步核心**：商品缓存 + preciseAutoDetectStatusV2 逐笔判定 + Supabase 库存缓存 |
+| `sync_integration` | 无 | 集成结果 | 集成同步（缓存+采购计划合并） |
+| `sync_realtime_only` | 无 | 同步结果 | 仅同步实时数据（跳过重缓存） |
 | `sync_inventory_incremental` | `since?` | `{synced: N}` | 增量同步库存到 Supabase |
 | `sync_inventory_full` | 无 | `{synced: N}` | 全量同步库存到 Supabase |
+| `get_sync_metadata` | 无 | 元数据 | 查询最后同步时间等元信息 |
+| `get_sync_log` | `Top` | 日志数组 | 同步操作日志（同管理功能） |
+| `notify_refresh` | 无 | 通知结果 | 刷新到货通知（未完成上报+仓库有货+门店库存不足 → 发通知） |
+| `get_delivery_todo` | 无 | 待配送列表 | 已完成+仓库有货+门店库存不足 → 待配送清单 |
+| `ping` | 无 | `{ok: true}` | 健康检查（Keep-Warm 定时心跳） |
+| `rebuild_feedback_from_supabase` | 无 | 重建结果 | 从 Supabase reports 重建 SQL Server Feedback 表 |
 
 #### 认证 & 设备授权
 
@@ -760,7 +846,9 @@ SPFXB_Result 更新为最新
 | `employee_login` | `phone`, `password`, `device_id` | `{employee}` | 员工登录 |
 | `logout_device` | `target_type`, `target_id`, `device_id` | `{logged_out}` | 退出（不取消授权） |
 | `authorize_device` | `device_id`, `target_type`, `target_id`, `authorize` | `{success}` | 管理员授权/拒绝设备 |
+| `batch_authorize` | `device_ids[]`, `target_type`, `target_id` | `{authorized: N}` | 批量授权设备 |
 | `revoke_device` | `device_id`, `target_type`, `target_id` | `{revoked}` | 撤销设备授权 |
+| `unbind_device` | `device_id`, `employee_id?` | `{success}` | 员工解绑设备 |
 | `get_pending_devices` | 无 | `{store_devices, employee_devices}` | 待授权列表（含冲突信息） |
 | `get_authorized_devices` | `target_type`, `target_id` | 设备数组 | 已授权设备 |
 | `check_device_stores` | `device_id` | `{stores}` | 设备已绑定的门店列表 |
@@ -777,6 +865,8 @@ SPFXB_Result 更新为最新
 | `get_realtime_stock` | `product_codes` | `{realtimeStockMap, realtimeTransitMap}` | 批量查询门店实时库存/在途 |
 | `get_realtime_transit` | `product_code`, `items[{store_name, since}]` | `{transitMap}` | 单商品多门店配送量（需求明细用） |
 | `get_status_change_log` | `top?`, `log_product_code?` | 日志数组 | 状态变更日志 |
+| `get_status_log` | `top?` | 日志数组 | 状态日志（通用版，区别于按商品筛选的 change_log） |
+| `get_history_transit_batch` | `items[{product_code, stores[{store_name, since}]}]` | `{transitMap}` | 批量历史配送查询（优化版 v5.10 新增） |
 | `get_store_notifications` | `store_id` | `{notifications, unread_count}` | 门店通知列表（v5.7） |
 | `mark_notification_read` | `store_id`, `all?`, `id?` | `{success}` | 标记通知已读（v5.7） |
 | `revert_false_completed` | 无 | `{checked, reverted, kept}` | 撤销误判的"已完成"商品 |

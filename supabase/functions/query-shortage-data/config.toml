@@ -1,0 +1,4 @@
+verify_jwt = false
+# 注：保持 verify_jwt=false 因为 scheduled-task (pg_cron) 用 Bearer service_role_key 调用
+#      verify_jwt=true 会要求 pg_cron 也走完整 JWT 校验（service_role key 符合但需测试）
+#      代码内部已实现 action 级别鉴权（checkAdminAuth / checkTaskSecret），不依赖此配置

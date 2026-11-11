@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="purple">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <!-- PWA（★ 2026-11-10 修复：/static/manifest.json 不存在 → SPA fallback 返回 HTML → 解析错误）-->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+    <meta name="theme-color" content="#667eea">
+
+    <title>微山县众和医药连锁有限公司 药品订购系统 - 管理后台</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=603">
+    <script src="/static/js/supabase.min.js?v=603"></script>
+    <script src="/static/js/utils.js?v=603"></script>
+</head>
+<body class="admin-page">
+    <div class="app-header">
+        <div class="header-left">
+            <img src="/static/logo.jpg" class="company-logo" alt="LOGO">
+            <span class="company-name">微山县众和医药连锁有限公司</span>
+        </div>
+        <div class="header-right">
+            <button id="themeBtn" class="btn-theme" data-tip="在浅色和深色两种界面之间切换；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内生效">切换主题</button>
+            <button id="logoutBtn" class="btn-logout">退出登录</button>
+        </div>
+    </div>
+
+    <div class="app-container">
+        <div class="store-name-bar">
+            <h1 class="store-title">管理后台</h1>
+            <span style="margin-left:auto;font-size:11px;color:#999;" id="pageVersion" data-version>v5.14.0 (2026-11-10)</span>
+        </div>
+
+        <div class="order-tabs admin-tabs">
+            <button class="tab-btn active" data-tab="summary">缺货汇总<span class="tab-badge" id="shortageBadge"></span></button>
+            <button class="tab-btn" data-tab="new">新品汇总<span class="tab-badge" id="newBadge"></span></button>
+
+            <button class="tab-btn" data-tab="employees">员工管理</button>
+            <button class="tab-btn" data-tab="devices">设备授权</button>
+            <button class="tab-btn" data-tab="users">门店管理</button>
+            <button class="tab-btn" data-tab="audit">操作日志</button>
+            <button class="tab-btn" data-tab="admins" id="adminsTabBtn" style="display:none;">子账号管理</button>
+            <button class="tab-btn" data-tab="help">📖 操作说明</button>
+        </div>
+
+        <!-- 缺货汇总 -->
+        <div id="tab-summary" class="tab-content active">
+            <div class="summary-stats">
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('已订购')" data-tip="点击只看所有已提交订购、等待仓库处理的商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="orderedCount">0</span><span class="stat-label">已订购</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('待付款')" data-tip="点击只看所有已进入付款环节的商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="paymentCount">0</span><span class="stat-label">待付款</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('已完成')" data-tip="点击只看所有采购入库已满足缺货的商品（已入库，但还没配送到店）；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="completedTotalCount">0</span><span class="stat-label">已入库</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('待处理')" data-tip="点击只看所有还没采购到的缺货商品（包含厂家断货）；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="pendingCount">0</span><span class="stat-label">待处理</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('已配送')" data-tip="点击只看所有已经配送到门店的商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="deliveredCount">0</span><span class="stat-label" style="color:#43a047;">✓ 已完成</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('今日上报')" data-tip="点击只看今天刚刚上报的缺货商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="todayCount">0</span><span class="stat-label">今日上报</span></div>
+            </div>
+            
+            <div class="list-card">
+                <div class="list-header">
+                    <h2>缺货订购汇总</h2>
+                    <div class="filter-bar">
+                        <!-- 统一筛选入口 -->
+                        <div class="excel-filter" id="supplierFilterWrap">
+                            <button class="excel-filter-trigger" onclick="toggleExcelFilter(event)" style="min-width:110px;">
+                                <span id="supplierFilterText">供货商筛选</span><span class="excel-filter-arrow">▼</span>
+                            </button>
+                            <div class="excel-filter-panel" id="supplierFilterPanel" style="min-width:280px;max-height:480px;">
+                                <!-- ① 关键字搜索 -->
+                                <input type="text" id="supplierSearchInput" placeholder="搜索供货商..." class="excel-filter-search" oninput="onSupplierKeywordChange()">
+                                <!-- ② 供货商多选列表 -->
+                                <div class="excel-filter-list" id="supplierDropdown" style="max-height:180px;"></div>
+                                <div class="excel-filter-actions" style="border-top:none;padding-top:0;">
+                                

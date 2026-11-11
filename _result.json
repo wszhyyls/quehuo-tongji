@@ -1,0 +1,211 @@
+{
+  "summary": {
+    "zeroA": 9,
+    "gt0A": 140,
+    "gapSumA": 1581,
+    "zeroB": 7,
+    "gt0B": 142,
+    "gapSumB": 1601,
+    "zeroC": 3,
+    "gt0C": 146,
+    "gapSumC": 1718
+  },
+  "AtoB": [
+    {
+      "code": "2040014",
+      "name": "盐酸雷尼替丁胶囊",
+      "demand": 4,
+      "pool": 1,
+      "wh": 5,
+      "gapB": 3
+    },
+    {
+      "code": "2070043",
+      "name": "活血止痛胶囊",
+      "demand": 3,
+      "pool": 2,
+      "wh": 5,
+      "gapB": 1
+    }
+  ],
+  "AtoC": [
+    {
+      "code": "4633",
+      "name": "硫酸氢氯吡格雷片",
+      "demand": 40,
+      "pool": 100,
+      "wh": 0,
+      "gapC": 40
+    },
+    {
+      "code": "1040029",
+      "name": "小儿柴桂退热颗粒",
+      "demand": 17,
+      "pool": 20,
+      "wh": 0,
+      "gapC": 17
+    },
+    {
+      "code": "15803",
+      "name": "蜜炼川贝批杷膏",
+      "demand": 14,
+      "pool": 34,
+      "wh": 0,
+      "gapC": 14
+    },
+    {
+      "code": "1020267",
+      "name": "缬沙坦胶囊",
+      "demand": 6,
+      "pool": 24,
+      "wh": 0,
+      "gapC": 6
+    },
+    {
+      "code": "2040014",
+      "name": "盐酸雷尼替丁胶囊",
+      "demand": 4,
+      "pool": 1,
+      "wh": 5,
+      "gapC": 3
+    },
+    {
+      "code": "2070043",
+      "name": "活血止痛胶囊",
+      "demand": 3,
+      "pool": 2,
+      "wh": 5,
+      "gapC": 1
+    }
+  ],
+  "poolGtWh": [
+    {
+      "code": "4633",
+      "name": "硫酸氢氯吡格雷片",
+      "demand": 40,
+      "pool": 100,
+      "wh": 0,
+      "diff": 100
+    },
+    {
+      "code": "15803",
+      "name": "蜜炼川贝批杷膏",
+      "demand": 14,
+      "pool": 34,
+      "wh": 0,
+      "diff": 34
+    },
+    {
+      "code": "1020267",
+      "name": "缬沙坦胶囊",
+      "demand": 6,
+      "pool": 24,
+      "wh": 0,
+      "diff": 24
+    },
+    {
+      "code": "1020448",
+      "name": "心宝丸",
+      "demand": 30,
+      "pool": 80,
+      "wh": 60,
+      "diff": 20
+    },
+    {
+      "code": "1040029",
+      "name": "小儿柴桂退热颗粒",
+      "demand": 17,
+      "pool": 20,
+      "wh": 0,
+      "diff": 20
+    },
+    {
+      "code": "020381",
+      "name": "石杉碱甲片",
+      "demand": 25,
+      "pool": 10,
+      "wh": 0,
+      "diff": 10
+    },
+    {
+      "code": "020253",
+      "name": "艾司奥美拉唑镁肠溶片",
+      "demand": 5,
+      "pool": 15,
+      "wh": 7,
+      "diff": 8
+    },
+    {
+      "code": "2040010",
+      "name": "多酶片",
+      "demand": 10,
+      "pool": 6,
+      "wh": 0,
+      "diff": 6
+    },
+    {
+      "code": "1110078",
+      "name": "盐酸普拉克索片",
+      "demand": 8,
+      "pool": 5,
+      "wh": 0,
+      "diff": 5
+    },
+    {
+      "code": "020158",
+      "name": "盐酸坦索罗辛缓释胶囊",
+      "demand": 20,
+      "pool": 5,
+      "wh": 0,
+      "diff": 5
+    },
+    {
+      "code": "1020143",
+      "name": "地奥心血康软胶囊",
+      "demand": 12,
+      "pool": 4,
+      "wh": 0,
+      "diff": 4
+    },
+    {
+      "code": "020091",
+      "name": "盐酸洛哌丁胺胶囊",
+      "demand": 16,
+      "pool": 14,
+      "wh": 11,
+      "diff": 3
+    },
+    {
+      "code": "3859",
+      "name": "小儿多维生素咀嚼片",
+      "demand": 8,
+      "pool": 2,
+      "wh": 0,
+      "diff": 2
+    },
+    {
+      "code": "1100166",
+      "name": "小儿健脾化积口服液",
+      "demand": 3,
+      "pool": 2,
+      "wh": 0,
+      "diff": 2
+    },
+    {
+      "code": "020364",
+      "name": "盐酸曲美他嗪片",
+      "demand": 18,
+      "pool": 9,
+      "wh": 7,
+      "diff": 2
+    },
+    {
+      "code": "0355",
+      "name": "三七化痔丸",
+      "demand": 11,
+      "pool": 1,
+      "wh": 0,
+      "diff": 1
+    }
+  ]
+}

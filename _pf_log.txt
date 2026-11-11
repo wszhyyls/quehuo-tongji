@@ -1,0 +1,28 @@
+
+[2026-11-11T02:58:19.639Z] 应用启动 · 版本 5.15.1 · USE_LOCAL_SERVER=true(默认)
+[2026-11-11T02:58:19.659Z] 后台静默更新: 已禁用
+[2026-11-11T02:58:19.685Z] [findStaticRoot] __dirname=C:\Program Files\WSZH-ShortageStore\resources\app.asar
+[2026-11-11T02:58:19.709Z] [findStaticRoot] resourcesPath=C:\Program Files\WSZH-ShortageStore\resources
+[2026-11-11T02:58:19.734Z] [findStaticRoot] getAppPath=C:\Program Files\WSZH-ShortageStore\resources\app.asar
+[2026-11-11T02:58:19.759Z] [findStaticRoot] candidate: C:\Program Files\WSZH-ShortageStore\resources\app.asar\deploy  admin.html=false login.html=false
+[2026-11-11T02:58:19.785Z] [findStaticRoot] candidate: C:\Program Files\WSZH-ShortageStore\resources\deploy  admin.html=true login.html=true
+[2026-11-11T02:58:19.786Z] 找到静态文件根: C:\Program Files\WSZH-ShortageStore\resources\deploy
+[2026-11-11T02:58:19.788Z] [findStaticRoot] ✅ 完整性检查通过, 7 个关键文件全部存在
+[2026-11-11T02:58:19.916Z] [findStaticRoot] __dirname=C:\Program Files\WSZH-ShortageStore\resources\app.asar
+[2026-11-11T02:58:19.917Z] [findStaticRoot] resourcesPath=C:\Program Files\WSZH-ShortageStore\resources
+[2026-11-11T02:58:19.917Z] [findStaticRoot] getAppPath=C:\Program Files\WSZH-ShortageStore\resources\app.asar
+[2026-11-11T02:58:19.917Z] [findStaticRoot] candidate: C:\Program Files\WSZH-ShortageStore\resources\app.asar\deploy  admin.html=false login.html=false
+[2026-11-11T02:58:19.918Z] [findStaticRoot] candidate: C:\Program Files\WSZH-ShortageStore\resources\deploy  admin.html=true login.html=true
+[2026-11-11T02:58:19.919Z] 找到静态文件根: C:\Program Files\WSZH-ShortageStore\resources\deploy
+[2026-11-11T02:58:19.920Z] [findStaticRoot] ✅ 完整性检查通过, 7 个关键文件全部存在
+[2026-11-11T02:58:19.939Z] ✅ 本地静态服务器: http://127.0.0.1:7402  (root: C:\Program Files\WSZH-ShortageStore\resources\deploy)
+[2026-11-11T02:58:19.943Z] 使用本地静态服务器: http://127.0.0.1:7402
+[2026-11-11T02:58:19.965Z] 主窗口加载: http://127.0.0.1:7402/login.html
+[2026-11-11T02:58:20.096Z] [LocalServer] 200: /login.html → C:\Program Files\WSZH-ShortageStore\resources\deploy\login.html  size=30394
+[2026-11-11T02:58:20.277Z] [LocalServer] 200: /static/css/style.css → C:\Program Files\WSZH-ShortageStore\resources\deploy\static\css\style.css  size=99706
+[2026-11-11T02:58:20.278Z] [LocalServer] 200: /static/logo.jpg → C:\Program Files\WSZH-ShortageStore\resources\deploy\static\logo.jpg  size=348649
+[2026-11-11T02:58:20.279Z] [LocalServer] 200: /static/js/utils.js → C:\Program Files\WSZH-ShortageStore\resources\deploy\static\js\utils.js  size=29520
+[2026-11-11T02:58:20.286Z] [LocalServer] 200: /static/js/supabase.min.js → C:\Program Files\WSZH-ShortageStore\resources\deploy\static\js\supabase.min.js  size=218252
+[2026-11-11T02:58:20.405Z] 主窗口显示: ready-to-show
+[2026-11-11T02:58:20.440Z] ◀ did-stop-loading
+[2026-11-11T02:58:34.937Z] [Update] 静态更新已跳过 (DISABLED 或未配置 URL)

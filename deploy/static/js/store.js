@@ -520,9 +520,17 @@ async function queryProductByCode(code, forceRefresh) {
         var data = await callEdgeFunction('get_product_detail', { product_code: code, store_name: user?.store_name || '', force_refresh: !!forceRefresh });
         if (data.success && data.data && data.data.length > 0 && data.data[0].length > 0) {
             var myRecord = data.data[0][0];
+            // 方案 B：识别终极降级数据，给门店温和提醒
+            if (myRecord._source === 'fallback_raw') {
+                showToast('此商品已从采购库存池消失（超 365 天未采购），本次数据来自原始采购记录，仅参考。您仍可提交需求，判定侧会自动读取最新入库。', 'warning');
+            }
             currentProduct = buildProductData(code, myRecord, null, data.data[0]);
             storeInventoryMap[code] = myRecord; renderProductInfo(currentProduct.data);
-        } else { showAlert('商品未找到'); document.getElementById('productInfo').style.display = 'none'; currentProduct = null; }
+        } else {
+            // 真没数据：原始采购表里也没记录
+            showAlert('该商品确实无任何采购历史（原始采购表也查不到），请联系仓库确认是否是新增商品或编码有误。');
+            document.getElementById('productInfo').style.display = 'none'; currentProduct = null;
+        }
     } catch(err) { logError('商品详情查询失败', err); showAlert('查询失败：' + friendlyErrorClient(err.message)); }
 }
 
@@ -661,7 +669,7 @@ function applyHistoryFilter() {
     });
     renderHistoryPage(filtered);
 }
-function renderHistoryPage(records) { var tbody = document.getElementById('historyTbody'), em = document.getElementById('historyEmpty'), pg = document.getElementById('historyPagination'); tbody.innerHTML = ''; var rh = document.getElementById('reporterHeader'); if (rh) rh.style.display = user.is_employee ? 'none' : ''; if (records.length === 0) { em.style.display = 'block'; pg.style.display = 'none'; return; } em.style.display = 'none'; var totalPages = Math.ceil(records.length / historyPageSize) || 1; if (historyPage > totalPages) historyPage = totalPages; if (historyPage < 1) historyPage = 1; var start = (historyPage - 1) * historyPageSize, end = start + historyPageSize, ts = records.slice(start, end); ts.forEach(function(r) { var tr = document.createElement('tr'); tr.setAttribute('data-code', r.product_code || ''); var sinceStr = r.created_at ? new Date(r.created_at).toISOString().substring(0,10) : '2026-01-01'; tr.setAttribute('data-since', sinceStr); var n = r.product_name||r.new_product_name||r.product_code||'(无名称)'; var rb = getReplenishBadge(r.replenish_status); if (r.replenish_status === '已驳回' && r.approval_reason) { rb = '<span title="驳回原因：' + escapeHtml(r.approval_reason) + '" style="cursor:pointer;border-bottom:1px dashed #c62828;">' + rb + '</span>'; } var fi = escapeHtml((r.product_code||'')+' '+(r.product_name||r.new_product_name||'')+' '+(r.specification||r.new_specification||'')+' '+(r.manufacturer||r.new_manufacturer||'')); var nc = '<span class="history-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:100%;">'+escapeHtml(n)+'</span>'; var sc = '<span style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:60px;">'+escapeHtml(r.specification||r.new_specification||'-')+'</span>'; var d = r.created_at?new Date(r.created_at):null, ds = d?d.toLocaleDateString('zh-CN'):'', fts = d?d.toLocaleString('zh-CN'):''; // v5.8.1+ 不再自动调用 enrichHistoryRows（避免冷启动超时），等用户点「刷新库存」才查
+function renderHistoryPage(records) { var tbody = document.getElementById('historyTbody'), em = document.getElementById('historyEmpty'), pg = document.getElementById('historyPagination'); tbody.innerHTML = ''; var rh = document.getElementById('reporterHeader'); if (rh) rh.style.display = user.is_employee ? 'none' : ''; if (records.length === 0) { em.style.display = 'block'; pg.style.display = 'none'; return; } em.style.display = 'none'; var totalPages = Math.ceil(records.length / historyPageSize) || 1; if (historyPage > totalPages) historyPage = totalPages; if (historyPage < 1) historyPage = 1; var start = (historyPage - 1) * historyPageSize, end = start + historyPageSize, ts = records.slice(start, end); ts.forEach(function(r) { var tr = document.createElement('tr'); tr.setAttribute('data-code', r.product_code || ''); var sinceStr = r.created_at ? new Date(r.created_at).toISOString().substring(0,10) : '2026-01-01'; tr.setAttribute('data-since', sinceStr); var n = r.product_name||r.new_product_name||r.product_code||'(无名称)'; var rb = getReplenishBadge(r.replenish_status); if (r.replenish_status === '已驳回' && r.approval_reason) { rb = '<span data-tip="驳回原因：' + escapeHtml(r.approval_reason) + '" style="cursor:pointer;border-bottom:1px dashed #c62828;">' + rb + '</span>'; } var fi = escapeHtml((r.product_code||'')+' '+(r.product_name||r.new_product_name||'')+' '+(r.specification||r.new_specification||'')+' '+(r.manufacturer||r.new_manufacturer||'')); var nc = '<span class="history-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:100%;">'+escapeHtml(n)+'</span>'; var sc = '<span style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:60px;">'+escapeHtml(r.specification||r.new_specification||'-')+'</span>'; var d = r.created_at?new Date(r.created_at):null, ds = d?d.toLocaleDateString('zh-CN'):'', fts = d?d.toLocaleString('zh-CN'):''; // v5.8.1+ 不再自动调用 enrichHistoryRows（避免冷启动超时），等用户点「刷新库存」才查
 // v5.8.1+ 删除「已配送」列，只保留「仓库库存」
 // 渲染时直接用缓存：缓存里有 → 显示数字；没有 → 显示「查询中」
 var wsCached = _warehouseStockCache[r.product_code];
@@ -810,7 +818,7 @@ window.refreshHistoryEnrich = function() {
             btn.disabled = false;
             btn.textContent = '🔄 刷新库存';
             btn.style.opacity = '1';
-            btn.title = '上次刷新：' + new Date().toLocaleTimeString('zh-CN') + '（5 分钟内自动用缓存）';
+            btn.setAttribute('data-tip', '上次刷新：' + new Date().toLocaleTimeString('zh-CN') + '（5 分钟内自动用缓存）');
         }
         // 检查是否所有数据都加载完成
         var pending = document.querySelectorAll('#historyTbody .ws-cell');

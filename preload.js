@@ -8,6 +8,10 @@ contextBridge.exposeInMainWorld('electron', {
             shell.openExternal(url);
         }
     },
+    // ★ 同步获取机器级 device id（跨 origin 稳定，%APPDATA%持久化）
+    getDeviceIdSync: () => {
+        try { return ipcRenderer.sendSync('get-device-id-sync', null) || null; } catch(e) { return null; }
+    },
     ipcRenderer: {
         // 发送消息
         send: (channel, data) => {
@@ -25,7 +29,7 @@ contextBridge.exposeInMainWorld('electron', {
         },
         // 异步调用
         invoke: (channel, data) => {
-            const validChannels = ['get-app-version', 'check-update', 'install-update'];
+            const validChannels = ['get-app-version', 'check-update', 'install-update', 'proxy-fetch', 'get-device-id'];
             if (validChannels.includes(channel)) {
                 return ipcRenderer.invoke(channel, data);
             }

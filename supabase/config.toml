@@ -1,12 +1,12 @@
 # Supabase 项目配置
-# v5.8.1+: sync-cache 独立函数禁用 JWT，由内部 secret 鉴权
-# 其他函数 (query-shortage-data) 保持默认 verify_jwt = true
-
 project_id = "qswpgnnedqvuegwfbprd"
 
 [functions.sync-cache]
 verify_jwt = false
 
-# check-update 无需登录态（客户端主进程不带 JWT 调用）
 [functions.check-update]
+verify_jwt = false
+
+# gh-proxy: 代理 GitHub Release 下载，无需 JWT
+[functions.gh-proxy]
 verify_jwt = false

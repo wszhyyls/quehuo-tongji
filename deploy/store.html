@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN" data-theme="purple">
 <head>
     <meta charset="UTF-8">
@@ -7,7 +7,7 @@
 
     <!-- ========== PWA 支持 ========== -->
     <link rel="manifest" href="./manifest.json">
-    <link rel="apple-touch-icon" href="./static/icon-192.png">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -15,10 +15,10 @@
     <meta name="theme-color" content="#667eea">
     <!-- ============================ -->
 
-    <link rel="stylesheet" href="./static/css/style.css?v=600">
-    <script src="./static/js/supabase.min.js?v=600"></script>
-    <script src="./static/js/fuse.min.js?v=1"></script>
-    <script src="./static/js/utils.js?v=600"></script>
+    <link rel="stylesheet" href="/static/css/style.css?v=61110">
+    <script src="/static/js/supabase.min.js?v=61110"></script>
+    <script src="/static/js/fuse.min.js?v=61110"></script>
+    <script src="/static/js/utils.js?v=61110"></script>
 </head>
 <body>
     <!-- 预加载遮罩层 -->
@@ -36,15 +36,15 @@
 
     <div class="app-header">
         <div class="header-left">
-            <img src="./static/logo.jpg" class="company-logo" alt="LOGO">
+            <img src="/static/logo.jpg" class="company-logo" alt="LOGO">
             <span class="company-name">微山县众和医药连锁有限公司</span>
         </div>
         <div class="header-right">
-            <button id="notifBtn" class="btn-notif" title="通知中心" aria-label="通知中心">
+            <button id="notifBtn" class="btn-notif" data-tip="查看仓库发来的到货提醒和通知消息；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内打开" aria-label="通知中心">
                 <span class="notif-icon">🔔</span>
                 <span id="notifBadge" class="notif-badge" style="display:none;">0</span>
             </button>
-            <button id="themeBtn" class="btn-theme" title="切换主题">切换主题</button>
+            <button id="themeBtn" class="btn-theme" data-tip="在浅色和深色两种界面之间切换；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内生效">切换主题</button>
             <button id="logoutBtn" class="btn-logout">退出登录</button>
         </div>
     </div>
@@ -58,7 +58,7 @@
         <div id="storeAnnouncement">
             <span>📢</span>
             <span id="announcementText">正在加载公告...</span>
-            <span class="ann-close" onclick="document.getElementById('storeAnnouncement').style.display='none'" title="关闭">✕</span>
+            <span class="ann-close" onclick="document.getElementById('storeAnnouncement').style.display='none'" data-tip="点击关闭这条公告，本次浏览不再显示；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内生效">✕</span>
         </div>
 
         <div class="store-name-bar">
@@ -71,7 +71,7 @@
                 <button class="tab-btn" data-tab="new">新品订购</button>
             </div>
             <div style="display:flex;align-items:center;gap:8px;">
-                <button id="refreshCacheBtn" class="btn-refresh" title="刷新库存数据">刷新库存</button>
+                <button id="refreshCacheBtn" class="btn-refresh" data-tip="从服务器拉取最新的库存和缺货信息，刷新历史记录里的仓库库存列；只是查看，不会改动任何东西；不会推送系统内通知；通常 3 到 10 秒">刷新库存</button>
                 <span id="lastRefreshTime" style="font-size:11px;color:#888;white-space:nowrap;"></span>
             </div>
         </div>
@@ -93,7 +93,7 @@
             </div>
 
             <div id="productInfo" class="product-card" style="display: none;">
-                <button id="cancelProductBtn" class="btn-cancel-product" title="取消选择">✕</button>
+                <button id="cancelProductBtn" class="btn-cancel-product" data-tip="取消当前选好的商品，返回搜索界面；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内生效">✕</button>
                 <p class="new-label" id="newLabel" style="display: none;">※ SPFXB暂无此商品，按新品处理</p>
 
                 <div class="product-row">
@@ -208,7 +208,7 @@
                         <option value="待处理">待处理</option>
                         <option value="已订购">已订购</option>
                         <option value="已到货">已到货</option>
-                        <option value="已完成">已完成</option>
+                        <option value="已完成">已入库</option>
                         <option value="待付款">待付款</option>
                         <option value="厂家断货">厂家断货</option>
                     </select>
@@ -306,29 +306,8 @@
         </div>
     </div>
 
-    <script src="./static/js/store.js?v=600"></script>
+    <script src="/static/js/store.js?v=61110"></script>
 
-    <!-- ========== PWA Service Worker (v5.8.1+ 完全禁用：旧 SW 缓存的旧 JS 与新代码不兼容) ========== -->
-    <script>
-      if ('serviceWorker' in navigator) {
-        // 1. 强制清理所有旧的 Service Worker 和缓存（每次刷新都清）
-        navigator.serviceWorker.getRegistrations().then(function(regs) {
-          regs.forEach(function(reg) {
-            console.log('[Cleanup] Unregistering SW:', reg.scope);
-            reg.unregister();
-          });
-        });
-        if (window.caches) {
-          caches.keys().then(function(names) {
-            names.forEach(function(name) {
-              console.log('[Cleanup] Deleting cache:', name);
-              caches.delete(name);
-            });
-          });
-        }
-        // 2. 不再注册新的 SW（避免缓存干扰正常加载；如需 PWA 离线功能后续可重新设计）
-      }
-    </script>
     <style>
         /* 预加载遮罩层样式 */
         .loading-overlay {

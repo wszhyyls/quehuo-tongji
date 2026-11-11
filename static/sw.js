@@ -1,131 +1,40 @@
-// Service Worker for 缺货统计系统 PWA
-const CACHE_NAME = 'shortage-tool-v5.8.5';
-const STATIC_ASSETS = [
-  '/',
-  '/login.html',
-  '/store.html',
-  '/admin.html',
-  '/manifest.json',
-  '/static/css/style.css',
-  '/static/js/utils.js',
-  '/static/js/admin.js',
-  '/static/js/store.js',
-  '/static/logo.jpg'
-];
+// Service Worker — v5.14.0 终极修复
+// 根因：v5.12.3 fetch 对非导航请求也兜底 → 缓存污染（JS请求拿到 HTML）
+// 修复：fetch 只处理 request.mode === 'navigate'，其他请求直接 return（SW 不拦截）
+// activate 里清所有旧 cache（含 v5.12.x 和 v5.13.0）
+const CACHE_NAME = 'shortage-tool-v5.14.0';
 
-// 安装 Service Worker
-self.addEventListener('install', (event) => {
-  console.log('[SW] Installing...');
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('[SW] Caching static assets');
-        return cache.addAll(STATIC_ASSETS);
+self.addEventListener('install', (e) => {
+  console.log('[SW v5.14.0] install → skipWaiting');
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (e) => {
+  console.log('[SW v5.14.0] activate → 清全部旧 cache');
+  e.waitUntil(
+    caches.keys().then((keys) => Promise.all(
+      keys.filter((k) => k !== CACHE_NAME).map((k) => {
+        console.log('[SW] delete old:', k);
+        return caches.delete(k);
       })
-      .then(() => {
-        console.log('[SW] Skip waiting');
-        return self.skipWaiting();
-      })
+    )).then(() => self.clients.claim())
   );
 });
 
-// 激活并清理旧缓存
-self.addEventListener('activate', (event) => {
-  console.log('[SW] Activating...');
-  event.waitUntil(
-    caches.keys()
-      .then((cacheNames) => {
-        return Promise.all(
-          cacheNames
-            .filter((name) => name !== CACHE_NAME)
-            .map((name) => {
-              console.log('[SW] Deleting old cache:', name);
-              return caches.delete(name);
-            })
-        );
+// ★ v5.14.0：严格只拦截导航请求（HTML），其他请求一概放行
+self.addEventListener('fetch', (e) => {
+  // 只拦截浏览器导航（用户点链接/URL栏直接访问 HTML 页面）
+  if (e.request.mode !== 'navigate') return;
+
+  e.respondWith(
+    fetch(e.request, { cache: 'no-cache' })
+      .then((resp) => {
+        if (resp.ok && resp.headers.get('Content-Type')?.includes('text/html')) {
+          const clone = resp.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
+        }
+        return resp;
       })
-      .then(() => {
-        console.log('[SW] Claiming clients');
-        return self.clients.claim();
-      })
+      .catch(() => caches.match(e.request).then((r) => r || new Response('离线中，请检查网络', { status: 503 })))
   );
 });
-
-// 拦截网络请求
-self.addEventListener('fetch', (event) => {
-  const { request } = event;
-  const url = new URL(request.url);
-
-  // API 请求直接放行（不缓存）
-  if (url.pathname.includes('/functions/v1/')) {
-    event.respondWith(fetch(request));
-    return;
-  }
-
-  // JS/CSS/HTML 文件：网络优先（v5.8.1+ 修复：避免缓存旧版导致 SyntaxError）
-  // 这是关键：caches.match 默认忽略 ?v= 参数，缓存策略会被错误命中
-  if (url.pathname.match(/\.(js|css|html)$/) || url.pathname === '/' || url.pathname.endsWith('.html')) {
-    event.respondWith(
-      fetch(request, { cache: 'no-cache' })
-        .then((response) => {
-          if (response.ok) {
-            const clonedResponse = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, clonedResponse));
-          }
-          return response;
-        })
-        .catch(() => caches.match(request).then(r => r || new Response('Offline', { status: 503 })))
-    );
-    return;
-  }
-
-  // 其他资源（图片、字体等）：缓存优先
-  if (url.origin === location.origin) {
-    event.respondWith(
-      caches.match(request)
-        .then((cachedResponse) => {
-          if (cachedResponse) return cachedResponse;
-          return fetch(request).then((response) => {
-            if (response.ok) {
-              const clonedResponse = response.clone();
-              caches.open(CACHE_NAME).then((cache) => cache.put(request, clonedResponse));
-            }
-            return response;
-          });
-        })
-    );
-  } else {
-    event.respondWith(fetch(request));
-  }
-});
-
-// 处理推送通知（预留）
-self.addEventListener('push', (event) => {
-  if (!event.data) return;
-
-  const data = event.data.json();
-  const options = {
-    body: data.body || '您有新的通知',
-    icon: '/static/icon-192.png',
-    badge: '/static/icon-192.png',
-    vibrate: [100, 50, 100],
-    data: {
-      dateOfArrival: Date.now(),
-      primaryKey: data.id || 1
-    }
-  };
-
-  event.waitUntil(
-    self.registration.showNotification(data.title || '缺货统计系统', options)
-  );
-});
-
-// 点击通知处理（预留）
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  event.waitUntil(
-    clients.openWindow('/admin.html')
-  );
-});
-
-console.log('[SW] Service Worker loaded');

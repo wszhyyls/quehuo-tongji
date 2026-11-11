@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <!-- ★ v5.14 自愈：SW缓存污染清理（必须在所有script之前同步执行）-->
+    <script>
+    (function(){try{if(sessionStorage.getItem('sw_cleared_v514'))return;var dirty=false;function finish(){if(dirty){sessionStorage.setItem('sw_cleared_v514','1');location.reload(true);}}if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){navigator.serviceWorker.getRegistrations().then(function(rs){if(rs&&rs.length){dirty=true;rs.forEach(function(r){r.unregister();});}if(window.caches&&caches.keys){return caches.keys().then(function(keys){if(keys&&keys.length){dirty=true;keys.forEach(function(k){caches.delete(k);});}});}}).then(finish).catch(finish);}else{finish();}}catch(e){}})();
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>微山县众和医药连锁有限公司 药品订购系统 - 登录</title>
+
+    <link rel="manifest" href="./manifest.json">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+    <meta name="theme-color" content="#667eea">
+
+    <link rel="stylesheet" href="/static/css/style.css?v=603">
+    <script src="/static/js/utils.js?v=603"></script>
+    <style>
+        .login-mode-switch {
+            display: flex;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #e0e0e0;
+        }
+        .mode-btn {
+            flex: 1;
+            padding: 10px 0;
+            text-align: center;
+            cursor: pointer;
+            background: #f5f5f5;
+            color: #666;
+            font-size: 14px;
+            transition: all 0.3s;
+            user-select: none;
+        }
+        .mode-btn.active {
+            background: #2196f3;
+            color: white;
+            font-weight: bold;
+        }
+        .login-input {
+            width: 100%;
+            height: 40px;
+            padding: 0 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+            outline: none;
+        }
+        .login-input:focus {
+            border-color: #2196f3;
+        }
+    </style>
+</head>
+<body class="login-page" data-theme="blue">
+    <!-- 版本更新提示条 -->
+    <div id="updateBanner" style="display:none;position:fixed;top:0;left:0;right:0;background:linear-gradient(135deg,#ff6b35,#f7931e);color:#fff;text-align:center;padding:12px 16px;font-size:14px;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,0.3);">
+        <span id="updateBannerMsg">🔄 有新版本可用！建议更新后使用。</span>
+        <a id="directDownloadLink" href="#" download style="margin-left:12px;padding:4px 16px;background:#fff;color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址1</a>
+        <a id="directDownloadLink2" href="#" target="_blank" style="margin-left:6px;padding:4px 16px;background:rgba(255,255,255,0.85);color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址2</a>
+        <a id="directDownloadLink3" href="#" download style="margin-left:6px;padding:4px 16px;background:rgba(255,255,255,0.85);color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址3</a>
+        <button onclick="this.parentElement.style.display='none'" style="margin-left:8px;background:none;border:none;color:rgba(255,255,255,0.7);cursor:pointer;font-size:18px;">&times;</button>
+    </div>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <img src="/static/logo.jpg" alt="LOGO" class="login-logo">
+                <span class="login-company">微山县众和医药连锁有限公司</span>
+            </div>
+            <h1 class="login-system">药品订购系统</h1>
+
+            <!-- 登录模式切换 -->
+            <div class="login-mode-switch">
+                <span class="mode-btn active" data-mode="employee">员工登录</span>
+                <span class="mode-btn" data-mode="admin">管理员登录</span>
+            </div>
+
+            <form id="loginForm" onsubmit="return false;">
+                <!-- 员工登录：门店下拉选择 -->
+                <div class="form-group" id="storeGroup">
+                    <label>选择门店</label>
+                    <select id="storeSelect" class="login-select">
+                        <option value="">-- 请选择门店 --</option>
+                        <option value="wszhyy02">02第二药店</option>
+                        <option value="wszhyy03">03第三药店</option>
+                        <option value="wszhyy04">04第四药店</option>
+                        <option value="wszhyy06">06常口店</option>
+                        <option value="wszhyy08">08第八药店</option>
+                        <option value="wszhyy09">09第九药店</option>
+                        <option value="wszhyy14">14第十四药店</option>
+                        <option value="wszhyy16">16凤凰山药店</option>
+                        <option value="wszhyy17">17益丰店</option>
+                        <option value="wszhyy21">21富源店</option>
+                    </select>
+                </div>
+
+                <!-- 员工登录：账号下拉选择 -->
+                <div class="form-group" id="accountGroup">
+                    <label>选择账号</label>
+                    <select id="accountSelect" class="login-select">
+                        <option value="">-- 请先选择门店 --</option>
+                    </select>
+                </div>
+
+                <!-- 管理员登录：用户名输入 -->
+                <div class="form-group" id="adminUsernameGroup" style="display:none;">
+                    <label>用户名</label>
+                    <input type="text" id="adminUsernameInput" class="login-input" placeholder="请输入用户名" autocomplete="username">
+                </div>
+
+                <!-- 密码框 -->
+                <div class="form-group" id="passwordGroup">
+                    <label>密码</label>
+                    <div class="password-input-wrapper">
+                        <input type="password" id="passwordInput"
+                            placeholder="请输入密码"
+                            autocomplete="current-password">
+                        <button type="button" class="password-toggle" id="passwordToggle" data-tip="显示密码">
+                            👁
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 记住密码 -->
+                <div class="form-group remember-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="rememberPassword">
+                        <span>记住密码</span>
+                    </label>
+                </div>
+
+                <button type="button" class="btn-login" id="loginBtn">登 录</button>
+            </form>
+
+            <div id="error" class="error-message" style="display:none;"></div>
+            <div id="loading" style="display:none;margin-top:15px;color:#666;text-align:center;font-size:14px;">
+                <span style="display:inline-block;animation:spin 1s linear infinite;">&#8987;</span> 正在验证...
+            </div>
+            
+            <div class="version-info" data-version>V5.11.1</div>
+        </div>
+    </div>
+
+    <script src="/static/js/supabase.min.js?v=603"></script>
+    <script>
+        // SUPABASE_URL / SUPABASE_ANON_KEY 已在 utils.js 中定义，此处不再重复声明
+
+        let supabaseClient = null;
+        let isLoggingIn = false;
+
+        // ========== 门店账号映射数据 ==========
+        // 每个门店对应的实际账号列表
+        const STORE_ACCOUNTS = {
+            'admin': [
+                { value: 'admin', label: 'admin（管理员）' }
+            ],
+            'wszhyy02': [
+                { value: 'wszhyy02', label: 'wszhyy02' },
+                { value: '15305479520', label: '15305479520' }
+            ],
+            'wszhyy03': [
+                { value: 'wszhyy03', label: 'wszhyy03' }
+            ],
+            'wszhyy04': [
+                { value: 'wszhyy04', label: 'wszhyy04' }
+            ],
+            'wszhyy06': [
+                { value: 'wszhyy06', label: 'wszhyy06' }
+            ],
+            'wszhyy08': [
+                { value: 'wszhyy08', label: 'wszhyy08' }
+            ],
+            'wszhyy09': [
+                { value: 'wszhyy09', label: 'wszhyy09' }
+            ],
+            'wszhyy14': [
+                { value: 'wszhyy14', label: 'wszhyy14' }
+            ],
+            'wszhyy16': [
+                { value: 'wszhyy16', label: 'wszhyy16' }
+            ],
+            'wszhyy17': [
+                { value: 'wszhyy17', label: 'wszhyy17' }
+            ],
+            'wszhyy21': [
+                { value: 'wszhyy21', label: 'wszhyy21' }
+            ]
+        };
+
+        window.onload = function() {
+            try {
+                supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+                var storeSelect = document.getElementById('storeSelect');
+                var accountSelect = document.getElementById('accountSelect');
+                var passwordEl = document.getElementById('passwordInput');
+
+                // ===== 填充账号 =====
+                function fillAccounts(sv) {
+                    accountSelect.innerHTML = '';
+                    if (!sv || !STORE_ACCOUNTS[sv]) {
+                        accountSelect.appendChild(new Option('-- 请先选择门店 --', ''));
+                        return;
+                    }
+                    accountSelect.appendChild(new Option('-- 请选择账号 --', ''));
+                    STORE_ACCOUNTS[sv].forEach(function(a) {
+                        accountSelect.appendChild(new Option(a.label, a.value));
+                    });
+                    if (STORE_ACCOUNTS[sv].length === 1) {
+                        accountSelect.value = STORE_ACCOUNTS[sv][0].value;
+                    }
+                }
+
+                // ===== 立即恢复上次登录 =====
+                var ls = localStorage.getItem('lastStore');
+                var la = localStorage.getItem('lastAccount');
+                if (ls && STORE_ACCOUNTS[ls]) {
+                    storeSelect.value = ls;
+                    fillAccounts(ls);
+                    if (la) {
+                        var ao = accountSelect.querySelector('option[value="' + la + '"]');
+                        if (ao) accountSelect.value = la;
+                        var sp = localStorage.getItem('savedPassword_' + ls + '_' + la);
+                        if (sp && localStorage.getItem('rememberPassword_' + ls + '_' + la) === 'true') {
+                            passwordEl.value = sp;
+                            document.getElementById('rememberPassword').checked = true;
+                        }
+                    }
+                }
+
+                // ===== 门店变化 =====
+                storeSelect.onchange = function() {
+                    accountSelect.value = '';
+                    passwordEl.value = '';
+                    document.getElementById('rememberPassword').checked = false;
+                    fillAccounts(this.value);
+                };
+
+                // ===== 立即恢复上次登录 =====
+                var ls = localStorage.getItem('lastStore');
+                var la = localStorage.getItem('lastAccount');
+                if (ls && STORE_ACCOUNTS[ls]) {
+                    storeSelect.value = ls;
+                    fillAccounts(ls);
+                    if (la) {
+                        var ao = accountSelect.querySelector('option[value="' + la + '"]');
+                        if (ao) accountSelect.value = la;
+                        var sp = localStorage.getItem('savedPassword_' + ls + '_' + la);
+                        if (sp && localStorage.getItem('rememberPassword_' + ls + '_' + la) === 'true') {
+                            passwordEl.value = sp;
+                            document.getElementById('rememberPassword').checked = true;
+                        }
+                    }
+                }
+
+                // ===== 账号变化 =====
+                accountSelect.onchange = function() {
+                    passwordEl.value = '';
+                    document.getElementById('rememberPassword').checked = false;
+                    if (this.value) {
+                        var sv = storeSelect.value;
+                        var sp = localStorage.getItem('savedPassword_' + sv + '_' + this.value);
+                        if (sp && localStorage.getItem('rememberPassword_' + sv + '_' + this.value) === 'true') {
+                            passwordEl.value = sp;
+                            document.getElementById('rememberPassword').checked = true;
+                        }
+                    }
+                };
+
+                // ===== 设备绑定锁定（优先缓存，秒速锁定）=====
+                function applyDeviceLock(bound) {
+                    storeSelect.querySelectorAll('option').forEach(function(o) {
+                        if (o.value && !bound.some(function(s) { return s.username === o.value; })) {
+                            o.disabled = true; o.style.display = 'none';
+                        }
+                    });
+                    var cur = storeSelect.value;
+                    if (!cur || !bound.some(function(s) { return s.username === cur; })) {
+                        storeSelect.value = bound[0].username;
+                        fillAccounts(bound[0].username);
+                    }
+                    var lbl = storeSelect.parentElement.querySelector('label');
+                    if (lbl) lbl.innerHTML = '选择门店 🔒<span style="font-size:10px;color:#4CAF50;margin-left:6px;">（已绑定）</span>';
+                    // 缓存到 localStorage，下次立即生效
+                    localStorage.setItem('device_bound_stores', JSON.stringify(bound));
+                }
+                
+                // 1. 先从缓存读取，立即锁定（无延迟）
+                // v2 版本标记：旧缓存（username=手机号）需要忽略
+                var cacheVer = localStorage.getItem('device_bound_cache_ver');
+                try {
+                    var cached = JSON.parse(localStorage.getItem('device_bound_stores'));
+                    if (cacheVer === 'v2' && cached && cached.length > 0 && cached[0]) {
+                        applyDeviceLock(cached);
+                    }
+                } catch(e) {}
+                
+                // 2. 后台静默刷新（无缓存或刷新时再更新）
+                (function() {
+                    var ctrl = new AbortController();
+                    setTimeout(function() { ctrl.abort(); }, 5000);
+                    fetch(SUPABASE_URL + '/functions/v1/query-shortage-data', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY },
+                        body: JSON.stringify({ action: 'check_device_stores', params: { device_id: getDeviceId() } }),
+                        signal: ctrl.signal
+                    }).then(function(r) { return r.json(); }).then(function(r) {
+                        if (r.success && r.data && r.data.stores && r.data.stores.length > 0) {
+                            localStorage.setItem('device_bound_cache_ver', 'v2');
+                            applyDeviceLock(r.data.stores);
+                        }
+                    }).catch(function() {});
+                })();
+                
+                // 确保密码框获得焦点的函数
+                function focusPasswordInput() {
+                    // 先移除可能阻碍焦点的属性
+                    passwordEl.removeAttribute('disabled');
+                    passwordEl.removeAttribute('readonly');
+                    passwordEl.style.display = '';
+                    passwordEl.style.pointerEvents = 'auto';
+                    
+                    // 延迟聚焦，避免与select的blur冲突导致无法输入
+                    setTimeout(function() {
+                        passwordEl.focus();
+                    }, 150);
+                }
+                
+                // 密码显示/隐藏切换
+                document.getElementById('passwordToggle').addEventListener('click', function() {
+                    if (passwordEl.type === 'password') {
+                        passwordEl.type = 'text';
+                        this.textContent = '🙈';
+                        this.title = '隐藏密码';
+                    } else {
+                        passwordEl.type = 'password';
+                        this.textContent = '👁';
+                        this.title = '显示密码';
+                    }
+                });
+
+                // 登录模式切换
+                var modeBtns = document.querySelectorAll('.mode-btn');
+                modeBtns.forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        modeBtns.forEach(function(b) { b.classList.remove('active'); });
+                        this.classList.add('active');
+                        var mode = this.dataset.mode;
+                        passwordEl.value = '';
+                        document.getElementById('rememberPassword').checked = false;
+                        hideError();
+                        if (mode === 'admin') {
+                            document.getElementById('storeGroup').style.display = 'none';
+                            document.getElementById('accountGroup').style.display = 'none';
+                            document.getElementById('adminUsernameGroup').style.display = '';
+                            // 恢复上次管理员用户名和密码
+                            var sau = localStorage.getItem('lastAdminUser');
+                            if (sau) {
+                                document.getElementById('adminUsernameInput').value = sau;
+                                if (localStorage.getItem('rememberPassword_admin_' + sau) === 'true') {
+                                    var sp = localStorage.getItem('savedPassword_admin_' + sau);
+                                    if (sp) { passwordEl.value = sp; document.getElementById('rememberPassword').checked = true; }
+                                }
+                            }
+                            document.getElementById('adminUsernameInput').focus();
+                        } else {
+                            document.getElementById('storeGroup').style.display = '';
+                            document.getElementById('accountGroup').style.display = '';
+                            document.getElementById('adminUsernameGroup').style.display = 'none';
+                        }
+                    });
+                });
+
+                // ===== 自动恢复管理员模式 =====
+                if (localStorage.getItem('lastMode') === 'admin') {
+                    var adminBtn = document.querySelector('.mode-btn[data-mode="admin"]');
+                    if (adminBtn) adminBtn.click();
+                }
+
+                // 登录按钮
+                document.getElementById('loginBtn').addEventListener('click', handleLogin);
+
+                // 回车快捷键
+                passwordEl.addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter') handleLogin();
+                });
+                document.getElementById('adminUsernameInput').addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter') handleLogin();
+                });
+            } catch (e) {
+                alert('初始化失败: ' + e.message);
+            }
+        };
+
+        // ========== 登录处理 ==========
+        async function handleLogin() {
+            if (isLoggingIn) return;
+            var isAdminMode = document.querySelector('.mode-btn.active').dataset.mode === 'admin';
+            var account, password, store = null;
+
+            if (isAdminMode) {
+                account = document.getElementById('adminUsernameInput').value;
+                password = document.getElementById('passwordInput').value;
+                if (!account) { showError('请输入用户名'); return; }
+            } else {
+                store = document.getElementById('storeSelect').value;
+                account = document.getElementById('accountSelect').value;
+                password = document.getElementById('passwordInput').value;
+                if (!store) { showError('请选择门店'); return; }
+                if (!account) { showError('请选择账号'); return; }
+            }
+            if (!password) { showError('请输入密码'); return; }
+
+            isLoggingIn = true; showLoading(true); hideError();
+
+            try {
+                var deviceId = getDeviceId();
+                var response = await fetch(SUPABASE_URL + '/functions/v1/query-shortage-data', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
+                    },
+                    body: JSON.stringify({
+                        action: 'store_login',
+                        params: { username: account, password: password, device_id: deviceId }
+                    })
+                });
+                var result = await response.json();
+
+                if (!result.success || !result.data) {
+                    if (result.pending_device_id) {
+                        var errMsg = result.error || '该设备未授权，请联系管理员授权后使用';
+                        if (result.bound_to) {
+                            errMsg += '\n\n当前设备被账号「' + result.bound_to + '」绑定，已自动提交重新授权申请，请等待管理员处理。';
+                        }
+                        throw new Error(errMsg);
+                    }
+                    throw new Error(result.error || '登录失败');
+                }
+
+                var loginData = result.data;
+                localStorage.setItem('token', loginData.session.access_token);
+                localStorage.setItem('user', JSON.stringify(loginData.user));
+
+                // 保存本次登录信息
+                if (!isAdminMode) {
+                    localStorage.setItem('lastStore', store);
+                    localStorage.setItem('lastAccount', account);
+                } else {
+                    localStorage.setItem('lastAdminUser', account);
+                }
+                localStorage.setItem('lastMode', isAdminMode ? 'admin' : 'employee');
+
+                // 保存或清除记住的密码
+                var rememberChecked = document.getElementById('rememberPassword').checked;
+                var currentPassword = document.getElementById('passwordInput').value;
+                var passwordKey, rememberKey;
+                if (isAdminMode) {
+                    passwordKey = 'savedPassword_admin_' + account;
+                    rememberKey = 'rememberPassword_admin_' + account;
+                } else {
+                    passwordKey = 'savedPassword_' + store + '_' + account;
+                    rememberKey = 'rememberPassword_' + store + '_' + account;
+                }
+
+                if (rememberChecked && currentPassword) {
+                    localStorage.setItem(passwordKey, currentPassword);
+                    localStorage.setItem(rememberKey, 'true');
+                } else {
+                    localStorage.removeItem(passwordKey);
+                    localStorage.setItem(rememberKey, 'false');
+                }
+
+                showLoading(false);
+                var adminRoles = ['admin', 'super_admin'];
+                // 标记本次为"新登录"，store.html 收到后会自动弹通知中心
+                sessionStorage.setItem('fresh_login', '1');
+                // 【v26】跳转加时间戳，彻底绕过 Electron/CDN/SW 三层缓存
+                var t = Date.now();
+                var targetPage = adminRoles.indexOf(loginData.user.role) >= 0 ? '/admin.html' : '/store.html';
+                window.location.href = targetPage + '?t=' + t;
+            } catch (err) {
+                showLoading(false);
+                showError(err.message);
+            } finally {
+                isLoggingIn = false;
+            }
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+            var btn = document.getElementById('loginBtn');
+            btn.disabled = show;
+            btn.style.opacity = show ? '0.6' : '1';
+        }
+        function showError(msg) {
+            var el = document.getElementById('error');
+            el.textContent = msg; el.style.display = 'block';
+        }
+        function hideError() { document.getElementById('error').style.display = 'none'; }
+        
+        // ========== 下载更新 ==========
+        // 直接用 <a> 标签下载，由 Electron will-download 事件接管
+        // 不再需要 downloadUpdate() 函数
+
+        // ========== 页面加载时检查版本更新 ==========
+        (function checkVersionUpdate() {
+            try {
+                // 通过 Electron IPC 获取客户端真实版本号（非页面显示值）
+                var checkPromise;
+                if (window.electron && window.electron.ipcRenderer) {
+                    checkPromise = window.electron.ipcRenderer.invoke('get-app-version');
+                } else {
+                    // 非 Electron 环境用页面显示版本（浏览器直接访问）
+                    var versionEl = document.querySelector('.version-info');
+                    checkPromise = Promise.resolve(versionEl ? versionEl.textContent.replace('V','').trim() : '0.0.0');
+                }
+                
+                checkPromise.then(function(currentVer) {
+                    return fetch(SUPABASE_URL + '/functions/v1/check-update', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY },
+                        body: JSON.stringify({ version: currentVer })
+                    }).then(function(r) { return r.json(); }).then(function(r) {
+                        if (r.success && r.data && r.data.updateAvailable) {
+                            var banner = document.getElementById('updateBanner');
+                            var msg = document.getElementById('updateBannerMsg');
+                            msg.textContent = '🔔 发现新版本 V' + r.data.version + '，请下载更新！（当前 V' + currentVer + '）';
+                            // 优先使用服务端返回的直链（Cloudflare Pages Function 代理，绕开 GitHub CDN 阻塞）
+                            var directUrl = r.data.downloadUrl;
+                            var backupUrl = r.data.downloadUrl2;
+                            var pageUrl = r.data.downloadUrl3;
+                            var fileName = r.data.fileName || ('WSZH-ShortageStore-Setup-' + r.data.version + '.exe');
+                            // 下载地址1：CF 代理（主，自动下载）
+                            var btn = document.getElementById('directDownloadLink');
+                            if (btn && directUrl) {
+                                btn.href = directUrl;
+                                btn.download = fileName;
+                            }
+                            // 下载地址2：GitHub 原始直链（备1，自动下载）
+                            var btn2 = document.getElementById('directDownloadLink2');
+                            if (btn2 && backupUrl) {
+                                btn2.href = backupUrl;
+                                btn2.download = fileName;
+                            }
+                            // 下载地址3：同文件直链（第三份 CDN 备份，设 download 属性）
+                            var btn3 = document.getElementById('directDownloadLink3');
+                            if (btn3 && directUrl) {
+                                btn3.href = directUrl;
+                                btn3.download = fileName;
+                            }
+                            banner.style.display = 'block';
+                        }
+                    });
+                }).catch(function() {});
+            } catch(e) {}
+        })();
+    </script>
+    <style>
+        @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+        .login-card input, .login-card select { touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+        .login-select { width:100%; padding:12px 16px; font-size:16px; border:1px solid #ddd; border-radius:8px; background:#fff; color:#333; appearance:none; -webkit-appearance:none; cursor:pointer; }
+        .login-input { width:100%; padding:12px 16px; font-size:16px; border:1px solid #ddd; border-radius:8px; box-sizing:border-box; }
+        .password-input-wrapper { position:relative; display:flex; align-items:center; width:100%; }
+        .password-input-wrapper input { width:100%; padding-right:40px; height:40px; box-sizing:border-box; }
+        .password-toggle { position:absolute; right:8px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; font-size:16px; padding:4px 8px; color:#888; line-height:1; }
+        .password-toggle:hover { color:#555; }
+        .btn-login { touch-action:manipulation; -webkit-tap-highlight-color:transparent; min-height:48px; }
+        .remember-group { display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; }
+        .checkbox-label { display:flex; align-items:center; gap:8px; cursor:pointer; color:#666; font-size:14px; }
+        .checkbox-label input[type="checkbox"] { width:18px; height:18px; cursor:pointer; }
+        .change-password-link { color:#667eea; font-size:14px; text-decoration:none; }
+        .change-password-link:hover { text-decoration:underline; }
+        .version-info { text-align:center; margin-top:20px; padding-top:15px; border-top:1px solid #eee; color:#999; font-size:12px; }
+        @media(max-width:480px) {
+            .login-card { margin:10px; padding:20px; }
+            .login-header { gap: 8px; margin-bottom: 10px; }
+            .login-logo { height: 18px; }
+            .login-company { font-size: 15px; }
+            .login-system { font-size: 15px; margin-bottom: 24px; }
+        }
+    </style>
+
+    <!-- ========== PWA Service Worker (v5.8.1+ 完全禁用) ========== -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        // 1. 强制清理所有旧的 Service Worker 和缓存
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          regs.forEach(function(reg) {
+            console.log('[Cleanup] Unregistering SW:', reg.scope);
+            reg.unregister();
+          });
+        });
+        if (window.caches) {
+          caches.keys().then(function(names) {
+            names.forEach(function(name) {
+              console.log('[Cleanup] Deleting cache:', name);
+              caches.delete(name);
+            });
+          });
+        }
+        // 2. 不再注册 SW
+      }
+    </script>
+</body>
+</html>

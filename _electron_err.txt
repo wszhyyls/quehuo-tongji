@@ -1,0 +1,21 @@
+[1021236:1111/100319.315:INFO:CONSOLE(2)] "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security
+  Policy set or a policy with "unsafe-eval" enabled. This exposes users of
+  this app to unnecessary security risks.
+
+For more information and help, consult
+https://electronjs.org/docs/tutorial/security.
+This warning will not show up
+once the app is packaged.", source: node:electron/js2c/sandbox_bundle (2)
+Error occurred in handler for 'get-app-version': Error: No handler registered for 'get-app-version'
+    at WebContents.<anonymous> (node:electron/js2c/browser_init:2:86829)
+    at WebContents.emit (node:events:517:28)
+[1021236:1111/100319.516:INFO:CONSOLE(464)] "🔧 [utils.js v603] 自定义 tooltip 系统初始化开始", source: http://127.0.0.1:2737/static/js/utils.js?v=61110 (464)
+[1021236:1111/100319.516:INFO:CONSOLE(598)] "✅ [utils.js v603] 自定义 tooltip 系统初始化完成，事件委托已绑定", source: http://127.0.0.1:2737/static/js/utils.js?v=61110 (598)
+[1021236:1111/100319.911:INFO:CONSOLE(2)] "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security
+  Policy set or a policy with "unsafe-eval" enabled. This exposes users of
+  this app to unnecessary security risks.
+
+For more information and help, consult
+https://electronjs.org/docs/tutorial/security.
+This warning will not show up
+once the app is packaged.", source: node:electron/js2c/sandbox_bundle (2)

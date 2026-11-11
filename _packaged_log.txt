@@ -1,0 +1,26 @@
+
+[2026-11-11T02:44:45.916Z] 应用启动 · 版本 5.15.1 · USE_LOCAL_SERVER=true(默认)
+[2026-11-11T02:44:45.965Z] 后台静默更新: 已禁用
+[2026-11-11T02:44:45.990Z] [findStaticRoot] __dirname=G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\app.asar
+[2026-11-11T02:44:46.014Z] [findStaticRoot] resourcesPath=G:\Trae项目\缺货统计系统\dist\win-unpacked\resources
+[2026-11-11T02:44:46.039Z] [findStaticRoot] getAppPath=G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\app.asar
+[2026-11-11T02:44:46.065Z] [findStaticRoot] candidate: G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\app.asar\deploy  admin.html=false login.html=false
+[2026-11-11T02:44:46.066Z] [findStaticRoot] candidate: G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy  admin.html=true login.html=true
+[2026-11-11T02:44:46.067Z] 找到静态文件根: G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy
+[2026-11-11T02:44:46.217Z] [findStaticRoot] __dirname=G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\app.asar
+[2026-11-11T02:44:46.217Z] [findStaticRoot] resourcesPath=G:\Trae项目\缺货统计系统\dist\win-unpacked\resources
+[2026-11-11T02:44:46.218Z] [findStaticRoot] getAppPath=G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\app.asar
+[2026-11-11T02:44:46.218Z] [findStaticRoot] candidate: G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\app.asar\deploy  admin.html=false login.html=false
+[2026-11-11T02:44:46.219Z] [findStaticRoot] candidate: G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy  admin.html=true login.html=true
+[2026-11-11T02:44:46.219Z] 找到静态文件根: G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy
+[2026-11-11T02:44:46.239Z] ✅ 本地静态服务器: http://127.0.0.1:6222  (root: G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy)
+[2026-11-11T02:44:46.248Z] 使用本地静态服务器: http://127.0.0.1:6222
+[2026-11-11T02:44:46.293Z] 主窗口加载: http://127.0.0.1:6222/login.html
+[2026-11-11T02:44:47.566Z] [LocalServer] 200: /login.html → G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy\login.html  size=30394
+[2026-11-11T02:44:47.652Z] [LocalServer] 200: /static/js/utils.js → G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy\static\js\utils.js  size=29520
+[2026-11-11T02:44:47.667Z] [LocalServer] 200: /static/css/style.css → G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy\static\css\style.css  size=99706
+[2026-11-11T02:44:47.671Z] [LocalServer] 200: /static/js/supabase.min.js → G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy\static\js\supabase.min.js  size=218252
+[2026-11-11T02:44:47.671Z] [LocalServer] 200: /static/logo.jpg → G:\Trae项目\缺货统计系统\dist\win-unpacked\resources\deploy\static\logo.jpg  size=348649
+[2026-11-11T02:44:47.877Z] 主窗口显示: did-finish-load
+[2026-11-11T02:44:47.917Z] ◀ did-stop-loading
+[2026-11-11T02:45:01.248Z] [Update] 静态更新已跳过 (DISABLED 或未配置 URL)

@@ -451,7 +451,8 @@ function callEdgeFunction(action, params, options) {
             'Authorization': 'Bearer ' + token
         },
         body: JSON.stringify({ action: action, params: params }),
-        signal: finalSignal
+        signal: finalSignal,
+        timeout: timeoutMs  // ★ v5.15.12 修复：把前端 timeout 透传给主进程 proxy-fetch
     }).then(function(resp) {
         if (!resp.ok) {
             // 统一解析错误体（提前取出来，后面分支都要用）

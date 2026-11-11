@@ -1797,13 +1797,16 @@ body.login-page {
     text-overflow: ellipsis;
 }
 
-/* 列对齐 */
-#summaryTable td:nth-child(3) { text-align: left; }   /* 编码 */
-#summaryTable td:nth-child(6) { text-align: center; }  /* 紧急 */
-#summaryTable td:nth-child(7) { text-align: right; }   /* 需求 */
-#summaryTable td:nth-child(8) { text-align: right; }   /* 订货 */
-#summaryTable td:nth-child(9) { text-align: center; }  /* 状态 */
-#summaryTable td:nth-child(10) { text-align: center; } /* 操作 */
+/* 列对齐 — 新 9 列布局（check→供货商→编码→品名→厂家→规格→需求→状态→操作）*/
+#summaryTable td:nth-child(1),  #summaryTable th:nth-child(1)  { text-align: center; }  /* checkbox */
+#summaryTable td:nth-child(2),  #summaryTable th:nth-child(2)  { text-align: left; }    /* 供货商 */
+#summaryTable td:nth-child(3),  #summaryTable th:nth-child(3)  { text-align: center; }  /* 编码 */
+#summaryTable td:nth-child(4),  #summaryTable th:nth-child(4)  { text-align: left; }    /* 品名 */
+#summaryTable td:nth-child(5),  #summaryTable th:nth-child(5)  { text-align: left; }    /* 生产厂家 */
+#summaryTable td:nth-child(6),  #summaryTable th:nth-child(6)  { text-align: left; }    /* 规格 */
+#summaryTable td:nth-child(7),  #summaryTable th:nth-child(7)  { text-align: center; }  /* 需求 */
+#summaryTable td:nth-child(8),  #summaryTable th:nth-child(8)  { text-align: center; }  /* 状态 */
+#summaryTable td:nth-child(9),  #summaryTable th:nth-child(9)  { text-align: center; }  /* 操作 */
 
 .type-badge {
     display: inline-block;

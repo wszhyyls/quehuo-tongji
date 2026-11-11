@@ -2792,7 +2792,9 @@ serve(async (req) => {
             itemsByCode[code].push(r);
           }
 
-          // 5. 逐笔判定：新逐笔逻辑满足的保持已完成，不满足的改回待处理
+          // 5. 逐笔判定：用与 runFIFO 完全一致的宽松口径（sameDayCounts=true）
+          //    满足的保持已完成，不满足的改回待处理
+          // ★ 2026-11-11 修复：硬编码 <= 严格口径导致 runFIFO 正确判定的 report 被错误回退
           const now = new Date().toISOString();
           const toRevert: string[] = [];
           const toKeep: string[] = [];
@@ -2806,7 +2808,9 @@ serve(async (req) => {
 
               let consumed = 0;
               for (const entry of purchasePool) {
-                if (entry.date <= anchorDate) continue;
+                // ★ 与 runFIFO 同口径：BillDate >= anchorDate（当天入库算）
+                const entryDateBj = toBjDate(entry.date);
+                if (!isPurchaseEligible(entryDateBj, anchorDate)) continue;
                 if (entry.remaining <= 0) continue;
                 const take = Math.min(entry.remaining, shortage - consumed);
                 entry.remaining -= take;
@@ -3111,12 +3115,14 @@ serve(async (req) => {
       // ========== 第二阶段：应用 SP 结果到 Supabase（批量更新 + 通知）==========
       case "apply_status_sync": {
         // 将 SP 阶段判定的完成/到货对批量同步到 Supabase reports + 通知
-        const { completed_pairs, arrived_pairs } = params as {
+        const { completed_pairs, arrived_pairs, operator } = params as {
           completed_pairs: Array<{ product_code: string; store_name: string; status: string }>;
           arrived_pairs: Array<{ product_code: string; store_name: string; status: string }>;
+          operator?: string;
         };
         let updatedCount = 0;
         let notifCount = 0;
+        const validOperator = operator || '系统自动';
         const storeNameToId: Record<string, string> = {
           '02第二药店': 'wszhyy02', '03第三药店': 'wszhyy03', '04第四药店': 'wszhyy04',
           '06常口店': 'wszhyy06', '08第八药店': 'wszhyy08', '09第九药店': 'wszhyy09',
@@ -3135,13 +3141,16 @@ serve(async (req) => {
                 replenish_status: pair.status,
                 status_remark: '自动',
                 status_changed_at: new Date().toISOString(),
-                status_changed_by: '系统自动'
+                status_changed_by: validOperator
               })
                 .eq("product_code", pair.product_code)
                 .eq("store_id", sid)
                 .eq("order_type", "缺货订购")
+                // ★ 补全 4 种终态保护（已关闭 + 已配送 + 已完成 + 厂家断货）
                 .neq("replenish_status", "已完成")
                 .neq("replenish_status", "厂家断货")
+                .neq("replenish_status", "已关闭")
+                .neq("replenish_status", "已配送")
                 .then(r => r.error ? 0 : 1)
                 .catch(() => 0);
             });
@@ -6317,6 +6326,7 @@ serve(async (req) => {
               .neq("replenish_status", "已完成")
               .neq("replenish_status", "厂家断货")
               .neq("replenish_status", "已关闭")
+              .neq("replenish_status", "已配送")
               .order("created_at", { ascending: false })
               .range(from, from + PS - 1);
             if (!page || page.length === 0) break;
@@ -6712,6 +6722,10 @@ serve(async (req) => {
                 purchaseByCode[row.usercode].push({ date: row.BillDate, qty: Number(row.qty || 0) });
               });
 
+              // ★ 2026-11-11 重大修复：effectivePurchaseMap + poolRemainingMap 改用 per-report anchor + FIFO 扣减
+              //   和 runFIFO（_shared/fifo.ts）完全对齐，消除"判定层和前端 gap 口径不一致"的根因
+              //   旧口径：整个商品共享 earliest pending report 的日期 → 错误让新上报消费旧入库
+              //   新口径：每条 report 用自己的 created_at 当 anchor，FIFO 顺序扣共享剩余池
               const poolRemainingMap: Record<string, number> = {};
               const effectivePurchaseMap: Record<string, number> = {};
               for (const code of pendingCodes) {
@@ -6725,24 +6739,51 @@ serve(async (req) => {
 
                 if (myReports.length === 0) { poolRemainingMap[code] = 0; effectivePurchaseMap[code] = 0; continue; }
 
-                const earliestAnchorBj = toBjDate(myReports[0].created_at);
                 const purchaseRows = purchaseByCode[code] || [];
-                let effectivePurchase = 0;
-                for (const p of purchaseRows) {
-                  if (isPurchaseEligible(toBjDate(p.date), earliestAnchorBj)) effectivePurchase += p.qty;
-                }
-                effectivePurchaseMap[code] = effectivePurchase;
+                // poolEntries: 每张入库单带 remain，按 BillDate 升序排序
+                const poolEntries = purchaseRows
+                  .map(p => ({
+                    bill_date_bj: toBjDate(p.date),
+                    orig_qty: Number(p.qty || 0),
+                    remain: Number(p.qty || 0)
+                  }))
+                  .sort((a, b) => a.bill_date_bj.localeCompare(b.bill_date_bj));
 
-                let remainingPurchase = effectivePurchase;
+                let satisfiedDemand = 0;   // runFIFO 口径下能满足的需求总量 = effectivePurchaseMap
                 for (const r of myReports) {
-                  const demand = Number(r.demand_quantity);
-                  if (remainingPurchase >= demand) {
-                    remainingPurchase -= demand;
+                  const demand = Number(r.demand_quantity) || 0;
+                  if (demand <= 0) continue;
+                  const myAnchor = toBjDate(r.created_at);
+
+                  // 先算本 anchor 下 eligible 剩余采购池总量
+                  let eligibleRemain = 0;
+                  for (const pe of poolEntries) {
+                    if (isPurchaseEligible(pe.bill_date_bj, myAnchor)) {
+                      eligibleRemain += pe.remain;
+                    }
+                  }
+
+                  if (eligibleRemain >= demand) {
+                    // FIFO 扣减：oldest-first
+                    let need = demand;
+                    for (const pe of poolEntries) {
+                      if (need <= 0) break;
+                      if (!isPurchaseEligible(pe.bill_date_bj, myAnchor)) continue;
+                      const take = Math.min(pe.remain, need);
+                      pe.remain -= take;
+                      need -= take;
+                    }
+                    satisfiedDemand += demand;
                   } else {
-                    break;
+                    break; // FIFO 顺序：这条没了后面也不会有
                   }
                 }
-                poolRemainingMap[code] = remainingPurchase;
+
+                effectivePurchaseMap[code] = satisfiedDemand;
+                // 剩余池（所有条目 remain 之和）
+                let remainSum = 0;
+                for (const pe of poolEntries) remainSum += pe.remain;
+                poolRemainingMap[code] = remainSum;
               }
               (result as any).poolRemainingMap = poolRemainingMap;
               (result as any).effectivePurchaseMap = effectivePurchaseMap;

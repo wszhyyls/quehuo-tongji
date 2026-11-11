@@ -1,87 +1,61 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// 本地声明的最新版本（如果 GitHub API 失败时兜底）
-const FALLBACK_VERSION = '5.9.0';
+const CF_BASE = 'https://wszhyy.pages.dev';
+const RELEASES_DIR = `${CF_BASE}/releases/`;          // latest.yml + .blockmap 在这里
 const GITHUB_REPO = 'wszhyyls/quehuo-tongji';
-const GITHUB_API_LATEST = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-// Cloudflare Pages Function 代理下载（用户网络访问不到 objects.githubusercontent.com 时使用）
-const CF_PROXY_BASE = 'https://wszhyy.pages.dev';
+const GITHUB_RELEASES_BASE = `https://github.com/${GITHUB_REPO}/releases/download`;
+const FALLBACK_VERSION = '5.11.1';
 
-// 内存缓存：1 小时过期（避免 GitHub API 速率限制 60次/小时）
-interface GhRelease { version: string; downloadUrl: string; fileName: string; }
-let ghCache: { data: GhRelease | null; ts: number } = { data: null, ts: 0 };
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+// 内存缓存（1 小时）
+let cache: { version: string; fileName: string; ts: number } | null = null;
+const TTL = 60 * 60 * 1000;
 
-async function getGitHubLatestRelease(): Promise<GhRelease | null> {
-  // 命中缓存
-  if (ghCache.data && (Date.now() - ghCache.ts) < CACHE_TTL_MS) {
-    return ghCache.data;
-  }
+/** 从 Cloudflare Pages 的 releases/latest.yml 读取最新版本（最权威，部署时同步） */
+async function fetchLatest(): Promise<{ version: string; ghUrl: string; fileName: string } | null> {
+  if (cache && (Date.now() - cache.ts) < TTL) return cache;
   try {
-    const resp = await fetch(GITHUB_API_LATEST, {
-      headers: {
-        'User-Agent': 'wszh-check-update',
-        'Accept': 'application/vnd.github+json'
-      }
-    });
-    if (!resp.ok) {
-      console.warn('[check-update] GitHub API 失败:', resp.status);
-      return ghCache.data || null;
-    }
-    const data = await resp.json();
-    const tag = (data.tag_name || '').replace(/^v/, '');
-    if (!tag) return ghCache.data || null;
-    // 找 .exe 资源（排除 .blockmap）
-    const exeAsset = (data.assets || []).find((a: any) =>
-      a && a.name && /\.exe$/i.test(a.name) && !/\.blockmap$/i.test(a.name)
-    );
-    if (!exeAsset || !exeAsset.browser_download_url) {
-      console.warn('[check-update] 未找到 .exe 资源');
-      return ghCache.data || null;
-    }
-    const result: GhRelease = {
-      version: tag,
-      downloadUrl: exeAsset.browser_download_url,
-      fileName: exeAsset.name
-    };
-    ghCache = { data: result, ts: Date.now() };
-    return result;
-  } catch (e) {
-    console.warn('[check-update] GitHub API 异常:', e);
-    return ghCache.data || null;
-  }
+    const resp = await fetch(`${RELEASES_DIR}latest.yml`, { headers: { 'User-Agent': 'wszh-check-update' } });
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    const vMatch = text.match(/^version:\s*['"]?(\S+)['"]?\s*$/m);
+    // 匹配顶层 url: 或数组内的 "- url:" （latest.yml 的 files 数组格式）
+    const urlMatch = text.match(/^[\s-]*url:\s*['"]?(https?:\/\/\S+?)['"]?\s*$/m);
+    if (!vMatch) return null;
+    // 优先从 latest.yml 解析 url（永远最准，跟着部署走），fallback 到 gh-proxy 直拼
+    const ghUrl = urlMatch ? urlMatch[1] : `${GITHUB_RELEASES_BASE}/v${vMatch[1]}/WSZH-ShortageStore.Setup.${vMatch[1]}.exe`;
+    // 文件名：如果 URL 里有 %20（空格编码），解码后取最后一段
+    let fileName = ghUrl.split('/').pop() || `WSZH-ShortageStore.Setup.${vMatch[1]}.exe`;
+    if (fileName.includes('%')) fileName = decodeURIComponent(fileName);
+    cache = { version: vMatch[1], fileName, ts: Date.now() };
+    // 存 ghUrl 到临时字段供下方使用
+    (cache as any).ghUrl = ghUrl;
+    return cache;
+  } catch { return null; }
 }
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
-
   try {
-    // 获取客户端版本
     const { version } = await req.json();
 
-    // 1) 优先从 GitHub API 拿真实最新版本 + 直链
-    const ghRelease = await getGitHubLatestRelease();
-    const actualVersion = ghRelease?.version || FALLBACK_VERSION;
-    // GitHub 原始直链（用户网络好的话直连下载）
-    const githubDirectUrl = ghRelease?.downloadUrl ||
-      `https://github.com/${GITHUB_REPO}/releases/download/v${FALLBACK_VERSION}/WSZH-ShortageStore.Setup.${FALLBACK_VERSION}.exe`;
-    // Cloudflare Pages 代理下载（绕开 GitHub CDN 阻断：服务端从 GitHub 拿，客户端从 CF 拿）
-    const cfProxyUrl = `${CF_PROXY_BASE}/download?version=${actualVersion}`;
-    // 实际给用户的链接：优先用 CF 代理（兼容性更好）
-    const directDownloadUrl = cfProxyUrl;
-    // electron-updater 自动下载源：GitHub Release 目录（latest.yml 与 exe 文件名均需与此匹配）
-    // 下载失败时客户端会自动回退为「提示手动下载」（走 CF 代理 downloadUrl）
-    const updateFilesUrl = `https://github.com/${GITHUB_REPO}/releases/download/v${actualVersion}/`;
+    const info = await fetchLatest();
+    const actualVersion = info?.version || FALLBACK_VERSION;
+    const fileName = info?.fileName || `WSZH-ShortageStore.Setup.${actualVersion}.exe`;
+    const ghUrl = (info as any)?.ghUrl || `${GITHUB_RELEASES_BASE}/v${actualVersion}/${fileName}`;
+    const ghTag = `v${actualVersion}`;
 
-    // 2) 比较版本
+    // electron-updater 从此目录读 latest.yml（我们部署时带过去）
+    const updateFilesUrl = RELEASES_DIR;
+    // exe 实际下载源：GitHub Releases（单文件 2GB 上限，稳定）
+    const ghReleasePage = `https://github.com/${GITHUB_REPO}/releases/tag/${ghTag}`;
+
     const isUpdateAvailable = compareVersions(actualVersion, version) > 0;
 
     const response = {
@@ -89,50 +63,33 @@ serve(async (req) => {
       data: {
         version: actualVersion,
         updateAvailable: isUpdateAvailable,
-        releaseDate: '2026-07-17',
-        updateFilesUrl: updateFilesUrl,  // electron-updater 从此 URL 读取 latest.yml
-        releaseNotes: `
-v${actualVersion}（自动从 GitHub API 同步）
-- 点击下方"下载地址1"或"下载地址2"直接下载安装包
-- 系统会自动检测最新版本，无需跳页
-        `.trim(),
-        // 主下载：Cloudflare Pages Function 代理（用户网络访问 GitHub CDN 不稳定也能下）
-        downloadUrl: directDownloadUrl,
-        // 备用下载：GitHub 原始直链（如果 CF 代理失败可用）
-        downloadUrl2: githubDirectUrl,
-        // 备用下载 3：GitHub release 页面（最稳定，永远可用）
-        downloadUrl3: `https://github.com/${GITHUB_REPO}/releases/tag/v${actualVersion}`,
-        fileName: ghRelease?.fileName || `WSZH-ShortageStore.Setup.${actualVersion}.exe`,
+        releaseDate: '2026-11-09',
+        updateFilesUrl,
+        releaseNotes: `v${actualVersion}\n- 启动后自动静默下载，下次重启安装`,
+        downloadUrl: ghUrl,           // 主手动下载（从 latest.yml 解析，永远正确）
+        downloadUrl2: ghUrl,         // 备 2
+        downloadUrl3: ghReleasePage, // GitHub Release 页面
+        fileName,
         forceUpdate: false
       }
     };
-
     return new Response(JSON.stringify(response), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
-
-  } catch (error) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: error.message
-    }), {
+  } catch (e) {
+    return new Response(JSON.stringify({ success: false, error: e.message }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 });
 
-// 版本比较函数
-function compareVersions(v1: string, v2: string) {
-  const v1Parts = v1.split('.').map(Number);
-  const v2Parts = v2.split('.').map(Number);
-
-  for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
-    const p1 = v1Parts[i] || 0;
-    const p2 = v2Parts[i] || 0;
-
-    if (p1 > p2) return 1;
-    if (p1 < p2) return -1;
+function compareVersions(a: string, b: string) {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
   }
   return 0;
 }

@@ -92,13 +92,21 @@ if errorlevel 1 (
 )
 echo [OK] 打包完成
 
+echo ═══ 步骤 D2: 同步更新产物到 deploy\releases ═══
+if not exist "deploy\releases" mkdir "deploy\releases"
+copy /Y "dist\*.exe" "deploy\releases\" >nul 2>nul
+copy /Y "dist\*.blockmap" "deploy\releases\" >nul 2>nul
+copy /Y "dist\latest.yml" "deploy\releases\" >nul 2>nul
+echo [OK] releases 目录已同步，下次 Cloudflare 部署会一并推送
+
 : 列出输出文件
 echo.
 echo 打包输出:
 dir /b "dist\*.exe" 2>nul
 echo.
-echo 如需上传到 GitHub Release 发布自动更新，请运行：
-echo   PowerShell  .\发布Release.ps1  (需先设置 $env:GITHUB_TOKEN)
+echo 更新产物已同步到 deploy\releases\，下次 Cloudflare Pages 部署会包含它。
+echo 如需推送到 GitHub Release（备用），仍可运行：
+echo   PowerShell  .\发布Release.ps1
 echo.
 
 : ==================== 推送 Git ====================

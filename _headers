@@ -1,34 +1,42 @@
-# HTML 页面禁止缓存（强制！）
-/login*
-  Access-Control-Allow-Origin: *
-  Access-Control-Allow-Methods: GET, POST, OPTIONS
-  Access-Control-Allow-Headers: Content-Type, Authorization
-  Cache-Control: no-cache, no-store, must-revalidate, max-age=0
-  Pragma: no-cache
-  Expires: 0
+# ========== Cloudflare Pages 缓存策略 v2026-11-10 ==========
+# ★ 全部 no-store：解决 SW 缓存污染 + 308 重定向导致的 HTML 被 JS 请求拿到
 
-# 跨域支持（其他所有文件）
 /*
-  Access-Control-Allow-Origin: *
-  Access-Control-Allow-Methods: GET, POST, OPTIONS
-  Access-Control-Allow-Headers: Content-Type, Authorization
-
-# 其他 HTML
-/*.html*
-  Cache-Control: no-cache, no-store, must-revalidate
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
   Pragma: no-cache
   Expires: 0
 
-# 静态资源强缓存（改版时升级版本号?v=X即可刷新）
+/*.html
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
 /static/js/*
-  Cache-Control: public, max-age=3600
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
 /static/css/*
-  Cache-Control: public, max-age=3600
-/static/*.png
-  Cache-Control: public, max-age=2592000
-/static/*.jpg
-  Cache-Control: public, max-age=2592000
-/manifest.json
-  Cache-Control: public, max-age=86400
-/sw.js
-  Cache-Control: public, max-age=3600
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+/static/sw.js
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+/static/manifest.json
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+/*.png
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+/*.jpg
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0

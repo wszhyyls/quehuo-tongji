@@ -1,6 +1,205 @@
 # 版本升级记录 (CHANGELOG)
 
-> 适用版本：v5.9.0 | 更新日期：2026-11-02
+> 适用版本：v5.10.1 | 更新日期：2026-11-08
+
+---
+
+## v5.10.1 — 锚点规则放开 + FIFO 判定收敛 + 行级立即判定 + 一键同步瘦身 + UI 文案统一（2026-11-08）
+
+### 零、补充：UI 显示名统一（2026-11-08 下午）
+
+**状态显示名"已完成"→"已入库"**：
+- 所有前端用户可见位置（列表状态列、筛选下拉 option label、统计卡片 label/title、折叠区标题、按钮 title、toast 提示、状态标签等）统一改为"已入库"
+- **数据库存储值仍是「已完成」**，所有后端匹配逻辑、30 天回退、90 天关闭、DETERMINED 状态集合、CSS 选择器 `[data-status="已完成"]` 均保持不动
+- 覆盖两个前端：admin.html/admin.js + store.html/store.js
+- 关键原则：所有 `<option value="已完成">已完成</option>` 改成 `<option value="已完成">已入库</option>`（label 改，value 保留）
+
+**新增"📖 操作说明"TAB**（admin.html）：
+- 整体业务流程（门店上报 → 仓库入库 → 自动判定 → 配送 → 30天回退）
+- 六种状态含义（新名称"已入库"）
+- 自动判定规则简述（锚点放宽 / FIFO 先报先得 / 当天入库计入 / 30天回退 / 90天关闭）
+- 按钮功能速查表（每个按钮的作用、改不改数据、什么时候用）
+- 常见问题 FAQ
+
+**悬停说明补全**：
+- 一键同步、配送待办、通知刷新、刷新订购数据等按钮的 title 改为业务化描述
+- 行级「立即判定」按钮新增 title（"只判当前这一个商品...会改数据库"）
+
+**商品 1110051「门店查不到」诊断结论**（2026-11-08）：
+| 检查项 | 结果 |
+|--------|------|
+| Supabase product_cache 表 | ✅ 有 1110051（米氮平片） |
+| ERP 采购入库单（vBuySendSumDetail） | ✅ 有 10 条，总量 46（BillDate 2020-12-24 ~ 2025-10-27） |
+| reports 表缺货上报 | ❌ **从未有过 1110051 的缺货上报**（0 条） |
+| leveal/level 过滤 | ✅ 代码中不存在 leveal 过滤，product_cache 刷新是全量 upsert |
+| 编码前导零 | ✅ 只有无前导零版本 1110051，无 01110051 |
+| 诊断结论 | **不是 bug**。该商品在系统中完全存在，但从未被任何门店上报过缺货，所以门店侧缺货列表里搜不到。 |
+
+### 一、问题背景
+
+v5.10.0（逐笔独立 FIFO 判定）跑了一天后，发现三个体验问题：
+
+| 问题 | 表现 | 根因 |
+|------|------|------|
+| **当天入库永远不算** | 某门店 11/08 上午上报缺货 A 商品 10 盒，下午仓库 A 商品入库 50 盒（BillDate=11/08），一键同步后仍显示待处理 | 锚点门槛是严格 `BillDate > 上报日`——入库 BillDate=11/08 不满足 `> 11/08` |
+| **一键同步有 2000 条截断** | pending reports 超 2000 条时，后面的永远不参与判定 | `preciseAutoDetectStatusV2` PostgREST 写死 `limit(2000)` |
+| **商品缓存被刷两次** | 一键同步 → 刷 product_cache；凌晨定时 → 又刷一次 | 两边都调用 `syncProductCache`，冗余 SQL |
+
+### 二、核心改动清单
+
+#### 2.1 锚点规则放开（默认宽松口径）
+
+| 项 | 旧值 | 新值 |
+|----|------|------|
+| 锚点门槛 | `BillDate > anchorDateBj`（严格） | `BillDate >= anchorDateBj`（宽松） |
+| 判定函数 | 各入口内联 `>` 比较 | 统一 `isPurchaseEligible(billDateBj, anchorDateBj, sameDayCounts=true)` |
+| 影响 | 当天入库永远轮不到当天报的缺 | 同天先报先得；"需求 0 却待处理"消失 |
+
+**判定入口三收敛**：定时任务 / 一键同步 / 行级立即判定 → 全部走 `supabase/functions/_shared/fifo.ts` 的同一份 `runFIFO()`，0 漂移。
+
+#### 2.2 后端新增 Action
+
+| Action | 位置 | 用途 |
+|--------|------|------|
+| `check_single_product` | `query-shortage-data/index.ts` ~L2633 | 行级单商品 FIFO 判定，返回应完成的 report id 列表，只更新这一个商品 |
+| `batch_purchase_check` | 同上 | 只读拉采购明细（临时调试用，后续删） |
+| `fifo_diff_check` | 同上 | 只读对比旧版 vs 新版 FIFO（漂移排查用，后续删） |
+
+#### 2.3 一键同步瘦身
+
+| 项 | 旧 | 新 |
+|----|----|----|
+| product_cache 刷新 | sync_with_auto_status 里全量刷 + 凌晨定时又刷一次 | **删掉 sync_with_auto_status 里的刷新段**，统一由每天 00:30 scheduled-task 执行 |
+| pending reports 范围 | `limit(2000)` | `range` 分页 1000 条/页，翻页直到拉完 |
+
+#### 2.4 前端改动
+
+| 文件 | 函数/位置 | 改动 |
+|------|----------|------|
+| `deploy/static/js/admin.js` ~L63 | 新增 `bjToday()` / `toBjDate()` | 北京时间换算，替代裸 `new Date().toISOString().slice(0,10)` |
+| `deploy/static/js/admin.js` ~L1098 | `renderSummaryPage` 汇总行 | 新增 📦 标签（后端返回 `eligible_purchase_qty > 0` 时显示）+「立即判定」按钮 |
+| `deploy/static/js/admin.js` ~L1501 | 新增 `checkSingleNow` | 调 `check_single_product` action，只判当前商品，Toast 反馈 |
+| `deploy/_headers` | `/static/js/*` Cache-Control | 改 `no-cache, must-revalidate`（防浏览器缓存旧 JS） |
+
+### 三、文件变更清单
+
+| 文件 | 变更 |
+|------|------|
+| `supabase/functions/_shared/fifo.ts` | **新增**共享 FIFO 模块：`toBjDate` / `isPurchaseEligible` / `queryPurchaseInPool` / `runFIFO` |
+| `supabase/functions/query-shortage-data/index.ts` | import 共享 fifo、删内联重复实现、加 check_single_product / batch_purchase_check / fifo_diff_check、preciseAutoDetectStatusV2 改 range 翻页、sync_with_auto_status 删缓存刷新段 |
+| `supabase/functions/scheduled-task/index.ts` | import 共享 fifo、删内联重复实现 |
+| `deploy/static/js/admin.js` | 北京时间工具函数、📦标签 + 立即判定按钮、checkSingleNow 函数 |
+| `deploy/_headers` | Cache-Control 改 no-cache |
+
+### 四、部署状态
+
+| 组件 | 状态 |
+|------|------|
+| Edge Function `query-shortage-data` | ✅ 已部署（`--no-verify-jwt --project-ref qswpgnnedqvuegwfbprd`） |
+| Edge Function `scheduled-task` | ✅ 已部署 |
+| Cloudflare Pages `wszhyy` | ✅ 已部署（`wrangler pages deploy deploy --project-name=wszhyy`） |
+
+### 五、遗留事项
+
+| 事项 | 状态 |
+|------|------|
+| 商品 1110051 门店查不到问题 | 登记待办（商品缓存同步 leveal 过滤 / BillDate >= '2025-01-01' 下限 / 门店库存查询范围），暂不排查 |
+| `batch_purchase_check` / `fifo_diff_check` action | 临时调试用，确认稳定后删 |
+| `_shared/fifo.ts` Deno import 打包坑 | 本次验证通过，后续如果又出现 import WARN → 退回两边各内联等价代码 |
+| 影响面统计待补 | 需等 Edge Function 稳定后跑 `impact_check.mjs` 输出"放开后新增完成的 report 数量、按商品/门店分布" |
+
+---
+
+## v3.20 → v373 → v374 逐笔独立判定 + 采购不重复消耗（2026-11-05 ~ 11-07）
+
+### 一、问题背景
+
+旧版 v3.17（商品级汇总判定）存在一个根本缺陷：**一个商品只算一次，所有活跃 report 共用"采购 ≥ 缺货汇总"的结果**。这导致两个严重误判：
+
+| 问题 | 场景 | 后果 |
+|------|------|------|
+| **晚报卡死早报** | 商品有 10 笔活跃 report，最早 8/1 报缺、最晚 11/6 报缺，采购只到 10/28 | 锚点取最新 11/6 → 锚点后采购 = 0 → **全 10 笔保持待处理** |
+| **汇总误判完成** | 商品多门店同时报缺，采购量刚好 ≥ 汇总，但早报的还没被满足 | 旧版**全部**标已完成 → 实际只有最早那几笔够了 |
+
+### 二、演进过程
+
+| 版本 | 锚点 | 粒度 | 核心缺陷 |
+|------|------|------|---------|
+| **v3.17** | 最早未完成上报日 | 商品级 | 晚报可能消耗早报采购、或被晚报卡死 |
+| **v3.20** | 最早上报日 | 商品级 | 锚点太松，锚点后采购被多笔需求共享重复计算 |
+| **v373** | 最新未完成上报日 | 商品级 | 一笔晚报 = 全商品作废 |
+| **v374（当前）** | **每条 report 自己的上报日** | **逐笔 report 独立判定** | ✅ 早报早结，晚报晚结 |
+
+### 三、v374 核心逻辑
+
+```
+对每个商品:
+  1. SQL Server 查全量采购入库明细（BillType=34, InKRec='3'）
+     → 形成入库池：[{date, qty, remaining}]
+  
+对每条活跃 report（按 created_at 升序）:
+  2. 锚点 anchorDate = 该条 report 的 created_at（上报日）
+  3. 入库池里：只消耗 BillDate > anchorDate 且 remaining > 0 的
+  4. 入库不能重复消耗（remaining 递减）
+  5. 消耗总量 ≥ 该笔缺货 → 标记这条 report 为已完成
+     消耗总量 <  该笔缺货 → 保持待处理
+```
+
+**关键规则**：
+- 锚点门槛严格 `>`，不是 `>=`：入库日期必须**严格晚于**上报日。理由：当天入库的货是采购之前的需求，当天上报的需求还没采购
+- 采购不重复消耗：同一份入库只能被一条 report 吃掉，先报先得（FIFO）
+- 判定保守：不够就保持待处理，绝不自动降级/关闭
+
+### 四、代码改动清单
+
+| 文件 | 函数/位置 | 改动 |
+|------|----------|------|
+| `query-shortage-data/index.ts` L786 | `queryPurchaseQty` → **`queryPurchaseDetails`** | 返回全量入库明细数组 `[{date, qty}]` 而非单个汇总数字 |
+| `query-shortage-data/index.ts` L812-960 | **`preciseAutoDetectStatusV2` 整体重写** | 旧"商品级汇总判定" → 新"逐笔 report 独立判定" |
+| `query-shortage-data/index.ts` | `completionMap`、`latestActiveAt`、`demandByCode` | **全部废弃删除**，不再需要商品级中间变量 |
+| `query-shortage-data/index.ts` L2376 | **新增 `recheck_auto_completed` action** | 用新逐笔逻辑重新核查历史已完成 report，误判的回退待处理 |
+| `get_my_reports` 兜底 | SQL Server `Shortage_OrderFeedback` | **彻底删除**，商品级补货状态唯一数据源 = Supabase reports 表 |
+| `sync_with_auto_status` | 商品缓存同步前自动触发判定 | 保留，`preciseAutoDetectStatusV2` 是核心 |
+
+### 五、误判回退执行记录（2026-11-07）
+
+`recheck_auto_completed` 执行结果：
+
+| 指标 | 数值 |
+|------|------|
+| 核查目标（10月后 + 系统自动标记已完成） | **176 条** / 149 个商品 |
+| 新逐笔逻辑也满足 → 保持已完成 | **282 条** |
+| 新逐笔逻辑不满足 → **回退待处理** | **2 条** |
+
+**被回退的 2 条（典型场景）**：
+
+| 商品 | 上报日 | 缺货 | 原因 |
+|------|--------|------|------|
+| 1440 | 2026-10-28 | 10 | 同商品 4 条活跃 report 按 created_at 升序前 3 条先吃光了采购入库，10/28 轮到时入库池已空 |
+| 030076 | 2026-10-14 | 10 | 同商品 3 条活跃 report 前 2 条吃光采购，10/14 没了 |
+
+### 六、逐笔判定推演验证（对应用户截图场景）
+
+7 笔需求 + 4 笔入库：
+
+| # | 需求 | 锚点 | 消耗入库 | 结果 |
+|---|------|------|---------|------|
+| 1 | 10/1 缺 8 | 10/1 | 10/7(-8) | ✅ 已完成 |
+| 2 | 10/5 缺 5 | 10/5 | 10/7剩(-5) | ✅ 已完成 |
+| 3 | 10/8 缺 8 | 10/8 | 10/7 早于锚点不可用 → 10/11(-8) | ✅ 已完成 |
+| 4 | 10/10 缺 6 | 10/10 | 10/11剩(-2) + 10/16(-4) | ✅ 已完成 |
+| 5 | 10/15 缺 8 | 10/15 | 10/16剩(-8) | ✅ 已完成 |
+| 6 | 10/17 缺 20 | 10/17 | 10/16 早于锚点不可用 → 10/20(-20) | ✅ 已完成 |
+| 7 | 10/18 缺 15 | 10/18 | 10/20剩(5) 不够 15 | ❌ 待处理 |
+
+### 七、遗留事项
+
+| 事项 | 状态 |
+|------|------|
+| `product_completion` 表（`last_completed_at` / `carryover_qty`） | 保留不删，代码不再读取，仅在判定完成时 upsert 更新 |
+| `recheck_auto_completed` action | 保留 Edge Function（可随时重新核查历史已完成） |
+| 过期采购仍在消耗池 | 不存在——锚点门槛自动挡住所有早于上报日的入库 |
+| 低优先级边界（入库拆单、退货冲销、BillDate 精度） | 暂不处理，实际影响可忽略 |
 
 ---
 

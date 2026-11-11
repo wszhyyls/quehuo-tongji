@@ -1,0 +1,963 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN" data-theme="purple">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <!-- PWA -->
+    <link rel="manifest" href="./static/manifest.json">
+    <link rel="apple-touch-icon" href="./static/icon-192.png">
+    <meta name="theme-color" content="#667eea">
+
+    <title>微山县众和医药连锁有限公司 药品订购系统 - 管理后台</title>
+    <link rel="stylesheet" href="./static/css/style.css?v=603">
+    <script src="./static/js/supabase.min.js?v=603"></script>
+    <script src="./static/js/utils.js?v=603"></script>
+</head>
+<body class="admin-page">
+    <div class="app-header">
+        <div class="header-left">
+            <img src="./static/logo.jpg" class="company-logo" alt="LOGO">
+            <span class="company-name">微山县众和医药连锁有限公司</span>
+        </div>
+        <div class="header-right">
+            <button id="themeBtn" class="btn-theme" data-tip="在浅色和深色两种界面之间切换；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内生效">切换主题</button>
+            <button id="logoutBtn" class="btn-logout">退出登录</button>
+        </div>
+    </div>
+
+    <div class="app-container">
+        <div class="store-name-bar">
+            <h1 class="store-title">管理后台</h1>
+            <span style="margin-left:auto;font-size:11px;color:#999;" id="pageVersion" data-version>v5.11.1</span>
+        </div>
+
+        <div class="order-tabs admin-tabs">
+            <button class="tab-btn active" data-tab="summary">缺货汇总<span class="tab-badge" id="shortageBadge"></span></button>
+            <button class="tab-btn" data-tab="new">新品汇总<span class="tab-badge" id="newBadge"></span></button>
+
+            <button class="tab-btn" data-tab="employees">员工管理</button>
+            <button class="tab-btn" data-tab="devices">设备授权</button>
+            <button class="tab-btn" data-tab="users">门店管理</button>
+            <button class="tab-btn" data-tab="audit">操作日志</button>
+            <button class="tab-btn" data-tab="admins" id="adminsTabBtn" style="display:none;">子账号管理</button>
+            <button class="tab-btn" data-tab="help">📖 操作说明</button>
+        </div>
+
+        <!-- 缺货汇总 -->
+        <div id="tab-summary" class="tab-content active">
+            <div class="summary-stats">
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('已订购')" data-tip="点击只看所有已提交订购、等待仓库处理的商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="orderedCount">0</span><span class="stat-label">已订购</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('待付款')" data-tip="点击只看所有已进入付款环节的商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="paymentCount">0</span><span class="stat-label">待付款</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('已完成')" data-tip="点击只看所有采购入库已满足缺货的商品（已入库，但还没配送到店）；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="completedTotalCount">0</span><span class="stat-label">已入库</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('待处理')" data-tip="点击只看所有还没采购到的缺货商品（包含厂家断货）；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="pendingCount">0</span><span class="stat-label">待处理</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('已配送')" data-tip="点击只看所有已经配送到门店的商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="deliveredCount">0</span><span class="stat-label" style="color:#43a047;">✓ 已完成</span></div>
+                <div class="stat-card stat-card-clickable" onclick="filterByStat('今日上报')" data-tip="点击只看今天刚刚上报的缺货商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内切换"><span class="stat-value" id="todayCount">0</span><span class="stat-label">今日上报</span></div>
+            </div>
+            
+            <div class="list-card">
+                <div class="list-header">
+                    <h2>缺货订购汇总</h2>
+                    <div class="filter-bar">
+                        <!-- 统一筛选入口 -->
+                        <div class="excel-filter" id="supplierFilterWrap">
+                            <button class="excel-filter-trigger" onclick="toggleExcelFilter(event)" style="min-width:110px;">
+                                <span id="supplierFilterText">供货商筛选</span><span class="excel-filter-arrow">▼</span>
+                            </button>
+                            <div class="excel-filter-panel" id="supplierFilterPanel" style="min-width:280px;max-height:480px;">
+                                <!-- ① 关键字搜索 -->
+                                <input type="text" id="supplierSearchInput" placeholder="搜索供货商..." class="excel-filter-search" oninput="onSupplierKeywordChange()">
+                                <!-- ② 供货商多选列表 -->
+                                <div class="excel-filter-list" id="supplierDropdown" style="max-height:180px;"></div>
+                                <div class="excel-filter-actions" style="border-top:none;padding-top:0;">
+                                    <button class="excel-filter-btn ok" onclick="applySupplierFilter()">确定</button>
+                                    <button class="excel-filter-btn cancel" onclick="cancelSupplierFilter()">取消</button>
+                                </div>
+                                <!-- ③ 高级筛选折叠区 -->
+                                <div style="border-top:1px solid var(--input-border);padding:6px 10px;">
+                                    <div onclick="toggleAdvSection()" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--text-muted);">
+                                        <span>高级筛选 <span id="advCondCount" style="color:var(--accent);font-weight:600;"></span></span>
+                                        <span id="advToggleIcon" style="font-size:10px;">▼</span>
+                                    </div>
+                                    <div id="advSection" style="display:none;margin-top:6px;">
+                                        <div id="advFilterRows"></div>
+                                        <div style="margin-top:4px;">
+                                            <button id="advAddBtn" class="excel-filter-btn" style="font-size:11px;" onclick="addAdvFilterRow()">+ 添加条件</button>
+                                            <span style="font-size:11px;color:var(--text-muted);margin-left:4px;">AND</span>
+                                        </div>
+                                        <div style="display:flex;gap:4px;margin-top:6px;justify-content:flex-end;">
+                                            <button class="excel-filter-btn cancel" onclick="clearAdvFilter()" style="font-size:11px;">清除</button>
+                                            <button class="excel-filter-btn ok" onclick="applyAdvFilter()" style="font-size:11px;">应用</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <select id="statusFilter" class="filter-select-sm" style="width:auto;padding:4px 8px;font-size:12px;" onchange="applyStatusFilter()">
+                            <option value="">状态筛选</option>
+                            <option value="待处理">待处理</option><option value="已订购">已订购</option>
+                            <option value="已完成">已入库</option>
+                            <option value="已配送">已完成</option>
+                            <option value="待付款">待付款</option>
+                            <option value="厂家断货">厂家断货</option>
+                            <option value="已关闭">已关闭</option>
+                        </select>
+                        <input type="text" id="productCodeSearch" placeholder="商品编码" class="filter-input-sm" style="width:120px;padding:4px 8px;font-size:12px;" oninput="onProductCodeChange()">
+                        <button id="syncPlanBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" data-tip="重新跑一遍缺货判定：按仓库采购入库数量核对各门店缺货汇总，把已满足的单据从待处理改为已入库；会把状态真的改掉，改完就保存，刷新页面依然生效；不会推送系统内通知；通常 30 秒到 3 分钟">一键同步</button>
+                        <button id="notifyRefreshBtn" class="btn-fbar" style="background:#ff9800;color:#fff;font-weight:600;" data-tip="发送到货通知：找出仓库已有货但门店还没收到通知的商品，给相应门店推送一条到货通知，门店在通知中心里能看到；会推送系统内通知；不会改动商品状态；通常 10 到 30 秒">发送到货通知</button>
+                        <button id="deliveryTodoBtn" class="btn-fbar" style="background:#607d8b;color:#fff;font-weight:600;" data-tip="列出所有已入库但门店还没配送到货的商品；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内出结果">配送待办</button>
+                        <button id="refreshBtn" class="btn-fbar" style="background:var(--accent);color:#fff;font-weight:600;" data-tip="从服务器重新拉取最新的缺货汇总和商品状态；只是查看，不会改动任何东西；不会推送系统内通知；通常 3 到 10 秒">刷新订购数据</button>
+                    <span style="font-size:12px;color:var(--text-muted);" data-tip="选择页面自动刷新数据的间隔时间，到点自动从服务器拉最新状态；只是查看，不会改动任何东西；不会推送系统内通知；选完立刻生效">自动刷新:</span>
+                    <select id="autoRefreshInterval" class="filter-select-sm" style="width:auto;padding:4px 8px;font-size:12px;" data-tip="选择自动刷新间隔时间；只是查看，不会改动任何东西；不会推送系统内通知；选完立刻生效">
+                        <option value="0" selected>关闭</option>
+                        <option value="30">30秒</option>
+                        <option value="60">1分钟</option>
+                        <option value="300">5分钟</option>
+                        <option value="600">10分钟</option>
+                    </select>
+                    <span id="refreshIndicator" class="refresh-indicator" style="display:none;font-size:11px;margin-left:4px;">●</span>
+                    <span id="realtimeStatus" style="display:none;font-size:11px;margin-left:8px;padding:2px 8px;border-radius:10px;font-weight:600;">
+                        <span id="realtimeStatusIcon"></span> <span id="realtimeStatusText"></span>
+                    </span>
+                </div>
+                </div>
+                <!-- 批量操作工具栏 -->
+                <div id="batchToolbar" class="batch-toolbar" style="display:none;">
+                    <span>已选择 <strong id="selectedCount">0</strong> 项</span>
+                    <select id="batchTargetStatus" class="filter-select-sm" style="width:auto;margin-right:6px;" onchange="this.setAttribute('data-tip','批量目标状态：'+this.value+'；只是查看，不会改动任何东西；不会推送系统内通知；选完不生效，要点批量标记才生效')" data-tip="选择要批量改成什么状态；只是查看，不会改动任何东西；不会推送系统内通知；选完不生效，要点批量标记才生效">
+                        <option value="待处理">待处理</option>
+                        <option value="已订购">已订购</option>
+                        <option value="已完成" selected>已入库</option>
+                        <option value="待付款">待付款</option>
+                        <option value="厂家断货">厂家断货</option>
+                    </select>
+                    <button id="batchSetStatusBtn" class="btn-batch btn-batch-arrived" onclick="batchSetStatus()" data-tip="把勾选的所有商品统一改成上面选的目标状态；会把状态真的改掉，改完就保存，刷新页面依然生效；不会推送系统内通知；通常 3 到 15 秒">批量标记</button>
+                    <button class="btn-batch btn-batch-clear" onclick="clearSelection()" data-tip="取消当前勾选的所有商品，恢复到正常浏览模式；只是查看，不会改动任何东西；不会推送系统内通知；1 秒内完成">清除选择</button>
+                </div>
+                
+                <div class="table-wrapper summary-table-container">
+                    <table class="data-table" id="summaryTable">
+                        <thead><tr><th style="width:26px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"></th><th style="width:55px;">供货商</th><th style="width:48px;padding-left:0;padding-right:4px;">编码</th><th style="width:115px;">品名</th><th style="width:72px;">生产厂家</th><th style="width:48px;">规格</th><th style="width:50px;">需求</th><th style="width:65px;">状态</th><th style="width:40px;">操作</th></tr></thead>
+                        <tbody id="summaryTbody"></tbody>
+                    </table>
+                </div>
+                
+                <!-- 翻页控制 -->
+                <div id="paginationBar" class="pagination-bar" style="display:none;">
+                    <span id="pageInfo" style="font-size:14px;color:var(--text-secondary);"></span>
+                    <div class="pagination-btns">
+                        <button id="prevPageBtn" class="btn-page" onclick="changePage(-1)">上一页</button>
+                        <div id="pageNumbers" style="display:flex;gap:4px;align-items:center;"></div>
+                        <button id="nextPageBtn" class="btn-page" onclick="changePage(1)">下一页</button>
+                        <span style="font-size:13px;margin-left:8px;">跳至</span>
+                        <input type="number" id="pageJumpInput" style="width:42px;height:28px;text-align:center;border:1px solid var(--input-border);border-radius:4px;font-size:13px;" min="1" onkeydown="if(event.key==='Enter')jumpToPage()">
+                        <span style="font-size:13px;">页</span>
+                        <button class="btn-page" onclick="jumpToPage()">GO</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 已入库订单折叠区 -->
+            <div class="list-card" id="completedCard" style="display:none;">
+                <div class="list-header" style="cursor:pointer;" onclick="toggleCompletedSection()">
+                    <h2 style="flex:1;">✅ 已入库订单 <span id="completedCount" style="font-size:14px;color:var(--text-muted);"></span></h2>
+                    <input type="text" id="completedCodeSearch" placeholder="商品编码筛选" class="filter-input-sm" style="width:140px;padding:4px 8px;font-size:12px;margin-right:8px;" onclick="event.stopPropagation()" oninput="onCompletedCodeChange()">
+                    <span id="completedToggle" style="font-size:18px;">▲ 收起</span>
+                </div>
+                <div id="completedBody" style="display:block;">
+                    <div class="table-wrapper">
+                        <table class="data-table">
+                            <thead><tr><th style="width:60px;text-align:left;">供货商</th><th style="width:48px;padding-left:0;padding-right:4px;text-align:center;">编码</th><th style="width:135px;text-align:left;">品名</th><th style="width:82px;padding-left:4px;text-align:left;">规格</th><th style="width:44px;text-align:center;">需求</th><th style="width:52px;text-align:center;">已配送</th><th style="width:80px;text-align:center;">状态</th><th style="width:56px;text-align:center;">明细</th><th style="width:105px;text-align:center;">完成时间</th><th style="width:56px;text-align:center;">操作人</th><th style="width:132px;max-width:132px;text-align:left;">备注</th></tr></thead>
+                            <tbody id="completedTbody"></tbody>
+                        </table>
+                    </div>
+                    <div id="completedPagination" class="pagination-bar" style="justify-content:center;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 新品汇总 -->
+        <div id="tab-new" class="tab-content">
+            <div class="summary-stats">
+                <div class="stat-card"><span class="stat-value" id="newTotalCount">0</span><span class="stat-label">新品上报</span></div>
+                <div class="stat-card"><span class="stat-value" id="newProductCount">0</span><span class="stat-label">新品品种</span></div>
+                <div class="stat-card"><span class="stat-value" id="newTodayCount">0</span><span class="stat-label">今日上报</span></div>
+            </div>
+            <div class="list-card">
+                <div class="list-header"><h2>新品订购汇总</h2><button id="refreshNewBtn" class="btn-search">刷新</button></div>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead><tr><th>商品名称</th><th>规格</th><th>参考厂家</th><th>紧急程度</th><th>总需求</th><th>上报日期</th><th>门店</th><th>上报人</th><th>审批状态</th><th>删除</th></tr></thead>
+                        <tbody id="newGroupTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 员工管理（新）-->
+        <div id="tab-employees" class="tab-content">
+            <div class="list-card">
+                <div class="list-header">
+                    <h2>门店员工管理</h2>
+                    <button id="addEmployeeBtn" class="btn-search" style="background:var(--accent);">添加员工</button>
+                    <button id="refreshEmpBtn" class="btn-search">刷新</button>
+                </div>
+                <!-- 员工列表 -->
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>手机号</th><th>姓名</th><th>所属门店</th>
+                                <th>设备绑定</th><th>状态</th><th>创建时间</th>
+                                <th>密码</th><th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="employeeTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 设备授权管理 -->
+        <div id="tab-devices" class="tab-content">
+            <!-- 待授权设备 -->
+            <div class="list-card" style="margin-bottom:15px;">
+                <div class="list-header">
+                    <h2 style="color:#e74c3c;">待授权设备</h2>
+                    <button class="btn-search" style="margin-right:6px;background:#4CAF50;" onclick="batchAuthorizeAll()">一键授权全部</button>
+                    <button id="refreshDeviceBtn" class="btn-search">刷新</button>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>账号类型</th><th>账号名称</th><th>设备码</th><th>申请时间</th><th>状态</th><th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="deviceTbody">
+                            <tr><td colspan="6" style="text-align:center;color:#999;">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="margin-top:12px;padding:10px;background:#fff3cd;border-radius:8px;font-size:13px;color:#856404;">
+                    <strong>提示：</strong>新设备首次登录需要管理员授权。设备码是设备的唯一标识，可用于识别设备。
+                </div>
+            </div>
+
+            <!-- 已授权设备 -->
+            <div class="list-card">
+                <div class="list-header">
+                    <h2>已授权设备</h2>
+                    <button class="btn-search" style="margin-right:6px;background:#e74c3c;" onclick="clearAllDeviceAuth()">清除所有设备授权</button>
+                    <button class="btn-search" onclick="loadAuthorizedDevices()">刷新</button>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>账号类型</th><th>姓名</th><th>手机号</th><th>设备码</th><th>授权状态</th><th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="authorizedDeviceTbody">
+                            <tr><td colspan="6" style="text-align:center;color:#999;">点击刷新加载</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 门店管理 -->
+        <div id="tab-users" class="tab-content">
+            <div class="list-card">
+                <h2>门店管理</h2>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead><tr><th>账号</th><th>门店名称</th><th>状态</th></tr></thead>
+                        <tbody id="usersTbody"></tbody>
+                    </table>
+                </div>
+                <div style="margin-top:12px;padding:10px;background:#e3f2fd;border-radius:8px;font-size:13px;color:#0d47a1;">
+                    <strong>提示：</strong>门店账号在 <a href="login.html" target="_blank" style="color:#1565c0;">登录页面</a> 配置。此处仅展示账号状态。
+                </div>
+            </div>
+        </div>
+
+        <!-- 操作日志 -->
+        <div id="tab-audit" class="tab-content">
+            <div class="list-card">
+                <div class="list-header"><h2>操作日志</h2><button id="refreshAuditBtn" class="btn-search">刷新</button></div>
+                <div class="table-wrapper">
+                    <table class="audit-table">
+                        <thead><tr><th>时间</th><th>用户</th><th>操作</th><th>详情</th></tr></thead>
+                        <tbody id="auditTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- 状态变更日志 -->
+            <div class="list-card" style="margin-top:16px;">
+                <div class="list-header">
+                    <h2>📋 状态变更日志</h2>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button id="backfillTimeBtn" class="btn-search" style="background:#10b981;color:#fff;font-size:13px;padding:6px 12px;" onclick="backfillStatusTime()" data-tip="找出操作记录里缺失的时间戳，从业务系统日志中补回去；会把状态真的改掉，改完就保存，刷新页面依然生效；不会推送系统内通知；通常几秒到几十秒">回填操作时间</button>
+                        <input type="text" id="statusLogProductCode" placeholder="商品编码筛选" style="width:130px;padding:6px 10px;border-radius:8px;border:1px solid var(--input-border);font-size:13px;">
+                        <button id="statusLogQueryBtn" class="btn-search" style="padding:8px 14px;font-size:13px;">查询</button>
+                    </div>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table" style="table-layout:fixed;">
+                        <thead><tr>
+                            <th style="width:95px;">变更时间</th>
+                            <th style="width:80px;">商品编码</th>
+                            <th style="width:65px;">原状态</th>
+                            <th style="width:65px;">新状态</th>
+                            <th style="width:70px;">操作人</th>
+                            <th>备注</th>
+                        </tr></thead>
+                        <tbody id="statusLogTbody">
+                            <tr><td colspan="6" style="text-align:center;color:var(--text-muted);">点击「查询」加载状态变更记录</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 子账号管理（仅超级管理员可见）-->
+        <div id="tab-admins" class="tab-content">
+            <div class="list-card">
+                <div class="list-header">
+                    <h2>管理员子账号</h2>
+                    <button id="addAdminBtn" class="btn-search" style="background:var(--accent);">添加子账号</button>
+                    <button id="refreshAdminBtn" class="btn-search">刷新</button>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>账号</th><th>姓名</th><th>角色</th><th>权限</th><th>状态</th><th>创建时间</th><th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="adminTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 操作说明 -->
+        <div id="tab-help" class="tab-content" style="max-width:900px;padding:24px 32px;background:#fff;border-radius:12px;">
+            <style>
+                .help-section { margin-bottom: 32px; }
+                .help-section h3 { font-size: 18px; font-weight: 800; color: #1a237e; border-bottom: 2px solid #3f51b5; padding-bottom: 8px; margin-bottom: 16px; }
+                .help-section h4 { font-size: 15px; font-weight: 700; color: #263238; margin: 14px 0 8px; }
+                .help-section p, .help-section li { font-size: 14px; line-height: 1.8; color: #37474f; }
+                .help-section ul { margin: 6px 0 6px 22px; padding: 0; }
+                .help-section li { margin-bottom: 5px; }
+                .help-flow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:14px 18px; background:linear-gradient(135deg,#667eea20,#764ba220); border-radius:12px; margin-bottom:22px; }
+                .help-flow-step { padding:8px 16px; background:#fff; border:1px solid #9fa8da; border-radius:22px; font-size:14px; font-weight:700; color:#283593; white-space:nowrap; }
+                .help-flow-arrow { font-size:22px; color:#3949ab; }
+                .help-status-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; }
+                .help-status-card { padding:14px 16px; border-radius:10px; border-left:5px solid; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,0.06); }
+                .help-status-card h4 { margin:0 0 6px; font-size:15px; font-weight:800; color:#263238; }
+                .help-status-card p { margin:0; font-size:13.5px; color:#455a64; line-height:1.65; }
+                .help-rule { background:#fff8e1; border-left:4px solid #ff9800; padding:12px 16px; border-radius:8px; margin:10px 0; font-size:13.5px; line-height:1.8; color:#5d4037; }
+                .help-rule strong { color:#e65100; }
+                .help-section table { background:#fff; border-radius:8px; overflow:hidden; box-shadow:0 1px 2px rgba(0,0,0,0.06); }
+                .help-section table th { background:#e8eaf6; color:#283593; font-weight:700; font-size:13.5px; }
+                .help-section table td { font-size:13.5px; color:#37474f; }
+                .help-section table td:first-child { font-weight:600; color:#263238; }
+            </style>
+
+            <div class="help-section">
+                <h3>📋 整体业务流程</h3>
+                <div class="help-flow">
+                    <span class="help-flow-step">① 门店上报缺货</span><span class="help-flow-arrow">→</span>
+                    <span class="help-flow-step">② 仓库采购入库</span><span class="help-flow-arrow">→</span>
+                    <span class="help-flow-step">③ 自动判定已入库</span><span class="help-flow-arrow">→</span>
+                    <span class="help-flow-step">④ 配送到店</span><span class="help-flow-arrow">→</span>
+                    <span class="help-flow-step">⑤ 自动判定已完成</span><span class="help-flow-arrow">→</span>
+                    <span class="help-flow-step">⑥ 90天未处理→自动关闭</span>
+                </div>
+                <ul>
+                    <li><strong>门店侧</strong>：各门店店员录入缺货商品和数量，提交后进入系统等待处理</li>
+                    <li><strong>仓库侧</strong>：仓库采购到货入库后，系统把这批入库数量按各门店上报时间的先后依次抵扣还没满足的缺货需求：先报的先扣，扣够了的记录自动变为"已入库"。不做一对一的单据配对，也不区分这批货本来是为哪家店采购的。</li>
+                    <li><strong>后台侧</strong>：管理员查看汇总、一键同步判定、标记状态、手动补录</li>
+                    <li><strong>定时任务</strong>：每天凌晨 00:30 自动跑一次完整判定，无需人工干预</li>
+                </ul>
+            </div>
+
+            <div class="help-section">
+                <h3>🟢 七种状态含义</h3>
+                <div class="help-status-grid">
+                    <div class="help-status-card" style="border-color:#e53935;">
+                        <h4>🔴 待处理</h4>
+                        <p>门店刚上报，仓库还没采购或采购还没入库。需要仓库安排采购。</p>
+                    </div>
+                    <div class="help-status-card" style="border-color:#1e88e5;">
+                        <h4>🔵 已订购</h4>
+                        <p>仓库已经向厂家下了采购订单，但货还没到。等入库后自动判定。</p>
+                    </div>
+                    <div class="help-status-card" style="border-color:#fb8c00;">
+                        <h4>🟠 待付款</h4>
+                        <p>采购已下订单，但财务还没付款，通常不影响入库判定。</p>
+                    </div>
+                    <div class="help-status-card" style="border-color:#43a047;">
+                        <h4>🟢 已入库</h4>
+                        <p>仓库采购入库累计量 ≥ 缺货需求量，系统自动标记。需要继续配送到店。</p>
+                    </div>
+                    <div class="help-status-card" style="border-color:#2e7d32;">
+                        <h4>✅ 已完成</h4>
+                        <p>配送到门店的商品数量 ≥ 缺货需求量，系统自动升级。不再参与判定。</p>
+                    </div>
+                    <div class="help-status-card" style="border-color:#8e24aa;">
+                        <h4>🟣 厂家断货</h4>
+                        <p>厂家通知此商品暂时无货，无法采购。管理员手动标记。<strong>一旦标记就是终态</strong>——不会被 90 天自动关闭，也不会被自动判定覆盖。</p>
+                    </div>
+                    <div class="help-status-card" style="border-color:#757575;">
+                        <h4>⚫ 已关闭</h4>
+                        <p>上报超过 90 天仍未处理，系统自动关闭，不再参与判定。</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="help-section">
+                <h3>⚖️ 自动判定规则</h3>
+                <h4>核心逻辑：仓库采购入库 ≥ 缺货汇总（先报先得）</h4>
+                <ul>
+                    <li><strong>数据源</strong>：从业务系统实时读取采购入库单（已审核）</li>
+                    <li><strong>锚点规则</strong>：采购入库日期 <strong>不早于</strong> 缺货上报日期即算有效（<strong>当天入库也算</strong>）</li>
+                    <li><strong>先报先得</strong>：同一商品多个门店上报时，按上报时间先后依次抵扣采购入库量</li>
+                    <li><strong>多入口一套口径</strong>：定时任务 / 一键同步 / 行级「立即判定」按钮 → 全部用相同规则</li>
+                </ul>
+
+                <h4>配送口径升级（已入库 → 已完成）</h4>
+                <ul>
+                    <li>系统每天自动检查所有"已入库"记录的配送单（配送中心出库），如果该门店实际收到的配送量 ≥ 上报需求，自动升级为"已完成"</li>
+                    <li>已完成是终态，不再参与入库判定；需要再次上报新需求时重新提交</li>
+                </ul>
+
+                <h4>90 天自动关闭</h4>
+                <ul>
+                    <li>任何非终态上报，<strong>创建超过 90 天</strong>仍未处理（未入库、未订购、未付款），自动标记"已关闭"</li>
+                </ul>
+
+                <h4>30 天超时回退（已订购/待付款）</h4>
+                <ul>
+                    <li>变成「已订购」或「待付款」的记录，如果<strong>从改成那个状态的那天算起超过 30 天</strong>（不是上报日期）仍没到货、且仓库采购量还不够需求量，自动回退为"待处理"，备注"超时回退(30天未到货)"</li>
+                    <li>目的：订单下了超过一个月还没发货，一直挂着已订购状态会让仓库忽略它的存在。回退后回到待处理队列，让仓库重新关注或确认是否需要追单/取消</li>
+                    <li>每天凌晨 00:30 定时任务执行这条检查</li>
+                </ul>
+
+                <div class="help-rule">
+                    <strong>💡 提示：</strong>超 30 天未配送的已入库记录不会自动回退——有可能被其他门店要走了。需要门店再次上报需求即可。
+                </div>
+            </div>
+
+            <div class="help-section">
+                <h3>🔘 按钮功能速查</h3>
+                <table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:8px;">
+                    <thead>
+                        <tr style="background:var(--input-border);font-weight:700;">
+                            <th style="padding:8px 10px;text-align:left;border:1px solid var(--input-border);">按钮</th>
+                            <th style="padding:8px 10px;text-align:left;border:1px solid var(--input-border);">做什么</th>
+                            <th style="padding:8px 10px;text-align:left;border:1px solid var(--input-border);">场景</th>
+                            <th style="padding:8px 10px;text-align:left;border:1px solid var(--input-border);">改数据？</th>
+                            <th style="padding:8px 10px;text-align:left;border:1px solid var(--input-border);">通知？</th>
+                            <th style="padding:8px 10px;text-align:left;border:1px solid var(--input-border);">耗时</th>
+                            <th style="padding:8px 10px;text-align:left;border:1px solid var(--input-border);">结果</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);font-weight:600;">🔄 一键同步</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">按仓库采购入库核对各门店缺货汇总，把已满足的从待处理改为已入库，同时检查配送单把已入库升级为已完成</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">平时发现状态不对、新入库后手动补跑；定时任务每天 00:30 自动跑一次</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#e53935;"><strong>✅ 改</strong></td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">❌ 不发</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">30 秒到 3 分钟</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">完成判定的商品数量</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);font-weight:600;">📦 判定（行级）</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">只判当前这一个商品，核对仓库采购入库是否够它的缺货需求</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">单个商品刚入库、想快速确认它是否该已入库</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#e53935;"><strong>✅ 改</strong></td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">❌ 不发</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">3 到 10 秒</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">判定结果弹窗</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);font-weight:600;">📬 发送到货通知</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">找出仓库已有货但门店还没收到通知的商品，推送一条到货通知到门店通知中心</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">采购刚入库、或想再发一轮配送提醒</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#43a047;">❌ 不改状态</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#1e88e5;"><strong>✅ 发系统内通知</strong></td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">10 到 30 秒</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">通知 X 条、跳过 Y 条</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);font-weight:600;">🚚 配送待办</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">列出所有已入库但门店还没配送到货的商品</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">安排配送、检查哪些已入库还没配</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#43a047;">❌ 只读</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">❌ 不发</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">1 秒内</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">待配送商品清单弹窗</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);font-weight:600;">🔄 刷新订购数据</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">从服务器拉取最新数据：缺货上报表 + 采购计划（含实时库存、在途、供货商）；<strong>只读查询，不会跑入库判定，不会碰采购入库单</strong></td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">想看到最新的缺货上报、库存数字或供货商变化，但不需要跑判定时；一键同步刚跑完之后也会自动刷新一次</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#43a047;">❌ 只读</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">❌ 不发</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">3 到 10 秒</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">页面数据刷新</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);font-weight:600;">✏️ 手动改状态</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">行内下拉框直接改单条上报的状态</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">自动判定有偏差时人工修正（例如厂家长期断货手动标）</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#e53935;"><strong>✅ 改</strong></td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">❌ 不发</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">1 秒内</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">状态立即更新</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);font-weight:600;">📋 批量标记</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">把勾选的所有商品统一改成目标状态</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">需要同时改多条记录的状态</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);color:#e53935;"><strong>✅ 批量改</strong></td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">❌ 不发</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">3 到 15 秒</td>
+                            <td style="padding:8px 10px;border:1px solid var(--input-border);">X 条已更新</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h4 style="margin-top:16px;color:#263238;">🔑 四个"刷新/同步"按钮的区别</h4>
+                <ul>
+                    <li><strong>一键同步</strong>：<strong>改数据</strong>。跑完整自动判定（入库+配送升级），批量把该变状态的商品改掉。30 秒到 3 分钟。相当于"全量重算"。</li>
+                    <li><strong>判定（行级）</strong>：<strong>改数据</strong>。只算当前这一个商品，速度快。3 到 10 秒。相当于"单点重算"。</li>
+                    <li><strong>刷新订购数据</strong>：<strong>只读</strong>。拉取缺货上报表 + 采购计划（实时库存、在途、供货商），<strong>不跑入库判定、不碰采购入库单</strong>。3 到 10 秒。相当于"从数据库读最新快照，不改任何状态"。</li>
+                    <li><strong>定时自动刷新</strong>：<strong>只读</strong>。页面每隔 N 秒自动拉一次最新数据（同"刷新订购数据"）。不触发自动判定。</li>
+                </ul>
+                <div class="help-rule">
+                    <strong>简单记：</strong>想改状态用「一键同步/判定」；想刷新看数据用「刷新订购数据/自动刷新」。
+                </div>
+
+                <!-- ============ 逐按钮详解（九项结构）============ -->
+                <h4 style="margin-top:20px;color:#263238;border-top:1px solid var(--input-border);padding-top:16px;">📌 逐按钮详解（每按钮都写清楚九件事）</h4>
+
+                <div style="margin-top:12px;padding:12px 16px;background:#fff8e1;border-left:3px solid #ff9800;border-radius:4px;font-size:12.5px;color:#5d4037;">
+                    <strong>九个固定字段：</strong>① 在哪 &nbsp; ② 一句话作用 &nbsp; ③ 点下去系统走哪几步 &nbsp; ④ 该用的场景 &nbsp; ⑤ 别用的场景 &nbsp; ⑥ 改不改数据 &nbsp; ⑦ 推不推通知 &nbsp; ⑧ 耗时 &nbsp; ⑨ 结果在哪看 &nbsp; ⑩ 出问题怎么办 &nbsp; ⑪ 和相近按钮的区别
+                </div>
+
+                <!-- ===== 1. 一键同步 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #e53935;">
+                    <h4 style="margin:0 0 8px 0;color:#c62828;">🔄 一键同步（工具栏左侧第一个按钮）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>按仓库采购入库核对所有门店缺货汇总，批量改状态。</p>
+                    <p style="margin:4px 0;"><strong>系统走哪几步：</strong>① 拉 SQL Server 所有采购入库单（BillType=34, InKRec=3）&nbsp; ② 按商品聚合累计量&nbsp; ③ 对每条未完结的上报（待处理/已订购/待付款），从最早上报时间开始 FIFO 依次消耗采购量&nbsp; ④ 采购量够了→改「已入库」&nbsp; ⑤ 查配送单，配送到店量≥需求→再升级「已完成」&nbsp; ⑥ 已订购/待付款超 30 天没到货→回退「待处理」&nbsp; ⑦ 非终态超 90 天→关「已关闭」&nbsp; ⑧ 改完后触发升级到已配送的逻辑（查配送中心出库单）&nbsp; ⑨ 最后自动刷新一次订购数据</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>仓库刚采购完、状态明显不对、或每天早上例行检查。&nbsp; <strong>别用：</strong>只想看最新数据（用刷新订购数据）、只想改一条（用行级判定）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：✅ 批量改状态 &nbsp; 推通知：❌ 不推 &nbsp; 耗时：30 秒 – 3 分钟</strong></p>
+                    <p style="margin:4px 0;"><strong>结果在哪看：</strong>弹窗显示"判定完成 X 条，升级为已配送 Y 条"，然后页面自动刷新。</p>
+                    <p style="margin:4px 0;"><strong>出问题：</strong>长时间转圈没反应→网络断了；判定结果为 0 但明明有新入库→检查入库日期是否早于上报日期；没触发已配送→配送单还没生成。</p>
+                    <p style="margin:4px 0;"><strong>和判定的区别：</strong>一键同步全量跑所有商品（30s-3min），判定只跑当前这一个（3-10s）。一键同步 = 全量重算，判定 = 单点修正。</p>
+                </div>
+
+                <!-- ===== 2. 行级判定 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #1e88e5;">
+                    <h4 style="margin:0 0 8px 0;color:#1565c0;">🔍 判定（行级，每行右侧的小按钮）</h4>
+                    <p style="margin:4px 0;"><strong>在哪：</strong>列表里每一行的最右侧，「改状态」下拉框旁边。&nbsp; <strong>一句话：</strong>只跑当前这一个商品的入库+配送判定。</p>
+                    <p style="margin:4px 0;"><strong>系统走哪几步：</strong>① 拉这条上报的商品编码&nbsp; ② 查 SQL Server 这个商品所有采购入库累计量 &nbsp; ③ 从这条的上报时间往后消耗入库量&nbsp; ④ 够了→改「已入库」&nbsp; ⑤ 再查配送单→够配送→升级「已配送」&nbsp; ⑥ 返回判定结果弹窗</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>知道某个商品刚入库想快速确认、一键同步太慢但只关心一个商品。&nbsp; <strong>别用：</strong>想批量改、或列表里 20+ 条都要判（不如一键同步）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：✅ 改这一条 &nbsp; 推通知：❌ &nbsp; 耗时：3 – 10 秒</strong></p>
+                    <p style="margin:4px 0;"><strong>结果：</strong>弹窗直接显示判定结果（什么状态变了、用了多少入库量、还剩多少）。</p>
+                    <p style="margin:4px 0;"><strong>和一键同步的区别：</strong>一键同步改所有商品（重+慢），判定只改这一条（轻+快）。行级判定不会跑 30 天回退/90 天关闭，那俩只在一键同步/定时任务里跑。</p>
+                </div>
+
+                <!-- ===== 3. 发送到货通知 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #43a047;">
+                    <h4 style="margin:0 0 8px 0;color:#2e7d32;">📬 发送到货通知（工具栏）</h4>
+                    <p style="margin:4px 0;"><strong>在哪：</strong>工具栏，「一键同步」右边。&nbsp; <strong>一句话：</strong>找出仓库有货但门店还没收到通知的商品，推送系统内通知。</p>
+                    <p style="margin:4px 0;"><strong>系统走哪几步：</strong>① 读所有非终态上报（排除已完成/已配送/厂家断货/已关闭）&nbsp; ② 筛选出仓库库存 > 0 且门店还在缺货的&nbsp; ③ 写 store_notifications 表（系统内通知，不是微信）&nbsp; ④ 弹窗告诉用户发了几条、跳过几条。</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>采购刚入库、想再发一轮配送提醒、门店反馈没收到通知。&nbsp; <strong>别用：</strong>商品还没入库（发了也白发）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 不改任何状态 &nbsp; 推通知：✅ 写系统内通知表 &nbsp; 耗时：10 – 30 秒</strong></p>
+                    <p style="margin:4px 0;"><strong>结果：</strong>弹窗显示"通知 X 条、跳过 Y 条"；门店刷新页面点铃铛图标就能看到。</p>
+                    <p style="margin:4px 0;"><strong>和一键同步的区别：</strong>一键同步改状态不发通知，这个发通知不改状态。两个互不干扰，可以先同步再发通知。</p>
+                </div>
+
+                <!-- ===== 4. 配送待办 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #fb8c00;">
+                    <h4 style="margin:0 0 8px 0;color:#ef6c00;">🚚 配送待办（工具栏）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>列出所有已入库但门店还没配送到货的商品，方便安排配送。</p>
+                    <p style="margin:4px 0;"><strong>系统走哪几步：</strong>① 拉所有「已入库」状态的上报&nbsp; ② 查 SQL Server 配送中心出库单（vBuySendSumDetail，OutKRec='3'）&nbsp; ③ 按商品+门店聚合已配数量&nbsp; ④ 配≥需求→自动升级「已配送」+ 刷新角标&nbsp; ⑤ 剩下的（已入库但配<需求）→弹窗列出。</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>安排今天配送、检查哪些门店的货已经入库但没送到。&nbsp; <strong>别用：</strong>只想看缺货汇总（用刷新订购数据）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：自动升级「已配送」&nbsp; 推通知：❌ &nbsp; 耗时：1 秒内（弹窗秒开）</strong></p>
+                    <p style="margin:4px 0;"><strong>结果：</strong>弹窗里一张清单表，每行有商品、门店、需求、已配、还待配多少。</p>
+                    <p style="margin:4px 0;"><strong>和一键同步的关系：</strong>一键同步会顺便升级已配送，但它主要目标是入库判定。配送待办反过来：主要目标是列清单，顺便做升级。两个都能升级已配送，一键同步升级更全（覆盖所有已入库记录）。</p>
+                </div>
+
+                <!-- ===== 5. 刷新订购数据 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #8e24aa;">
+                    <h4 style="margin:0 0 8px 0;color:#6a1b9a;">🔄 刷新订购数据（工具栏）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>从服务器拉最新数据快照（缺货上报 + 实时库存 + 采购计划），<strong>只读不改</strong>。</p>
+                    <p style="margin:4px 0;"><strong>系统走哪几步：</strong>① 读 Supabase reports 表（分页拉全量缺货上报）&nbsp; ② 调 SQL Server usp_GetPurchasePlanWithFeedback 存储过程（实时库存、在途、供货商）&nbsp; ③ 查配送中心出库明细&nbsp; ④ 合并后返回前端 → 页面重绘。<strong>不碰采购入库单、不跑入库判定、不改任何状态。</strong></p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>想看到最新的缺货/库存/供货商数字，但不需要跑判定时。一键同步刚跑完也会自动刷一次。&nbsp; <strong>别用：</strong>想改状态（用一键同步/判定）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 只读 &nbsp; 推通知：❌ &nbsp; 耗时：3 – 10 秒</strong></p>
+                    <p style="margin:4px 0;"><strong>和一键同步的区别：</strong>一键同步 = 改数据（慢），刷新 = 只读快照（快）。刷新跟浏览器 F5 刷新的区别是：F5 会让浏览器重新加载 HTML/JS 缓存，这个只刷数据不重加载页面。</p>
+                </div>
+
+                <!-- ===== 6. 自动刷新间隔 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #546e7a;">
+                    <h4 style="margin:0 0 8px 0;color:#37474f;">⏱️ 自动刷新间隔（工具栏下拉）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>页面每隔 N 秒自动拉一次最新数据（跟「刷新订购数据」同样的只读接口）。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>选间隔 → setInterval 定时触发 loadSummary() → 每次调 get_summary action。选"关"就 clearInterval。</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>长时间开着后台监控（比如整天挂一个标签页）。&nbsp; <strong>别用：</strong>临时查一下（手动刷新就行）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 只读 &nbsp; 推通知：❌</strong></p>
+                    <p style="margin:4px 0;"><strong>注意：</strong>自动刷新跟「定时自动同步（00:30）」是两个东西。定时自动同步会<strong>改状态</strong>，自动刷新<strong>只读</strong>。</p>
+                </div>
+
+                <!-- ===== 7. 行内改状态下拉 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #e91e63;">
+                    <h4 style="margin:0 0 8px 0;color:#c2185b;">✏️ 行内改状态（每行右侧下拉框）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>直接改单条上报的状态，绕过自动判定。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>选目标状态 → 点保存 → 写 Supabase reports 表 → 页面重绘。</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>自动判定有偏差时（比如厂家长期断货手动标「厂家断货」）。&nbsp; <strong>别用：</strong>批量改（用批量标记）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：✅ 改这一条 &nbsp; 推通知：❌ &nbsp; 耗时：1 秒内</strong></p>
+                    <p style="margin:4px 0;"><strong>注意终态保护：</strong>「已配送/已完成/厂家断货/已关闭」这四个终态<strong>不能被手动改回</strong>——选了会提示"终态不可修改"。</p>
+                </div>
+
+                <!-- ===== 8. 批量目标状态下拉 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #ffc107;">
+                    <h4 style="margin:0 0 8px 0;color:#ff8f00;">📋 批量目标状态（批量操作区下拉框）</h4>
+                    <p style="margin:4px 0;"><strong>在哪：</strong>列表上方"批量操作"区域，和"批量标记"按钮在一起。&nbsp; <strong>一句话：</strong>选批量标记要改成什么状态（待处理/已关闭/厂家断货/已配送）。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>选状态 → 批量标记按钮变成可点 &nbsp; （单独选这个下拉框<strong>不改任何东西</strong>，只给批量标记做目标）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 选下拉本身不改，要点批量标记才改 &nbsp; 推通知：❌</strong></p>
+                    <p style="margin:4px 0;"><strong>别选的坑：</strong>不能选中间态（已订购/待付款/已入库）做批量目标——批量标记是"直接改终态"，中间态靠自动判定流转。</p>
+                </div>
+
+                <!-- ===== 9. 批量标记 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #ff9800;">
+                    <h4 style="margin:0 0 8px 0;color:#ef6c00;">✅ 批量标记（批量操作区按钮）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>把勾选的所有商品统一改成目标状态。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>① 收集选中行的 ID &nbsp; ② 过滤掉终态（已配送/已完成/厂家断货/已关闭不能被批量改）&nbsp; ③ 批量写 Supabase reports 表 &nbsp; ④ 弹窗显示 X 条已更新。</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>需要同时改多条记录（比如一批都过期了统一标已关闭）。&nbsp; <strong>别用：</strong>改单条（用行内改状态）；批量选已完成再改会被跳过。</p>
+                    <p style="margin:4px 0;"><strong>改数据：✅ 批量改 &nbsp; 推通知：❌ &nbsp; 耗时：3 – 15 秒</strong></p>
+                    <p style="margin:4px 0;"><strong>和行级改状态的区别：</strong>行级一次改一条，批量一次改 N 条。批量会跳过终态，行级有终态保护提示。</p>
+                </div>
+
+                <!-- ===== 10. 清除选择 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #9e9e9e;">
+                    <h4 style="margin:0 0 8px 0;color:#616161;">❌ 清除选择（批量操作区按钮）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>把所有勾选的 checkbox 清空。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>clearSelection() → 所有行 checkbox.checked=false → 批量计数器归零。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 不改 &nbsp; 推通知：❌ &nbsp; 耗时：1ms</strong></p>
+                    <p style="margin:4px 0;"><strong>和 Esc 键的区别：</strong>Esc 键也能取消选择，但点按钮更明确（不知道快捷键的新用户）。</p>
+                </div>
+
+                <!-- ===== 11. 回填操作时间 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #78909c;">
+                    <h4 style="margin:0 0 8px 0;color:#455a64;">⏱️ 回填操作时间（批量操作区按钮）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>把勾选记录的 status_changed_at 统一改成当前时间 + 操作者。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>收集选中行 ID → 批量 UPDATE status_changed_at/status_changed_by → 弹窗成功数。</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>手动改了很多条但时间不对（之前是旧数据），想统一刷新时间戳。&nbsp; <strong>别用：</strong>正常日常操作（自动状态变更会自己写时间）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：✅ 改时间戳字段 &nbsp; 推通知：❌ &nbsp; 耗时：1 – 5 秒</strong></p>
+                    <p style="margin:4px 0;"><strong>注意：</strong>只改时间戳，不改状态值。</p>
+                </div>
+
+                <!-- ===== 12. 状态筛选 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #4dd0e1;">
+                    <h4 style="margin:0 0 8px 0;color:#006064;">🔍 状态筛选（工具栏下拉框）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>按状态过滤列表——只看某一种状态的商品。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>选状态 → loadSummary(keepFilters=true) → 重新拉数据 → 列表只剩筛选结果。</p>
+                    <p style="margin:4px 0;"><strong>可选值：</strong>全部 / 待处理 / 已订购 / 待付款 / 已入库 / 已完成 / 已配送 / 厂家断货 / 已关闭。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 不改 &nbsp; 推通知：❌ &nbsp; 耗时：3 – 10 秒（要重新拉数据）</strong></p>
+                    <p style="margin:4px 0;"><strong>和批量标记的交互：</strong>如果你把一条标记成「已关闭」而当前筛的是「待处理」，那条会从列表消失（正确行为）。切换下拉到「已关闭」就能看到。</p>
+                </div>
+
+                <!-- ===== 13. 主题切换 ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #3f51b5;">
+                    <h4 style="margin:0 0 8px 0;color:#283593;">🎨 主题切换（头部右上角，月亮/太阳图标）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>明暗模式一键切换。</p>
+                    <p style="margin:4px 0;"><strong>走哪几步：</strong>点图标 → document.documentElement.setAttribute('data-theme', 'dark'/'light') → CSS 变量整体切换 → localStorage 存偏好（下次打开记住）。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 不改任何业务数据 &nbsp; 推通知：❌ &nbsp; 耗时：即时</strong></p>
+                </div>
+
+                <!-- ===== 14. 操作说明 TAB ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #607d8b;">
+                    <h4 style="margin:0 0 8px 0;color:#37474f;">📖 操作说明 TAB（导航栏第三个）</h4>
+                    <p style="margin:4px 0;"><strong>在哪：</strong>顶部导航，和「缺货汇总」「权限管理」并列。&nbsp; <strong>一句话：</strong>帮助文档——业务流程、状态含义、按钮速查、常见问题。</p>
+                    <p style="margin:4px 0;"><strong>权限：</strong>所有能进 admin.html 的人（admin + 员工）都能看到，<strong>无隐藏/权限控制</strong>。不像权限管理 TAB 那样只有 admin 能看。</p>
+                    <p style="margin:4px 0;"><strong>改数据：❌ 纯只读展示 &nbsp; 推通知：❌</strong></p>
+                    <p style="margin:4px 0;"><strong>和权限管理的区别：</strong>权限管理只有 admin 能看（有 style="display:none" + JS 隐藏），操作说明<strong>写死在 HTML 里无隐藏</strong>。</p>
+                </div>
+
+                <!-- ===== 15. 手动同步（定时任务手动触发） ===== -->
+                <div style="margin-top:14px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #ff5722;">
+                    <h4 style="margin:0 0 8px 0;color:#d84315;">🔧 手动同步（工具栏隐藏按钮 / 定时任务）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>手动跑一次完整的定时任务（跟每天 00:30 自动跑的一模一样）。</p>
+                    <p style="margin:4px 0;"><strong>和一键同步的区别：</strong>一键同步跑的是"状态判定+配送升级"，手动同步跑的是<strong>完整定时任务</strong>（包括 SPFXB_Result 刷新、采购计划重新生成、已配送升级全量跑、30 天回退、90 天关闭等）。手动同步更重更全，耗时可能 5 – 10 分钟。</p>
+                    <p style="margin:4px 0;"><strong>该用：</strong>想重新刷新整个采购库存池（SPFXB_Result 过旧）、或需要补跑 30 天回退的逻辑。</p>
+                    <p style="margin:4px 0;"><strong>改数据：✅ 全量改所有表 &nbsp; 推通知：❌ &nbsp; 耗时：5 – 10 分钟</strong></p>
+                </div>
+
+                <!-- ===== 16-18. 门店端 ===== -->
+                <h4 style="margin-top:20px;color:#263238;border-top:1px dashed var(--input-border);padding-top:16px;">🏪 门店端（store.html）特有控件</h4>
+                <div style="margin-top:10px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #2e7d32;">
+                    <h4 style="margin:0 0 8px 0;color:#2e7d32;">🔔 通知中心（门店头部，铃铛图标）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>查看仓库发过来的到货通知。&nbsp; <strong>改数据：</strong>点进去后点"全部标已读"会写 store_notifications.is_read=true。&nbsp; <strong>耗时：</strong>1 秒内（弹窗秒开）。&nbsp; <strong>和刷新库存的区别：</strong>通知是"仓库告诉你有货了"，刷新库存是"自己查最新库存"。</p>
+                </div>
+                <div style="margin-top:10px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #1565c0;">
+                    <h4 style="margin:0 0 8px 0;color:#1565c0;">🔄 刷新库存（门店缺货上报页按钮）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>重新从服务器拉最新的商品库存数据（只读）。&nbsp; <strong>改数据：❌ &nbsp; 耗时：</strong>3 – 10 秒。&nbsp; <strong>和通知中心的区别：</strong>通知是被动接收，刷新是主动查询。刷新会绕过 5 分钟本地缓存直接查最新。</p>
+                </div>
+                <div style="margin-top:10px;padding:12px 16px;background:#f5f5f5;border-radius:6px;border-left:3px solid #c62828;">
+                    <h4 style="margin:0 0 8px 0;color:#c62828;">❌ 取消选择（门店缺货上报页）</h4>
+                    <p style="margin:4px 0;"><strong>一句话：</strong>清空已填的数量选择，回到初始状态。&nbsp; <strong>走哪几步：</strong>清 input.value → 清 currentProduct → 隐藏商品信息区。&nbsp; <strong>改数据：❌ 只读重置 &nbsp; 耗时：</strong>即时。</p>
+                </div>
+            </div>
+
+            <div class="help-section">
+                <h3>💡 常见问题</h3>
+                <h4>Q: 当天入库算不算满足？为什么要专门用「立即判定」？</h4>
+                <p>A: 算！采购入库日期不早于上报日期就算有效，当天入库完全算。但一键同步可能还没跑完当天新入库的批次，如果你知道某商品刚入库就想立刻确认，可以点行级的「判定」按钮单独跑。</p>
+                <h4>Q: 状态显示「已入库」，但门店一直没收到货？</h4>
+                <p>A: 这是正常的——「已入库」表示仓库采购已够，但还没配送到店。配送中心会自动升级为「已完成」（配送到店量 ≥ 需求）。你可以点「配送待办」看哪些已入库还没配，或在明细里看配送进度。</p>
+                <h4>Q: 收到「已关闭」怎么办？</h4>
+                <p>A: 这条上报超过 90 天没处理被系统自动关闭了。如果这个需求还存在，门店重新提交一条新的缺货上报即可，新上报不会受旧的影响。</p>
+                <h4>Q: 门店没收到系统内通知？</h4>
+                <p>A: 通知是仓库手动点「发送到货通知」才会推送的，不是入库自动发的。通知只发给「仓库有货但门店缺货」的上报。门店在页面上点通知中心（铃铛图标）查看。</p>
+                <h4>Q: 同一个商品多家门店重复上报会不会互相影响？</h4>
+                <p>A: 会互相消耗仓库的采购入库量——这是「先报先得」规则。同一商品多个门店都报了，仓库入库的那批货按上报时间先后分配：先报的先扣，扣够了的门店变已入库，剩下的继续等下一批入库。每家门店看到的是独立的上报记录。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 明细弹窗 -->
+    <div id="detailModal" class="modal">
+        <div class="modal-content detail-modal-content" style="max-width:600px;">
+            <div class="stock-modal-header">
+                <h3 id="detailTitle">需求明细</h3>
+                <button id="detailModalClose" class="btn-modal-close">×</button>
+            </div>
+            <div id="detailProductInfo" style="padding:10px 16px;font-size:14px;color:var(--text-secondary);border-bottom:1px solid var(--input-border);background:linear-gradient(135deg,#667eea18,#764ba218);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+            <div style="padding:8px 16px;background:#f8f9fa;border-bottom:1px solid #e0e0e0;display:flex;align-items:center;gap:12px;font-size:12px;">
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#555;">
+                    <input type="checkbox" id="detailHideCompleted" onchange="toggleHideCompleted()">
+                    <span>只看未完成门店（已配送≥需求会自动隐藏）</span>
+                </label>
+            </div>
+            <div class="stock-modal-body" style="padding:0;">
+                <table class="stock-table stock-compact-table" id="detailTable" style="font-size:13px;table-layout:fixed;width:100%;">
+                    <thead><tr><th style="width:75px;">日期</th><th style="width:90px;">门店</th><th style="width:45px;">库存</th><th style="width:55px;">已配送</th><th style="width:60px;">状态</th><th style="width:45px;">需求</th><th style="width:65px;">上报人</th></tr></thead>
+                    <tbody id="detailTbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="alertModal" class="modal">
+        <div class="modal-content">
+            <h3>提示</h3>
+            <p id="alertMsg"></p>
+            <button id="alertOkBtn" class="btn-primary">确定</button>
+        </div>
+    </div>
+
+    <!-- 自定义 Prompt 弹窗（替代浏览器原生 prompt，避免 Electron 拦截） -->
+    <div id="promptModal" class="modal">
+        <div class="modal-content" style="max-width:420px;">
+            <h3 id="promptTitle">输入</h3>
+            <p id="promptMsg" style="margin-bottom:14px;"></p>
+            <input type="number" id="promptInput" min="0" step="1" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;" />
+            <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end;">
+                <button id="promptCancelBtn" class="btn-secondary">取消</button>
+                <button id="promptOkBtn" class="btn-primary">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加员工弹窗 -->
+    <div id="empModal" class="modal">
+        <div class="modal-content">
+            <h3>添加门店员工</h3>
+            <div style="padding:10px 20px;">
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>手机号</label>
+                    <input type="tel" id="empPhoneInput" placeholder="11位手机号" maxlength="11" inputmode="numeric" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>姓名</label>
+                    <input type="text" id="empNameInput" placeholder="员工姓名（选填）" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                </div>
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label>所属门店</label>
+                    <select id="empStoreSelect" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                        <option value="">请选择门店</option>
+                    </select>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button id="empSaveBtn" class="btn-primary" style="flex:1;padding:10px;">确认添加</button>
+                    <button id="empCancelBtn" class="btn-secondary" style="flex:1;padding:10px;">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+
+    <!-- 修改密码弹窗 -->
+    <div id="passwordModal" class="modal">
+        <div class="modal-content">
+            <h3>修改员工密码</h3>
+            <div style="padding:10px 20px;">
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>员工手机号</label>
+                    <input type="text" id="pwdEmpPhone" readonly style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;background:#f0f0f0;color:#666;">
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>新密码</label>
+                    <input type="password" id="pwdNewPassword" placeholder="请输入新密码（至少4位）" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>确认密码</label>
+                    <input type="password" id="pwdConfirmPassword" placeholder="再次输入新密码" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button id="pwdSaveBtn" class="btn-primary" style="flex:1;padding:10px;">确认修改</button>
+                    <button id="pwdCancelBtn" class="btn-secondary" style="flex:1;padding:10px;">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 订货管理弹窗 -->
+    <div id="orderModal" class="modal">
+        <div class="modal-content">
+            <div class="stock-modal-header">
+                <h3 id="orderModalTitle">订货状态管理</h3>
+                <button id="orderModalClose" class="btn-modal-close">×</button>
+            </div>
+            <div class="stock-modal-body">
+                <table class="stock-table stock-compact-table" style="margin-bottom:15px;">
+                    <tr><td style="background:#f5f5ff;font-weight:bold;width:90px;">商品编码</td><td id="omProductCode">-</td></tr>
+                    <tr><td style="background:#f5f5ff;font-weight:bold;">商品名称</td><td id="omProductName">-</td></tr>
+                    <tr><td style="background:#f5f5ff;font-weight:bold;">门店总需求</td><td id="omTotalDemand" style="font-weight:bold;color:#e74c3c;">-</td></tr>
+                    <tr><td style="background:#f5f5ff;font-weight:bold;">当前库存</td><td id="omStock">-</td></tr>
+                    <tr><td style="background:#f5f5ff;font-weight:bold;">建议订货</td><td id="omSuggested">-</td></tr>
+                    <tr><td style="background:#f5f5ff;font-weight:bold;">当前状态</td><td id="omCurrentStatus">-</td></tr>
+                </table>
+
+                <div class="form-group" style="margin-bottom:14px;">
+                    <label style="font-weight:bold;display:block;margin-bottom:6px;color:#444;">
+                        实际订货数量
+                        <span style="font-size:11px;color:#999;font-weight:normal;float:right;">填写后自动改为「已订购」状态</span>
+                    </label>
+                    <input type="number" id="omActualQty" placeholder="输入实际订货数量，0表示取消订货"
+                        min="0" step="1" style="width:100%;padding:10px;border-radius:6px;border:2px solid #667eea;font-size:16px;text-align:center;">
+                </div>
+
+                <div class="form-group" style="margin-bottom:14px;">
+                    <label style="font-weight:bold;display:block;margin-bottom:6px;color:#444;">手动修改状态</label>
+                    <select id="omTargetStatus" style="width:100%;padding:9px;border-radius:6px;border:1px solid #ddd;font-size:14px;">
+                        <option value="">不修改</option>
+                        <option value="待处理">待处理</option>
+                        <option value="已订购">已订购</option>
+                        <option value="已完成">已入库</option>
+                        <option value="待付款">待付款</option>
+                        <option value="厂家断货">厂家断货</option>
+                    </select>
+                </div>
+
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label style="font-weight:bold;display:block;margin-bottom:6px;color:#444;">备注</label>
+                    <textarea id="omRemark" rows="2" placeholder="可选填备注信息" 
+                        style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;resize:none;"></textarea>
+                </div>
+
+                <div style="display:flex;gap:8px;margin-top:4px;">
+                    <button id="omSaveBtn" class="btn-primary" style="flex:1.2;padding:11px;font-size:15px;">保存修改</button>
+                    <button id="omCancelBtn" class="btn-secondary" style="flex:1;padding:11px;">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加/编辑子账号弹窗 -->
+    <div id="adminModal" class="modal">
+        <div class="modal-content">
+            <h3 id="adminModalTitle">添加子账号</h3>
+            <div style="padding:10px 20px;">
+                <input type="hidden" id="adminEditId" value="">
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>账号</label>
+                    <input type="text" id="adminUsernameInput" placeholder="登录账号" maxlength="50" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;" autocomplete="off">
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>密码</label>
+                    <input type="password" id="adminPasswordInput" placeholder="登录密码" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>姓名</label>
+                    <input type="text" id="adminNameInput" placeholder="显示名称" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label>角色</label>
+                    <select id="adminRoleSelect" style="width:100%;padding:8px;border-radius:6px;border:1px solid #ddd;">
+                        <option value="admin">普通管理员</option>
+                        <option value="viewer">只读用户</option>
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:16px;">
+                    <label>权限配置</label>
+                    <div id="adminPermissionsBox" style="padding:10px;background:#f8f9fa;border-radius:6px;font-size:13px;">
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="view_summary" checked> 查看缺货汇总</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="edit_status" checked> 修改补货状态</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="manage_order" checked> 管理订货数量</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="manage_employees"> 管理员工</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="manage_devices"> 管理设备授权</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="manage_stores"> 管理门店</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="sync_data"> 同步采购计划</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="notify_refresh" checked> 发送到货通知</label>
+                        <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="view_delivery_todo" checked> 配送待办</label>
+                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" class="perm-check" data-perm="view_audit_log"> 查看操作日志</label>
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button id="adminSaveBtn" class="btn-primary" style="flex:1;padding:10px;">确认添加</button>
+                    <button id="adminCancelBtn" class="btn-secondary" style="flex:1;padding:10px;">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 刷新进度遮罩（必须在 admin.js 之前）========== -->
+    <div id="refreshOverlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(30,30,60,0.55);backdrop-filter:blur(4px);z-index:99999;justify-content:center;align-items:center;flex-direction:column;opacity:0;transition:opacity 0.3s ease;">
+        <div style="background:#fff;border-radius:16px;padding:32px 48px;box-shadow:0 12px 48px rgba(0,0,0,0.25);text-align:center;">
+            <div style="width:52px;height:52px;border:4px solid #e0e0e0;border-top-color:#667eea;border-radius:50%;animation:__spin 0.9s linear infinite;margin:0 auto;"></div>
+            <div id="refreshOverlayTitle" style="margin-top:18px;font-size:16px;font-weight:600;color:#333;">正在加载数据...</div>
+            <div id="refreshOverlaySub" style="margin-top:8px;font-size:13px;color:#888;">首次加载可能需要 1-3 分钟，请勿关闭页面</div>
+        </div>
+        <style>@keyframes __spin { to { transform: rotate(360deg); } }</style>
+    </div>
+
+    <script src="./static/js/xlsx.full.min.js?v=603"></script>
+    <!-- ★ 2026-11-10 修复：去掉 document.write，改成常规 <script> 标签 -->
+    <!-- document.write 在 Electron 里可能因 CSP 或时序失败，导致 admin.js 完全不加载 → 所有卡片显示 0 -->
+    <!-- admin.html 本身已经被 ?t=Date.now() 绕过 HTML 缓存，所以这里只要固定 ?v=603 控制 JS 版本即可 -->
+    <script src="./static/js/admin.js?v=603"></script>
+
+    <!-- ========== PWA Service Worker (v5.9.0+ 完全禁用，避免缓存旧版) ========== -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          regs.forEach(function(reg) { reg.unregister(); });
+        });
+        if (window.caches) {
+          caches.keys().then(function(names) {
+            names.forEach(function(name) { caches.delete(name); });
+          });
+        }
+      }
+    </script>
+</body>
+</html>

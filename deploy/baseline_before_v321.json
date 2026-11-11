@@ -1,0 +1,36 @@
+{
+  "taken_at": "2026-11-10T00:00:00+08:00",
+  "version": "v3.20 串行SQL 无activeOnly",
+  "get_summary_total_ms": 29761,
+  "response_body_kb": 1809.5,
+  "reports": {
+    "total": 1743,
+    "待处理": 179,
+    "已订购": 18,
+    "待付款": 2,
+    "已完成": 364,
+    "已配送": 933,
+    "已关闭": 174,
+    "厂家断货": 72
+  },
+  "shortage_by_product": {
+    "entries": 153,
+    "demand_sum": 1664,
+    "note": "排除 已完成/已配送/已关闭/厂家断货 的 reports，按 product_code 聚合"
+  },
+  "completed_by_product_split": {
+    "entries": 1091,
+    "demand_sum": 15315,
+    "note": "已完成+已配送 reports，拆行后按 product_code||store_id 聚合"
+  },
+  "poolRemainingMap_keys": 152,
+  "product_1150041": {
+    "reports_count": 4,
+    "rows": [
+      {"id": 1630, "store": "04第四药店", "demand": 30, "status": "已完成", "created": "2026-10-21"},
+      {"id": 962,  "store": "04第四药店", "demand": 30, "status": "已配送", "created": "2026-08-18"},
+      {"id": 403,  "store": "04第四药店", "demand": 20, "status": "已配送", "created": "2026-06-24"},
+      {"id": 363,  "store": "09第九药店", "demand": 20, "status": "已配送", "created": "2026-06-22"}
+    ]
+  }
+}

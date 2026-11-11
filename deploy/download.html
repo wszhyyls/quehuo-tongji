@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>众和医药缺货订购系统 · 客户端下载</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            padding: 36px 28px;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+        }
+        .logo {
+            width: 72px;
+            height: 72px;
+            margin-bottom: 16px;
+        }
+        h1 {
+            font-size: 22px;
+            color: #333;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+        .subtitle {
+            font-size: 14px;
+            color: #999;
+            margin-bottom: 24px;
+        }
+        .info-grid {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-bottom: 28px;
+            flex-wrap: wrap;
+        }
+        .info-item {
+            background: #f5f7fa;
+            border-radius: 10px;
+            padding: 12px 16px;
+            min-width: 90px;
+        }
+        .info-label {
+            font-size: 11px;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+        .info-value {
+            font-size: 15px;
+            color: #333;
+            font-weight: 600;
+        }
+        .download-btn {
+            display: block;
+            background: linear-gradient(135deg, #667eea 0%, #5a67d8 100%);
+            color: #fff;
+            text-decoration: none;
+            font-size: 17px;
+            font-weight: 600;
+            padding: 16px 32px;
+            border-radius: 12px;
+            margin: 0 auto 20px;
+            box-shadow: 0 8px 24px rgba(102,126,234,0.4);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 32px rgba(102,126,234,0.5);
+        }
+        .download-btn:active { transform: translateY(0); }
+        .install-tip {
+            background: #fff9e6;
+            border: 1px solid #ffe58f;
+            border-radius: 10px;
+            padding: 14px 16px;
+            font-size: 13px;
+            color: #8c6d1f;
+            text-align: left;
+            line-height: 1.8;
+        }
+        .install-tip strong { color: #333; }
+        .divider {
+            height: 1px;
+            background: #eee;
+            margin: 20px 0;
+        }
+        .auto-update {
+            font-size: 12px;
+            color: #52c41a;
+            background: #f6ffed;
+            border: 1px solid #b7eb8f;
+            border-radius: 8px;
+            padding: 10px;
+        }
+        .older-link {
+            display: block;
+            margin-top: 16px;
+            font-size: 13px;
+            color: #667eea;
+            text-decoration: none;
+        }
+        .older-link:hover { text-decoration: underline; }
+        @media (max-width: 380px) {
+            .card { padding: 28px 20px; }
+            h1 { font-size: 19px; }
+            .info-grid { gap: 10px; }
+            .info-item { min-width: 80px; padding: 10px 12px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>众和医药缺货订购系统</h1>
+        <div class="subtitle">Windows 客户端下载</div>
+
+        <div class="info-grid">
+            <div class="info-item">
+                <div class="info-label">当前版本</div>
+                <div class="info-value">v5.15.6</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">安装包大小</div>
+                <div class="info-value">约 93 MB</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">更新日期</div>
+                <div class="info-value">2026-11-11</div>
+            </div>
+        </div>
+
+        <a class="download-btn" href="./releases/WSZH-ShortageStore%20Setup%205.15.6.exe">
+            ⬇ 下载安装包
+        </a>
+
+        <div class="install-tip">
+            <strong>安装说明（非常重要）：</strong><br>
+            ① 先退出旧客户端（托盘图标右键退出，或任务管理器杀掉「众和医药缺货订购系统」进程）<br>
+            ② 双击刚下载的安装包<br>
+            ③ 安装程序会自动卸载旧版，装完自动启动<br>
+            ④ 装完之后，<strong>以后有新版本会自动下载并在你退出时安装</strong>，不需要再来这里
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="auto-update">
+            ✅ 本版已支持自动更新 —— 启动后会静默检查新版本，下载完会提示你"重启生效"，不打断正在填的单据
+        </div>
+    </div>
+</body>
+</html>
