@@ -7,11 +7,11 @@
     <title>微山县众和医药连锁有限公司 药品订购系统 - 登录</title>
 
     <link rel="manifest" href="./manifest.json">
-    <link rel="apple-touch-icon" href="./static/icon-192.png">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
     <meta name="theme-color" content="#667eea">
 
-    <link rel="stylesheet" href="./static/css/style.css?v=600">
-    <script src="./static/js/utils.js?v=600"></script>
+    <link rel="stylesheet" href="/static/css/style.css?v=61110">
+    <script src="/static/js/utils.js?v=61110"></script>
     <style>
         .login-mode-switch {
             display: flex;
@@ -57,13 +57,13 @@
         <span id="updateBannerMsg">🔄 有新版本可用！建议更新后使用。</span>
         <a id="directDownloadLink" href="#" download style="margin-left:12px;padding:4px 16px;background:#fff;color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址1</a>
         <a id="directDownloadLink2" href="#" target="_blank" style="margin-left:6px;padding:4px 16px;background:rgba(255,255,255,0.85);color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址2</a>
-        <a id="directDownloadLink3" href="#" target="_blank" style="margin-left:6px;padding:4px 16px;background:rgba(255,255,255,0.85);color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">页面下载</a>
+        <a id="directDownloadLink3" href="#" download style="margin-left:6px;padding:4px 16px;background:rgba(255,255,255,0.85);color:#ff6b35;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block;">下载地址3</a>
         <button onclick="this.parentElement.style.display='none'" style="margin-left:8px;background:none;border:none;color:rgba(255,255,255,0.7);cursor:pointer;font-size:18px;">&times;</button>
     </div>
     <div class="login-container">
         <div class="login-card">
             <div class="login-header">
-                <img src="./static/logo.jpg" alt="LOGO" class="login-logo">
+                <img src="/static/logo.jpg" alt="LOGO" class="login-logo">
                 <span class="login-company">微山县众和医药连锁有限公司</span>
             </div>
             <h1 class="login-system">药品订购系统</h1>
@@ -114,7 +114,7 @@
                         <input type="password" id="passwordInput"
                             placeholder="请输入密码"
                             autocomplete="current-password">
-                        <button type="button" class="password-toggle" id="passwordToggle" title="显示密码">
+                        <button type="button" class="password-toggle" id="passwordToggle" data-tip="显示密码">
                             👁
                         </button>
                     </div>
@@ -136,11 +136,11 @@
                 <span style="display:inline-block;animation:spin 1s linear infinite;">&#8987;</span> 正在验证...
             </div>
             
-            <div class="version-info">V5.9.0</div>
+            <div class="version-info" data-version data-version-suffix=" · 本地加载版">v</div>
         </div>
     </div>
 
-    <script src="./static/js/supabase.min.js?v=600"></script>
+    <script src="/static/js/supabase.min.js?v=61110"></script>
     <script>
         // SUPABASE_URL / SUPABASE_ANON_KEY 已在 utils.js 中定义，此处不再重复声明
 
@@ -435,7 +435,10 @@
                         }
                         throw new Error(errMsg);
                     }
-                    throw new Error(result.error || '登录失败');
+                    throw new Error(result.error || '登录失败' + (
+                        (result.error || '').includes('设备') ?
+                        '\n\n💡 如果是刚升级了客户端，\n请联系管理员在「后台 → 设备授权」中解除原设备绑定，或点「清除所有设备授权」重置。' : ''
+                    ));
                 }
 
                 var loginData = result.data;
@@ -475,7 +478,10 @@
                 var adminRoles = ['admin', 'super_admin'];
                 // 标记本次为"新登录"，store.html 收到后会自动弹通知中心
                 sessionStorage.setItem('fresh_login', '1');
-                window.location.href = adminRoles.indexOf(loginData.user.role) >= 0 ? './admin.html' : './store.html';
+                // 【v26】跳转加时间戳，彻底绕过 Electron/CDN/SW 三层缓存
+                var t = Date.now();
+                var targetPage = adminRoles.indexOf(loginData.user.role) >= 0 ? '/admin.html' : '/store.html';
+                window.location.href = targetPage + '?t=' + t;
             } catch (err) {
                 showLoading(false);
                 showError(err.message);
@@ -501,54 +507,14 @@
         // 不再需要 downloadUpdate() 函数
 
         // ========== 页面加载时检查版本更新 ==========
-        (function checkVersionUpdate() {
+        // v5.15.11: 去掉登录页橙色"发现新版本"提示条
+        //   原因：electron-updater 已配好 autoDownload + autoInstallOnAppQuit（静默下载+退出时安装）
+        //   这条橙条只会误导用户手动去点，和静默升级方案冲突
+        //   保留 updateBanner DOM 结构，以后如需轻提示可直接改样式为 toast
+        (function initVersionCheck() {
             try {
-                // 通过 Electron IPC 获取客户端真实版本号（非页面显示值）
-                var checkPromise;
-                if (window.electron && window.electron.ipcRenderer) {
-                    checkPromise = window.electron.ipcRenderer.invoke('get-app-version');
-                } else {
-                    // 非 Electron 环境用页面显示版本（浏览器直接访问）
-                    var versionEl = document.querySelector('.version-info');
-                    checkPromise = Promise.resolve(versionEl ? versionEl.textContent.replace('V','').trim() : '0.0.0');
-                }
-                
-                checkPromise.then(function(currentVer) {
-                    return fetch(SUPABASE_URL + '/functions/v1/check-update', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY },
-                        body: JSON.stringify({ version: currentVer })
-                    }).then(function(r) { return r.json(); }).then(function(r) {
-                        if (r.success && r.data && r.data.updateAvailable) {
-                            var banner = document.getElementById('updateBanner');
-                            var msg = document.getElementById('updateBannerMsg');
-                            msg.textContent = '🔔 发现新版本 V' + r.data.version + '，请下载更新！（当前 V' + currentVer + '）';
-                            // 优先使用服务端返回的直链（Cloudflare Pages Function 代理，绕开 GitHub CDN 阻塞）
-                            var directUrl = r.data.downloadUrl;
-                            var backupUrl = r.data.downloadUrl2;
-                            var pageUrl = r.data.downloadUrl3;
-                            var fileName = r.data.fileName || ('WSZH-ShortageStore-Setup-' + r.data.version + '.exe');
-                            // 下载地址1：CF 代理（主，自动下载）
-                            var btn = document.getElementById('directDownloadLink');
-                            if (btn && directUrl) {
-                                btn.href = directUrl;
-                                btn.download = fileName;
-                            }
-                            // 下载地址2：GitHub 原始直链（备1，自动下载）
-                            var btn2 = document.getElementById('directDownloadLink2');
-                            if (btn2 && backupUrl) {
-                                btn2.href = backupUrl;
-                                btn2.download = fileName;
-                            }
-                            // 下载地址3：GitHub 页面（最稳定，弹窗手动点）
-                            var btn3 = document.getElementById('directDownloadLink3');
-                            if (btn3 && pageUrl) {
-                                btn3.href = pageUrl;
-                            }
-                            banner.style.display = 'block';
-                        }
-                    });
-                }).catch(function() {});
+                // Electron 环境下由主进程 autoUpdater 负责静默下载，这里不再弹窗
+                // 主进程下载完成后会通过 IPC 通知前端，可在 admin.html 里做轻提示
             } catch(e) {}
         })();
     </script>
@@ -577,26 +543,5 @@
         }
     </style>
 
-    <!-- ========== PWA Service Worker (v5.8.1+ 完全禁用) ========== -->
-    <script>
-      if ('serviceWorker' in navigator) {
-        // 1. 强制清理所有旧的 Service Worker 和缓存
-        navigator.serviceWorker.getRegistrations().then(function(regs) {
-          regs.forEach(function(reg) {
-            console.log('[Cleanup] Unregistering SW:', reg.scope);
-            reg.unregister();
-          });
-        });
-        if (window.caches) {
-          caches.keys().then(function(names) {
-            names.forEach(function(name) {
-              console.log('[Cleanup] Deleting cache:', name);
-              caches.delete(name);
-            });
-          });
-        }
-        // 2. 不再注册 SW
-      }
-    </script>
 </body>
 </html>

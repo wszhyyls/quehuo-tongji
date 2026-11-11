@@ -1,8 +1,8 @@
 version: 5.15.11
 files:
   - url: https://github.com/wszhyyls/quehuo-tongji/releases/download/v5.15.11/WSZH-ShortageStore%20Setup%205.15.11.exe
-    sha512: UwO3KhzVKjkKMY1GnGLjWzpBPKVqeX3Vbe9SowzdZXQP7GABjRcL1oao4fTFJ77hcxCmu0JxPXmOoVRaHmdx6Q==
-    size: 97661269
+    sha512: 4Pfy+jPiSCsR3uWqIEfc413KiZHUEwzwqV1xKznYQ/u0Jex9XUOR/V84vFxxKBiSdb1wMsw7t/EuCW2TKrQocw==
+    size: 97660915
 path: https://github.com/wszhyyls/quehuo-tongji/releases/download/v5.15.11/WSZH-ShortageStore%20Setup%205.15.11.exe
-sha512: UwO3KhzVKjkKMY1GnGLjWzpBPKVqeX3Vbe9SowzdZXQP7GABjRcL1oao4fTFJ77hcxCmu0JxPXmOoVRaHmdx6Q==
-releaseDate: '2026-11-11T09:13:04.029Z'
+sha512: 4Pfy+jPiSCsR3uWqIEfc413KiZHUEwzwqV1xKznYQ/u0Jex9XUOR/V84vFxxKBiSdb1wMsw7t/EuCW2TKrQocw==
+releaseDate: '2026-11-11T09:30:00.000Z'
