@@ -1,8 +1,8 @@
-version: 5.15.14
+version: 5.15.15
 files:
-  - url: https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/gh-proxy/WSZH-ShortageStore%20Setup%205.15.14.exe
-    sha512: 0xUUhe3vDMIjaSVBO35LFtwD3dzFeHl/YkrbFr6CEJSsljYOrv/HRau2bIPi7YxuBsOaPEpkEPR8nynXz2XO0Q==
-    size: 97662809
-path: https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/gh-proxy/WSZH-ShortageStore%20Setup%205.15.14.exe
-sha512: 0xUUhe3vDMIjaSVBO35LFtwD3dzFeHl/YkrbFr6CEJSsljYOrv/HRau2bIPi7YxuBsOaPEpkEPR8nynXz2XO0Q==
-releaseDate: '2026-11-12T04:11:34.885Z'
+  - url: https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/gh-proxy/WSZH-ShortageStore%20Setup%205.15.15.exe
+    sha512: xdDG1R4oVhp3eI0LsX5d/2EHScAxKyKlKv+SaF8Qxlx8R1XAQgdCm+qbHV8UhiUioUa7f1p0fiGBynqRQDIh4A==
+    size: 97662103
+path: https://qswpgnnedqvuegwfbprd.supabase.co/functions/v1/gh-proxy/WSZH-ShortageStore%20Setup%205.15.15.exe
+sha512: xdDG1R4oVhp3eI0LsX5d/2EHScAxKyKlKv+SaF8Qxlx8R1XAQgdCm+qbHV8UhiUioUa7f1p0fiGBynqRQDIh4A==
+releaseDate: '2026-11-12T06:43:14.850Z'

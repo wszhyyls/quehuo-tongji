@@ -1,5 +1,5 @@
 // 兜底版本：正常运行时会先读 releases/latest.yml，仅当读取失败才用这个值
-const FALLBACK_VERSION = "5.15.14";
+const FALLBACK_VERSION = "5.15.15";
 
 async function getLatestVersion() {
   try {

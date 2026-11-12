@@ -1347,6 +1347,15 @@ function loadCompletedTransitBatch(items) {
             report_ids.forEach(function(rid) {
                 completedTransitMap[String(rid)] = vals[String(rid)] !== undefined ? Number(vals[String(rid)]) : 0;
             });
+            // ★ 5.15.15：回写 cbp.stores[sid].transit，让"明细弹窗"与"列表"永远同源
+            if (summaryData && Array.isArray(summaryData.completed_by_product)) {
+                summaryData.completed_by_product.forEach(function(p) {
+                    var k = String(p._report_id);
+                    if (completedTransitMap[k] === undefined) return;
+                    var sk = p.store_id;
+                    if (p.stores && sk && p.stores[sk]) p.stores[sk].transit = completedTransitMap[k];
+                });
+            }
             return completedTransitMap;
         }).catch(function() { return completedTransitMap; });
 }
@@ -1940,7 +1949,18 @@ window.showShortageDetail = function(idx, fromCompleted) {
     var tbody = document.getElementById('detailTbody'); tbody.innerHTML = '';
     var sns = summaryData.overview.stores, phoneToStore = { '15305479520':'wszhyy02' };
     function gsn(rid) { var mi = phoneToStore[rid]||rid; return sns[mi]||rid; }
-    var sa = []; for (var sid in p.stores) { var s = p.stores[sid]; sa.push({ sid:sid, name:gsn(sid), stock:s.stock, transit:s.transit, demand:s.demand, report_time:s.report_time||'', reporter:s.reporter||'', report_id:s._report_id }); }
+    var sa = []; for (var sid in p.stores) {
+        var s = p.stores[sid];
+        // ★ 5.15.15：已入库明细必须读列表同一份 D（completedTransitMap[report_id]），
+        //   reports.in_transit 在 D 方案后不再更新（恒为 0），直接读会导致明细显示 0
+        var _rid = (s._report_id !== undefined && s._report_id !== null) ? s._report_id : p._report_id;
+        var _tv = s.transit;
+        if (fromCompleted) {
+            _tv = (_rid !== undefined && _rid !== null && completedTransitMap[String(_rid)] !== undefined)
+                ? completedTransitMap[String(_rid)] : null; // null → 先显示"-"，补查到再回填
+        }
+        sa.push({ sid:sid, name:gsn(sid), stock:s.stock, transit:_tv, demand:s.demand, report_time:s.report_time||'', reporter:s.reporter||'', report_id:_rid });
+    }
     sa.sort(function(a,b) { return (b.report_time||'').localeCompare(a.report_time||''); });
     // v5.15.6 ★ 同步渲染：弹窗打开时立刻写已知的 transit 数字，绝不显示"查询中..."
     // s.transit 来自 p.stores[sid].transit —— loadSummary 的 setTimeout 批量 get_realtime_transit 已经填过
@@ -1957,14 +1977,35 @@ window.showShortageDetail = function(idx, fromCompleted) {
         var _transitCell;
         if (_transitVal !== null) {
             var _tColor = _transitVal > 0 ? '#27ae60' : '#999';
-            _transitCell = '<td class="real-transit" data-store="'+safeText(s.name)+'" data-transit="'+_transitVal+'" style="color:'+_tColor+';font-weight:600;">'+_transitVal+'</td>';
+            _transitCell = '<td class="real-transit" data-store="'+safeText(s.name)+'" data-report-id="'+(s.report_id||'')+'" data-transit="'+_transitVal+'" style="color:'+_tColor+';font-weight:600;">'+_transitVal+'</td>';
         } else {
-            _transitCell = '<td class="real-transit" data-store="'+safeText(s.name)+'" data-transit="" style="color:#bbb;font-weight:400;">-</td>';
+            _transitCell = '<td class="real-transit" data-store="'+safeText(s.name)+'" data-report-id="'+(s.report_id||'')+'" data-transit="" style="color:#bbb;font-weight:400;">-</td>';
         }
         tbody.innerHTML += '<tr><td style="font-size:12px;color:#555;">'+safeText(s.report_time?new Date(s.report_time).toLocaleDateString('zh-CN'):'-')+'</td><td style="font-size:13px;">'+safeText(s.name)+'</td><td class="detail-stock" data-stock="'+safeText(s.stock)+'">'+safeText(s.stock)+'</td>'+_transitCell+'<td class="detail-status" style="text-align:center;font-size:11px;">-</td><td class="detail-demand" data-demand="'+safeText(s.demand)+'" style="font-weight:600;color:var(--primary);text-align:center;">'+safeText(s.demand)+'</td><td style="font-size:12px;color:var(--text-muted);">'+safeText(s.reporter||'-')+'</td></tr>';
     });
     // 立刻计算状态列（因为已有 transit 数据）
     updateDetailStatusCells();
+    // ★ 5.15.15：已入库明细里 D 还没进缓存的 report，单独补查并按 report_id 精准回填
+    if (fromCompleted) {
+        var _miss = sa.filter(function(s) { return s.report_id && completedTransitMap[String(s.report_id)] === undefined; });
+        if (_miss.length > 0) {
+            loadCompletedTransitBatch(_miss.map(function(s) { return { _report_id: s.report_id }; })).then(function() {
+                sa.forEach(function(s) {
+                    if (!s.report_id) return;
+                    var v = completedTransitMap[String(s.report_id)];
+                    if (v === undefined) return;
+                    s.transit = v;
+                    var cell = tbody.querySelector('td.real-transit[data-report-id="' + String(s.report_id) + '"]');
+                    if (!cell) return;
+                    cell.setAttribute('data-transit', String(v));
+                    cell.textContent = v;
+                    cell.style.color = v > 0 ? '#27ae60' : '#999';
+                    cell.style.fontWeight = '600';
+                });
+                updateDetailStatusCells();
+            });
+        }
+    }
     // 重置过滤复选框
     var cb = document.getElementById('detailHideCompleted'); if (cb) cb.checked = false;
     document.getElementById('detailModal').classList.add('show');
