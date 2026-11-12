@@ -6,6 +6,7 @@
 //   /functions/v1/gh-proxy.blockmap?f=Setup.exe           (blockmap URL 替换错误)
 //   /functions/v1/gh-proxy.blockmap/Setup.exe             (同上)
 import "@supabase/functions-js/edge-runtime.d.ts";
+import { getLatestVersion } from "../_shared/version.ts";
 
 const GITHUB_REPO = "wszhyyls/quehuo-tongji";
 
@@ -17,16 +18,6 @@ function stripBlockmapSuffix(name: string): string {
   // electron-updater 可能把 URL 路径里加 .blockmap，或者在文件名后加 .blockmap
   // 我们需要从任意地方提取出真实文件名
   return name.replace(/\.blockmap$/i, "");
-}
-
-async function getLatestVersion(): Promise<string> {
-  try {
-    const resp = await fetch("https://wszhyy.pages.dev/releases/latest.yml");
-    const text = await resp.text();
-    const m = text.match(/^version:\s*(\S+)/m);
-    if (m) return m[1];
-  } catch {}
-  return "5.15.11";
 }
 
 // 从请求 URL 里提取真实文件名（兼容各种奇怪的 URL 格式）

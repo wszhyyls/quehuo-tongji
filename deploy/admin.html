@@ -10,9 +10,9 @@
     <meta name="theme-color" content="#667eea">
 
     <title>微山县众和医药连锁有限公司 药品订购系统 - 管理后台</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=61110">
-    <script src="/static/js/supabase.min.js?v=61110"></script>
-    <script src="/static/js/utils.js?v=61110"></script>
+    <link rel="stylesheet" href="/static/css/style.css?v=61514">
+    <script src="/static/js/supabase.min.js?v=61514"></script>
+    <script src="/static/js/utils.js?v=61514"></script>
 </head>
 <body class="admin-page">
     <div class="app-header">
@@ -29,7 +29,7 @@
     <div class="app-container">
         <div class="store-name-bar">
             <h1 class="store-title">管理后台</h1>
-            <span style="margin-left:auto;font-size:11px;color:#1976d2;" id="pageVersion" data-version data-version-suffix=" · 本地加载版">v</span>
+            <span class="page-version" id="pageVersion" data-version data-version-suffix=" · 本地加载版"></span>
         </div>
 
         <div class="order-tabs admin-tabs">
@@ -940,11 +940,11 @@
         <style>@keyframes __spin { to { transform: rotate(360deg); } }</style>
     </div>
 
-    <script src="/static/js/xlsx.full.min.js?v=61110"></script>
+    <script src="/static/js/xlsx.full.min.js?v=61514"></script>
     <!-- ★ 2026-11-10 修复：去掉 document.write，改成常规 <script> 标签 -->
     <!-- document.write 在 Electron 里可能因 CSP 或时序失败，导致 admin.js 完全不加载 → 所有卡片显示 0 -->
-    <!-- admin.html 本身已经被 ?t=Date.now() 绕过 HTML 缓存，所以这里只要固定 ?v=61110 控制 JS 版本即可 -->
-    <script src="/static/js/admin.js?v=61110"></script>
+    <!-- admin.html 本身已经被 ?t=Date.now() 绕过 HTML 缓存，所以这里只要固定 ?v=61514 控制 JS 版本即可 -->
+    <script src="/static/js/admin.js?v=61514"></script>
 
     <!-- ★ 全局 JS 错误捕获（必须放在所有 <script> 之前，确保第一句报错就能抓住） -->
     <script>
@@ -994,11 +994,11 @@
           document.body.appendChild(d);
 
           var KEY_RESOURCES = [
-            '/static/css/style.css?v=61110',
-            '/static/js/supabase.min.js?v=61110',
-            '/static/js/utils.js?v=61110',
-            '/static/js/xlsx.full.min.js?v=61110',
-            '/static/js/admin.js?v=61110'
+            '/static/css/style.css?v=61514',
+            '/static/js/supabase.min.js?v=61514',
+            '/static/js/utils.js?v=61514',
+            '/static/js/xlsx.full.min.js?v=61514',
+            '/static/js/admin.js?v=61514'
           ];
           var results = [];
           KEY_RESOURCES.forEach(function(url) {

@@ -1,9 +1,10 @@
 // Cloudflare Pages Function: /gh-release/* → 代理 GitHub Release 下载
 // Pages Functions 双括号 [[path]] 语法匹配多段路径，context.params.path 是数组
-// GitHub Release 上 asset 文件名用点号：WSZH-ShortageStore.Setup.5.15.11.exe
+// GitHub Release 上 asset 文件名用点号：WSZH-ShortageStore.Setup.5.15.14.exe
 
 const GITHUB_REPO = "wszhyyls/quehuo-tongji";
-const DEFAULT_VERSION = "5.15.11";
+// 兜底版本：正常运行时会先读 releases/latest.yml，仅当读取失败才用这个值
+const DEFAULT_VERSION = "5.15.14";
 
 async function getLatestVersion() {
   try {
@@ -18,7 +19,7 @@ async function getLatestVersion() {
 // 把文件名里的 " Setup 5.x.x" 转换成 ".Setup.5.x.x"
 function normalizeGithubAssetName(fileName) {
   let n = decodeURIComponent(fileName);
-  // "WSZH-ShortageStore Setup 5.15.11.exe" → "WSZH-ShortageStore.Setup.5.15.11.exe"
+  // "WSZH-ShortageStore Setup 5.15.14.exe" → "WSZH-ShortageStore.Setup.5.15.14.exe"
   if (n.includes(' Setup ')) {
     n = n.replace(' Setup ', '.Setup.');
   } else if (n.includes(' Setup.')) {
@@ -30,7 +31,7 @@ function normalizeGithubAssetName(fileName) {
 export async function onRequest(context) {
   const pathArr = context.params.path || [];
   if (pathArr.length === 0) {
-    return new Response("Missing filename. Use /gh-release/WSZH-ShortageStore.Setup.5.15.11.exe", { status: 400 });
+    return new Response("Missing filename. Use /gh-release/WSZH-ShortageStore.Setup.5.15.14.exe", { status: 400 });
   }
   const rawFileName = pathArr.join("/");
   const version = await getLatestVersion();

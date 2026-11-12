@@ -84,7 +84,10 @@ export interface FifoRunResult {
 export function runFIFO(
   pendingReports: FifoReport[],
   purchaseByCode: Record<string, FifoPurchaseRow[]>,
-  sameDayCounts: boolean = true   // 【2026-11-08 放开锚点】默认宽松
+  sameDayCounts: boolean = true,   // 【2026-11-08 放开锚点】默认宽松
+  // ★ 2026-11-12 修复：已经由 FIFO 自动判定完成的 report 必须先从采购池里扣掉，
+  //   否则每次定时任务都把采购池重置成满池，同一张入库单会被反复用来完成多条 report
+  alreadyFifoDoneReports: FifoReport[] = []
 ): FifoRunResult {
   const details: string[] = [];
   const toCompleteIds: string[] = [];
@@ -101,6 +104,20 @@ export function runFIFO(
   }
   for (const code of Object.keys(itemsByCode)) {
     itemsByCode[code].sort((a, b) =>
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+  }
+
+  // ★ 2026-11-12：已完成(FIFO)的 report 按商品分组，用于预扣采购池
+  const doneByCode: Record<string, FifoReport[]> = {};
+  for (const r of alreadyFifoDoneReports) {
+    const code = r.product_code;
+    if (!code) continue;
+    if (!doneByCode[code]) doneByCode[code] = [];
+    doneByCode[code].push(r);
+  }
+  for (const code of Object.keys(doneByCode)) {
+    doneByCode[code].sort((a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
     );
   }
@@ -139,10 +156,18 @@ export function runFIFO(
 
     let passed = 0;
     let demandSum = 0;
-    for (const r of myReports) {
+
+    // ★ 2026-11-12 修复：把"已完成(FIFO)"的 report 和当前 pending 按上报时间合并排序。
+    //   已完成的那条先占用采购池，后面的 pending 只能拿剩下的，避免同一张入库单被重复计。
+    const events = ([] as Array<{ r: FifoReport; done: boolean }>)
+      .concat(myReports.map(r => ({ r, done: false })))
+      .concat((doneByCode[code] || []).map(r => ({ r, done: true })))
+      .sort((a, b) => new Date(a.r.created_at).getTime() - new Date(b.r.created_at).getTime());
+
+    for (const ev of events) {
+      const r = ev.r;
       const demand = Number(r.demand_quantity) || 0;
       if (demand <= 0) continue;
-      demandSum += demand;
       const myAnchor = toBjDate(r.created_at);
 
       // 汇总：本条 report 可用的采购池 = 所有 bill_date_bj >= myAnchor 的 entries 的 remain 之和
@@ -153,6 +178,20 @@ export function runFIFO(
         }
       }
 
+      if (ev.done) {
+        // 已完成的 FIFO report：按其当时能拿到的量预先扣减（不足则扣完所有可用）
+        let need = Math.min(demand, eligibleRemain);
+        for (const pe of poolEntries) {
+          if (need <= 0) break;
+          if (!isPurchaseEligible(pe.bill_date_bj, myAnchor, sameDayCounts)) continue;
+          const take = Math.min(pe.remain, need);
+          pe.remain -= take;
+          need -= take;
+        }
+        continue;
+      }
+
+      demandSum += demand;
       if (eligibleRemain >= demand) {
         // 逐条扣：FIFO 消耗 oldest-first（BillDate 升序，且已经排序）
         let need = demand;

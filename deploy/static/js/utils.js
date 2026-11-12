@@ -40,30 +40,39 @@ var EDGE_FUNCTION_URL = SUPABASE_URL + "/functions/v1/query-shortage-data";
     window.fetch.__wszh_proxied = true;
 })();
 
-// ========== 全局版本号（单一来源：Electron 下读 app.getVersion()，浏览器 fallback 常量）==========
-// v5.15.0: 改成动态获取 —— package.json.version 为唯一真相，界面通过这里注入
-var APP_VERSION = 'v5.15.0'; // 浏览器访问时的 fallback 常量（也要和 package.json 同步）
-// Electron 环境下异步覆盖 APP_VERSION（单一来源，防止硬编码漂移）
-(function electronVersionInject() {
+// ========== 全局版本号（单一来源：package.json.version，不再维护硬编码常量）==========
+// v5.15.14: Electron 下读 app.getVersion()（等于 package.json.version）；
+//           浏览器（Pages）下读发布产物 /releases/latest.yml（electron-builder 按 package.json 生成）。
+//           全站只有 applyAppVersion 一个写入口，禁止再硬编码版本字符串。
+var APP_VERSION = '';
+function applyAppVersion(raw) {
+    if (raw === undefined || raw === null) return;
+    var v = String(raw).trim().replace(/^v/i, '');
+    if (!/^\d+(\.\d+)*$/.test(v)) return;
+    APP_VERSION = 'v' + v;
+    window.APP_VERSION = APP_VERSION;
+    var els = document.querySelectorAll('[data-version]');
+    for (var i = 0; i < els.length; i++) {
+        els[i].textContent = APP_VERSION + (els[i].getAttribute('data-version-suffix') || '');
+    }
+    console.log('[APP_VERSION] ' + APP_VERSION);
+}
+window.applyAppVersion = applyAppVersion;
+(function initAppVersion() {
+    // ① Electron：app.getVersion() 为唯一真相
     if (window.electron && window.electron.ipcRenderer && typeof window.electron.ipcRenderer.invoke === 'function') {
         try {
-            window.electron.ipcRenderer.invoke('get-app-version').then(function(v) {
-                if (v && typeof v === 'string') {
-                    APP_VERSION = 'v' + v;
-                    console.log('[APP_VERSION] Electron 注入版本: ' + APP_VERSION);
-                    // 重新注入所有 [data-version] 元素
-                    var els = document.querySelectorAll('[data-version]');
-                    for (var i = 0; i < els.length; i++) {
-                        var el = els[i];
-                        var suffix = el.getAttribute('data-version-suffix') || '';
-                        el.textContent = APP_VERSION + suffix;
-                    }
-                }
-            }).catch(function(e) {
-                console.warn('[APP_VERSION] Electron get-app-version 失败, 用 fallback:', e.message);
-            });
-        } catch (e) { /* 非 Electron 环境或 preload 没暴露, 静默忽略 */ }
+            window.electron.ipcRenderer.invoke('get-app-version').then(applyAppVersion)
+                .catch(function(e) { console.warn('[APP_VERSION] get-app-version 失败:', e && e.message); });
+            return;
+        } catch (e) { /* preload 未暴露则继续走浏览器分支 */ }
     }
+    // ② 浏览器：读发布目录的 latest.yml（版本由 electron-builder 从 package.json 注入）
+    try {
+        fetch('/releases/latest.yml', { cache: 'no-store' }).then(function(r) { return r.text(); })
+            .then(function(t) { var m = t.match(/^\s*version:\s*([0-9][0-9.]*)/m); if (m) applyAppVersion(m[1]); })
+            .catch(function(e) { console.warn('[APP_VERSION] 读取 latest.yml 失败:', e && e.message); });
+    } catch (e) { /* 静默 */ }
 })();
 
 // ========== 门店配置（全局唯一，新增门店只需在此处添加）==========
@@ -710,12 +719,8 @@ window.APP_VERSION = APP_VERSION;
 // ========== 页面加载完成后自动把版本号注入到所有 data-version 元素 ==========
 (function initVersionInject() {
     function doInject() {
-        var els = document.querySelectorAll('[data-version]');
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            var suffix = el.getAttribute('data-version-suffix') || '';
-            el.textContent = APP_VERSION + suffix;
-        }
+        // 版本号只有 applyAppVersion 一个写入口，这里只做已就绪时的补注入
+        if (APP_VERSION) applyAppVersion(APP_VERSION);
     }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', doInject);

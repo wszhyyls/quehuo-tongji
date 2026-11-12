@@ -685,6 +685,16 @@ body.login-page {
     padding: 4px 0;
     max-width: none;
     margin-bottom: 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+/* 版本号：跟在"管理后台"标题右边，同一行，可读 */
+.admin-page .page-version {
+    font-size: 12px;
+    font-weight: 600;
+    color: #1976d2;
+    white-space: nowrap;
 }
 .admin-page .store-title {
     font-size: 14px;

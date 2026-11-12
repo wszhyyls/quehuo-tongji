@@ -333,7 +333,8 @@ function createSplashWindow() {
   // splash.html 打包在 __dirname/static/ 下
   const splashPath = path.join(__dirname, 'static', 'splash.html');
   if (fs.existsSync(splashPath)) {
-    w.loadFile(splashPath);
+    // 版本号随 query 传入，页面不再硬编码（单一来源 package.json → app.getVersion()）
+    w.loadFile(splashPath, { query: { v: app.getVersion() } });
   }
   return w;
 }

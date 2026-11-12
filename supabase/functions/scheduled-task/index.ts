@@ -95,8 +95,24 @@ async function preciseAutoDetectStatusV2() {
     const codes = [...new Set(pendingReports.map((r: any) => r.product_code).filter(Boolean))];
     const purchaseByCode = await queryPurchaseInPool(pool, codes);
 
+    // ★ 2026-11-12 修复：把已经由 FIFO 自动判定完成的 report 也带上，
+    //   先把它们占用的采购量从池里扣掉，否则同一张入库单会被每次任务重复使用
+    const fifoDoneReports: any[] = [];
+    for (let i = 0; i < codes.length; i += 150) {
+      const batch = codes.slice(i, i + 150);
+      const { data: doneRows } = await supabase
+        .from("reports")
+        .select("id, product_code, demand_quantity, created_at")
+        .eq("order_type", "缺货订购")
+        .eq("replenish_status", "已完成")
+        .ilike("status_remark", "%采购入库满足%")
+        .gt("demand_quantity", 0)
+        .in("product_code", batch);
+      if (doneRows) fifoDoneReports.push(...doneRows);
+    }
+
     // Step 3: 调共享 runFIFO（新口径，每条 report 独立 anchor）
-    const fifoRes = runFIFO(pendingReports as any[], purchaseByCode);
+    const fifoRes = runFIFO(pendingReports as any[], purchaseByCode, true, fifoDoneReports as any[]);
 
     // Step 4: 批量 UPDATE 判定完成的 reports
     let updated = 0;
@@ -155,12 +171,15 @@ async function fullSync() {
     let closedCount = 0;
     if (!eErr && expired && expired.length > 0) {
       const ids = expired.map((r: any) => r.id);
+      // v5.15.14 终态白名单守卫：只允许关闭 待处理/已订购/待付款/已到货
+      // 已关闭、厂家断货 必须原样保留；已完成(=已入库) 不在 90 天关闭范围内（等门店重新上报）
       const { error } = await supabase.from("reports").update({
         replenish_status: '已关闭',
         status_remark: '90天超期自动关闭',
         status_changed_at: now,
         close_reason: '90天超期未处理',
-      }).in("id", ids);
+      }).in("id", ids)
+        .in("replenish_status", ["待处理", "已订购", "待付款", "已到货"]);
       if (!error) closedCount = ids.length;
     }
 

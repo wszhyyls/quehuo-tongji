@@ -1,8 +1,8 @@
 ﻿// ========================================
-// 缺货统计系统 - 管理后台 v5.15.0 (2026-11-11 本地加载版)
+// 缺货统计系统 - 管理后台 (版本号见 window.APP_VERSION，由 utils.js 统一注入)
 // 版本号显示在页面右上角 + 控制台可查
 // ========================================
-console.log('[缺货统计系统] admin.js v5.15.0');
+console.log('[缺货统计系统] admin.js ' + (window.APP_VERSION || ''));
 if (window.user) console.log('[缺货统计系统] 当前用户:', window.user.username || window.user.name, 'role:', window.user.role);
 
 var token = localStorage.getItem('token');
@@ -457,14 +457,16 @@ document.getElementById('deliveryTodoBtn').addEventListener('click', async funct
     var finalError = null;
     try {
         // ========== Phase 1: 循环升级 ==========
-        var offset = 0;
+        // v5.15.14 修复跳行：改用 id 游标(after_id)，不再用 offset。
+        //   旧 offset 分页在"本页命中行被 UPDATE 成已配送、从已完成集合中移出"后会跳过等量行。
+        var afterId = 0, hadUpgrade = false, upgradedIds = [];
         while (totalPages < MAX_PAGES) {
             totalPages++;
             // 更新按钮进度（每页都刷一次）
             btn.textContent = '正在升级配送状态 (第 ' + totalPages + ' 页, 累计 ' + totalUpgraded + ' 条)';
             var r;
             try {
-                r = await callEdgeFunction('upgrade_to_delivered', { offset: offset, max_records: PAGE_SIZE }, { timeout: 120000, maxRetries: 1 });
+                r = await callEdgeFunction('upgrade_to_delivered', { after_id: afterId, max_records: PAGE_SIZE }, { timeout: 120000, maxRetries: 1 });
             } catch (netErr) {
                 // 网络层错误：记录后 break（后端可能挂了，重试也没用）
                 finalError = '第 ' + totalPages + ' 页网络失败: ' + (netErr?.message || '未知');
@@ -481,10 +483,20 @@ document.getElementById('deliveryTodoBtn').addEventListener('click', async funct
             }
             var data = r.data || {};
             totalUpgraded += data.actually_upgraded || 0;
+            if ((data.actually_upgraded || 0) > 0) {
+                hadUpgrade = true;
+                if (Array.isArray(data.upgraded_ids)) upgradedIds = upgradedIds.concat(data.upgraded_ids);
+            }
             totalSkipped += (data.total_completed || 0) - (data.to_upgrade || 0);
+            // 游标必须前进，否则会死循环在同一批
+            if (data.next_after_id && data.next_after_id > afterId) afterId = data.next_after_id;
             // has_more=false 或本页没拉满（说明后面没了）→ 结束
             if (!data.has_more || (data.total_completed || 0) < PAGE_SIZE) break;
-            offset = data.next_offset || (offset + PAGE_SIZE);
+        }
+        // v5.15.14：升级完成后立刻刷新主表，用户不用手动刷新
+        if (hadUpgrade) {
+            try { await loadSummary(true); } catch (e) { console.warn('[配送升级] 刷新主表失败:', e?.message); }
+            flashReportRows(upgradedIds);
         }
 
         // ========== Phase 2: 查配送待办（刷新后更准）==========
@@ -902,7 +914,8 @@ async function loadSummary(keepFilters) {
                                 demand: r.demand_quantity || 0,
                                 urgency_level: r.urgency_level||'普通',
                                 replenish_status: rs, reporter: ri,
-                                report_time: r.created_at
+                                report_time: r.created_at,
+                                _report_id: r.id, _report_ids: [r.id]
                             };
                             return o;
                         })(),
@@ -929,11 +942,12 @@ async function loadSummary(keepFilters) {
                     if (!target[mapKey].status_remark && r.status_remark) target[mapKey].status_remark = r.status_remark;
                     target[mapKey].total_demand += r.demand_quantity;
                     if (!target[mapKey].stores[r.store_id]) {
-                        target[mapKey].stores[r.store_id] = { stock:0, transit:0, demand:0, urgency_level:r.urgency_level||'普通', replenish_status:r.replenish_status||'待处理', reporter:ri, report_time:r.created_at, _report_count:0 };
+                        target[mapKey].stores[r.store_id] = { stock:0, transit:0, demand:0, urgency_level:r.urgency_level||'普通', replenish_status:r.replenish_status||'待处理', reporter:ri, report_time:r.created_at, _report_count:0, _report_ids: [] };
                     }
                     var ss = target[mapKey].stores[r.store_id];
                     ss.demand += r.demand_quantity;
                     ss._report_count += 1;
+                    if (r.id && ss._report_ids.indexOf(r.id) === -1) ss._report_ids.push(r.id);
                     if ((r.created_at||'') >= (ss.report_time||'')) {
                         ss.stock = r.current_stock;
                     ss.transit = r.in_transit;
@@ -1041,116 +1055,53 @@ async function loadSummary(keepFilters) {
         // 之前它在 try 块内 await + timeout=120s + maxRetries=1 → 最坏 4 分钟阻塞 finally → 遮罩永久不消失
         // 现在改成 fire-and-forget：遮罩先关（用户立刻能看到列表），后台慢慢查配送量
         setTimeout(function() {
-            // v29 批量 get_realtime_transit（45s 超时，1次重试，最坏 90s，且已不在遮罩阻塞）
+            // v5.15.14 D 方案：按 report_id 批量取分段配送量（后端 computeD 唯一来源）
             var REQ_TIMEOUT = 45000;
-            var transitTasks = summaryData.shortage_by_product.map(function(p) {
-                if (!p.product_code) return null;
-                var storesList = [];
+            var reportIds = [];
+            summaryData.shortage_by_product.forEach(function(p) {
                 for (var sid in p.stores) {
-                    var s = p.stores[sid];
-                    var sname = (STORE_CONFIG.find(function(c) { return c.id === sid; }) || {}).name || sid;
-                    var since = '2026-01-01';
-                    if (s && s.report_time) {
-                        var d = new Date(s.report_time);
-                        since = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
-                    }
-                    storesList.push({ store_name: sname, since: since, sid: sid });
+                    (p.stores[sid]._report_ids || []).forEach(function(rid) {
+                        var n = Number(rid);
+                        if (n > 0 && reportIds.indexOf(n) === -1) reportIds.push(n);
+                    });
                 }
-                if (storesList.length === 0) return null;
-                return { p: p, storesList: storesList, product_code: p.product_code };
-            }).filter(Boolean);
-            if (transitTasks.length > 0) {
-                var batchPayload = {
-                    product_codes: transitTasks.map(function(t) { return t.product_code; }),
-                    all_items: transitTasks.flatMap(function(t) {
-                        return t.storesList.map(function(s) {
-                            return { product_code: t.product_code, store_name: s.store_name, since: s.since, _sid: s.sid };
-                        });
-                    })
-                };
-                console.log('[v3.21] 后台批量查询 get_realtime_transit，' + transitTasks.length + ' 个商品');
-                callEdgeFunction('get_realtime_transit', batchPayload, { timeout: REQ_TIMEOUT, maxRetries: 1 }).then(function(_batchResp) {
-                    if (_batchResp && _batchResp.success && _batchResp.data && _batchResp.data.batchResult) {
-                        var br = _batchResp.data.batchResult;
-                        var transitResultMap = {};
-                        transitTasks.forEach(function(task) {
-                            var code = task.product_code;
-                            var stores = {};
-                            for (var i = 0; i < task.storesList.length; i++) {
-                                var s = task.storesList[i];
-                                var v = br[code] && br[code][s.store_name];
-                                if (v !== undefined && v !== null) stores[s.sid] = Number(v);
-                            }
-                            transitResultMap[code] = stores;
-                        });
-                        if (Object.keys(transitResultMap).length > 0) {
-                            summaryData.shortage_by_product.forEach(function(p) {
-                                var tr = transitResultMap[p.product_code];
-                                if (tr) { for (var sid in tr) { if (p.stores[sid]) p.stores[sid].transit = tr[sid]; } }
+            });
+            (summaryData.completed_by_product || []).forEach(function(p) {
+                var n = Number(p._report_id);
+                if (n > 0 && reportIds.indexOf(n) === -1) reportIds.push(n);
+            });
+            if (reportIds.length > 0) {
+                console.log('[v5.15.14] 后台批量查询 D 值（report_ids），' + reportIds.length + ' 条');
+                callEdgeFunction('get_realtime_transit', { report_ids: reportIds }, { timeout: REQ_TIMEOUT, maxRetries: 1 }).then(function(_batchResp) {
+                    if (!_batchResp || !_batchResp.success || !_batchResp.data || !_batchResp.data.values) return;
+                    var vals = _batchResp.data.values;
+                    // ① 缺货汇总：同一 (商品,门店) 的多条 report 的 D 相加，写回 stores[sid].transit
+                    summaryData.shortage_by_product.forEach(function(p) {
+                        for (var sid in p.stores) {
+                            var ss = p.stores[sid];
+                            var sum = 0;
+                            (ss._report_ids || []).forEach(function(rid) {
+                                var v = vals[String(rid)];
+                                if (v !== undefined && v !== null) sum += Number(v) || 0;
                             });
-                            // v5.15.9 ★ B3 修复：批量查询后自动 mark_store_completed
-                            //   五重保护：只升不降 / 查询成功兜底 / 失败不阻塞 / 防重复写 / 性能日志
-                            var _markStart = Date.now();
-                            var _markSessionSet = window._autoCompletedSessionSet || (window._autoCompletedSessionSet = new Set());
-                            var autoCompleteItems = [];
-                            var SKIP_STATUSES = ['已完成', '已配送', '厂家断货', '已关闭'];
-                            summaryData.shortage_by_product.forEach(function(p) {
-                                var tr = transitResultMap[p.product_code];
-                                if (!tr) return;
-                                for (var sid in p.stores) {
-                                    var s = p.stores[sid];
-                                    // ① 只升不降：已经是终态的绝不碰
-                                    if (SKIP_STATUSES.indexOf(s.replenish_status) !== -1) continue;
-                                    // ② 查询成功兜底：transit 必须是有效数字且 > 0，且必须 >= demand
-                                    var transit = tr[sid] !== undefined ? Number(tr[sid]) : (s.transit !== undefined ? Number(s.transit) : 0);
-                                    if (isNaN(transit) || transit <= 0) continue;
-                                    if (transit < Number(s.demand || 0)) continue;
-                                    // ④ 防重复写：会话内同一 (code, sid) 已经写过就不再写
-                                    var _key = p.product_code + '||' + sid;
-                                    if (_markSessionSet.has(_key)) continue;
-                                    _markSessionSet.add(_key);
-                                    autoCompleteItems.push({ product_code: p.product_code, store_id: sid, transit: transit, demand: Number(s.demand || 0) });
-                                }
-                            });
-                            var _markCollectMs = Date.now() - _markStart;
-                            if (autoCompleteItems.length > 0) {
-                                console.log('[v5.15.9] mark_collect耗时=' + _markCollectMs + 'ms, 判定' + autoCompleteItems.length + '条 → 准备写 DB');
-                                callEdgeFunction('mark_store_completed', {
-                                    items: autoCompleteItems,
-                                    operator: (user && (user.username || user.name)) || '管理员'
-                                }).then(function(markResp) {
-                                    var _writeMs = Date.now() - _markStart - _markCollectMs;
-                                    var _ok = markResp?.data?.updated?.length || 0;
-                                    var _fail = markResp?.data?.failed?.length || 0;
-                                    // ③ 失败只记日志，不阻塞渲染
-                                    if (!markResp || !markResp.success) {
-                                        console.warn('[v5.15.9] mark_store_completed 失败:', markResp?.error || '未知错误 (耗时=' + _writeMs + 'ms)');
-                                    } else {
-                                        console.log('[v5.15.9] mark_store_completed 写成功=' + _ok + ' 失败=' + _fail + ' (写入耗时=' + _writeMs + 'ms, 总耗时=' + (_markCollectMs + _writeMs) + 'ms)');
-                                    }
-                                    if (_ok > 0) {
-                                        autoCompleteItems.forEach(function(t) {
-                                            var p = summaryData.shortage_by_product.find(function(x) { return x.product_code === t.product_code; });
-                                            if (p && p.stores[t.store_id]) {
-                                                delete p.stores[t.store_id];
-                                                p.total_demand = Math.max(0, (p.total_demand || 0) - t.demand);
-                                            }
-                                        });
-                                        summaryData.shortage_by_product = summaryData.shortage_by_product.filter(function(p) { return Object.keys(p.stores || {}).length > 0; });
-                                        renderSummaryPage();
-                                    }
-                                }).catch(function(e) {
-                                    // ③ catch 也只记日志，不阻塞
-                                    console.warn('[v5.15.9] mark_store_completed 异常:', e?.message || e, '(耗时=' + (Date.now() - _markStart) + 'ms)');
-                                });
-                            } else {
-                                console.log('[v5.15.9] mark_collect耗时=' + _markCollectMs + 'ms, 判定0条（无可升级）');
-                            }
-                            renderSummaryPage();
-                            console.log('[v3.21] 后台合并配送量成功 ' + Object.keys(transitResultMap).length + '/' + transitTasks.length);
+                            ss.transit = sum;
                         }
-                    }
-                }).catch(function(e) { console.warn('[v3.21] 后台批量配送查询超时/异常:', e?.message); });
+                    });
+                    // ② 已入库列表：每条 report 自己的 D 写入 completedTransitMap（key = report_id）
+                    (summaryData.completed_by_product || []).forEach(function(p) {
+                        var v = vals[String(p._report_id)];
+                        if (v !== undefined && v !== null) {
+                            completedTransitMap[String(p._report_id)] = Number(v);
+                            // 需求明细弹窗直接读这份值，保证列表与弹窗口径一致
+                            if (p.stores && p.stores[p.store_id]) p.stores[p.store_id].transit = Number(v);
+                        }
+                    });
+                    // ③ 统一判定入口：已入库(已完成) → 已完成(已配送)
+                    _autoUpgradeCompletedRows();
+                    renderSummaryPage();
+                    try { renderCompletedSection(); } catch(e) {}
+                    console.log('[v5.15.14] 后台合并配送量成功 ' + reportIds.length + ' 条');
+                }).catch(function(e) { console.warn('[v5.15.14] 后台批量配送查询超时/异常:', e?.message); });
             }
             if (!_hasMergedWH) { console.log('[v30] 独立调用 refreshWarehouseStock'); refreshWarehouseStock(); }
             if (!_hasMergedApprovals) { console.log('[v30] 独立调用 loadApprovals'); loadApprovals(); }
@@ -1323,48 +1274,81 @@ window.jumpToPage = function() {
 };
 
 var completedPage = 1, completedPageSize = 20;
-// ★ 已入库列表每行独立 report 的配送量缓存：key = "product_code||store_name||since"
+// ★ v5.15.14 D 方案：已入库列表每行独立 report 的配送量缓存，key = String(report_id)
 var completedTransitMap = {};
-// ★ 2026-11-10 优化：一次批量调用后端 get_realtime_transit batchMode
-// 后端已有实现（query-shortage-data Line 7082-7133），传 { product_codes, all_items }
+
+// ========== v5.15.14 统一判定入口：已入库(已完成) → 已完成(已配送) ==========
+// 只对 reports.已完成 的行做配送判定，配送量 = 该 report 的 D（按上报日分段），
+// 由后端 mark_store_completed 按 report_id 统一写入（终态保护：已配送/厂家断货/已关闭 不覆盖）
+function _autoUpgradeCompletedRows() {
+    if (!summaryData || !summaryData.completed_by_product) return;
+    var set = window._autoDeliveredSessionSet || (window._autoDeliveredSessionSet = new Set());
+    var items = [];
+    summaryData.completed_by_product.forEach(function(p) {
+        if (p.replenish_status !== '已完成') return;
+        var rid = p._report_id;
+        if (!rid) return;
+        var trv = completedTransitMap[String(rid)];
+        if (trv === undefined || trv <= 0) return;
+        var dn = Number(p.demand_quantity || 0);
+        if (dn <= 0 || trv < dn) return;
+        if (set.has(String(rid))) return;
+        set.add(String(rid));
+        items.push({ report_id: rid, transit: trv, demand: dn });
+    });
+    if (items.length === 0) return;
+    callEdgeFunction('mark_store_completed', {
+        items: items,
+        operator: (user && (user.username || user.name)) || '管理员'
+    }).then(function(resp) {
+        var ok = resp?.data?.updated?.length || 0;
+        if (ok > 0) {
+            console.log('[v5.15.14] 已入库→已完成 自动升级 ' + ok + ' 条');
+            loadSummary(true);
+        }
+    }).catch(function(e) { console.warn('[v5.15.14] 已入库→已完成 自动升级失败:', e?.message || e); });
+}
+
+// 高亮刚升级的 report 行（配送待办按钮执行后调用）
+function flashReportRows(ids) {
+    if (!ids || !ids.length) return;
+    var set = {};
+    ids.forEach(function(x) { set[String(x)] = true; });
+    var rows = document.querySelectorAll('#completedTbody tr[data-report-id]');
+    for (var i = 0; i < rows.length; i++) {
+        var rid = rows[i].getAttribute('data-report-id');
+        if (rid && set[rid]) {
+            (function(tr) {
+                tr.style.transition = 'background .4s';
+                tr.style.background = '#fff3cd';
+                setTimeout(function() { tr.style.background = ''; }, 5000);
+            })(rows[i]);
+        }
+    }
+}
+
+// ★ v5.15.14 D 方案：按 report_id 批量取 D 值（后端 computeD 唯一来源）
 function loadCompletedTransitBatch(items) {
     if (!items || items.length === 0) return Promise.resolve({});
     var missing = items.filter(function(p) {
-        var k = (p.product_code||'') + '||' + (p.store_name||p._store_key||'') + '||' + (p._since||'');
-        return completedTransitMap[k] === undefined;
+        var rid = p._report_id;
+        return !rid || completedTransitMap[String(rid)] === undefined;
     });
     if (missing.length === 0) return Promise.resolve(completedTransitMap);
-    // 去重收集所有 { product_code, store_name, since } 配对
-    var seen = {};
-    var all_items = [], product_codes = [];
+    var report_ids = [];
     missing.forEach(function(p) {
-        var pc = p.product_code || '';
-        var sn = p.store_name || p._store_key || '';
-        var since = p._since || '';
-        var ak = pc + '||' + sn + '||' + since;
-        if (!seen[ak]) {
-            seen[ak] = true;
-            all_items.push({ product_code: pc, store_name: sn, since: since });
-            if (product_codes.indexOf(pc) === -1) product_codes.push(pc);
-        }
+        var rid = Number(p._report_id);
+        if (rid > 0 && report_ids.indexOf(rid) === -1) report_ids.push(rid);
     });
-    if (product_codes.length === 0) return Promise.resolve(completedTransitMap);
-    // 后端 SQL 有 WHERE vs.BillDate >= minSince，会把早于该 since 的配送过滤掉
-    // 再在前端用每条自己的 since 精过滤（和后端逻辑一致）
-    return callEdgeFunction('get_realtime_transit', {
-        product_codes: product_codes,
-        all_items: all_items
-    }).then(function(resp) {
-        var batchResult = resp && resp.success && resp.data && resp.data.batchResult ? resp.data.batchResult : {};
-        all_items.forEach(function(it) {
-            var k = it.product_code + '||' + it.store_name + '||' + it.since;
-            var pm = batchResult[it.product_code] || {};
-            // batchResult 里每个 store_name 对应的是从 minSince 起的总量
-            // 但后端已按每条自己的 since 精过滤过（Line 7121-7126 里 new Date 比较）
-            completedTransitMap[k] = pm[it.store_name] !== undefined ? pm[it.store_name] : 0;
-        });
-        return completedTransitMap;
-    }).catch(function() { return completedTransitMap; });
+    if (report_ids.length === 0) return Promise.resolve(completedTransitMap);
+    return callEdgeFunction('get_realtime_transit', { report_ids: report_ids })
+        .then(function(resp) {
+            var vals = resp && resp.success && resp.data && resp.data.values ? resp.data.values : {};
+            report_ids.forEach(function(rid) {
+                completedTransitMap[String(rid)] = vals[String(rid)] !== undefined ? Number(vals[String(rid)]) : 0;
+            });
+            return completedTransitMap;
+        }).catch(function() { return completedTransitMap; });
 }
 
 function renderCompletedSection() {
@@ -1384,6 +1368,7 @@ function renderCompletedSection() {
             : (summaryData.completed_by_product || []).indexOf(p);
         var tr = document.createElement('tr');
         tr.setAttribute('data-report-idx', globalIdx);
+        tr.setAttribute('data-report-id', p._report_id || '');
         var ft = escapeHtml((p.product_code||'')+' '+(p.product_name||'')+' '+(p.specification||'')+' '+(p.manufacturer||''));
         var so = ''; ORDER_STATUSES.forEach(function(s) { so += '<option value="'+s+'"'+(p.replenish_status===s?' selected':'')+'>'+statusLabel(s)+'</option>'; });
         // 完成时间 & 备注
@@ -1401,9 +1386,9 @@ function renderCompletedSection() {
         var remark = (p.status_remark && p.status_remark !== 'null' && p.status_remark !== 'undefined') ? p.status_remark : '-';
         // ★ 需求 = 这条 report 自己的 demand_quantity（不累加）
         var demandNum = p.demand_quantity !== undefined ? p.demand_quantity : (p.total_demand || 0);
-        // ★ 已配送 = 按这条 report 的 _since 起点查（upgrade_to_delivered 同口径）
-        var transKey = (p.product_code||'') + '||' + (p.store_name||p._store_key||'') + '||' + (p._since||'');
-        var transNum = completedTransitMap[transKey];
+        // ★ v5.15.14 已配送 = 这条 report 的 D（按上报日分段，后端 computeD 同口径）
+        var transKey = String(p._report_id || '');
+        var transNum = p._report_id ? completedTransitMap[transKey] : undefined;
         var transHtml;
         if (transNum === undefined) {
             // v5.15.9 B1 修复：不再显示"查询中..."占位，异步查询完自动刷新
@@ -1418,13 +1403,12 @@ function renderCompletedSection() {
     });
     // ★ 异步批量查配送量，填入 transNum 为 undefined 的单元格
     var needQuery = pageItems.filter(function(p) {
-        var k = (p.product_code||'') + '||' + (p.store_name||p._store_key||'') + '||' + (p._since||'');
-        return completedTransitMap[k] === undefined;
+        return p._report_id && completedTransitMap[String(p._report_id)] === undefined;
     });
     if (needQuery.length > 0) {
         loadCompletedTransitBatch(needQuery).then(function() {
             pageItems.forEach(function(p) {
-                var k = (p.product_code||'') + '||' + (p.store_name||p._store_key||'') + '||' + (p._since||'');
+                var k = String(p._report_id || '');
                 var trVal = completedTransitMap[k];
                 if (trVal !== undefined) {
                     var cell = ct.querySelector('.completed-transit[data-tkey="'+k.replace(/"/g,'\\"')+'"]');
@@ -1859,6 +1843,81 @@ window.updateReplenishStatus = async function(selectEl) {
     }
 };
 
+// ★ 2026-11-12：明细弹窗"复制全部明细"（门店不方便截图时直接粘贴文字）
+function ensureDetailCopyUI() {
+    if (document.getElementById('detailCopyBtn')) return;
+    var cb = document.getElementById('detailHideCompleted');
+    if (!cb || !cb.parentNode || !cb.parentNode.parentNode) return;
+    var bar = cb.parentNode.parentNode;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'detailCopyBtn';
+    btn.className = 'btn-secondary';
+    btn.textContent = '复制全部明细';
+    btn.style.cssText = 'margin-left:auto;font-size:12px;padding:4px 10px;cursor:pointer;';
+    btn.onclick = function() { copyDetailText(); };
+    bar.appendChild(btn);
+
+    var wrap = document.createElement('div');
+    wrap.id = 'detailCopyWrap';
+    wrap.style.cssText = 'display:none;padding:8px 16px 12px;border-top:1px dashed #ddd;';
+    var ta = document.createElement('textarea');
+    ta.id = 'detailCopyText';
+    ta.readOnly = true;
+    ta.style.cssText = 'width:100%;height:120px;font-size:12px;line-height:1.5;padding:8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;resize:vertical;';
+    wrap.appendChild(ta);
+    var table = document.getElementById('detailTable');
+    if (table && table.parentNode && table.parentNode.parentNode) {
+        table.parentNode.parentNode.insertBefore(wrap, table.parentNode.nextSibling);
+    } else {
+        var mc = document.getElementById('detailModal').querySelector('.modal-content');
+        if (mc) mc.appendChild(wrap);
+    }
+}
+
+function buildDetailText() {
+    var lines = [];
+    var info = document.getElementById('detailProductInfo');
+    lines.push('需求明细 ' + ((info && info.innerText) || '').trim());
+    var table = document.getElementById('detailTable');
+    if (table) {
+        var ths = table.querySelectorAll('thead th');
+        var head = [];
+        for (var i = 0; i < ths.length; i++) head.push((ths[i].innerText || '').trim());
+        if (head.length) lines.push(head.join(' | '));
+        var rows = table.querySelectorAll('tbody tr');
+        for (var r = 0; r < rows.length; r++) {
+            var cells = rows[r].querySelectorAll('td');
+            var arr = [];
+            for (var c = 0; c < cells.length; c++) arr.push((cells[c].innerText || '').trim());
+            lines.push(arr.join(' | '));
+        }
+    }
+    return lines.join('\n');
+}
+
+window.copyDetailText = function() {
+    var txt = buildDetailText();
+    var wrap = document.getElementById('detailCopyWrap');
+    var ta = document.getElementById('detailCopyText');
+    if (wrap) wrap.style.display = 'block';
+    if (ta) { ta.value = txt; try { ta.focus(); ta.select(); } catch (e) {} }
+    var btn = document.getElementById('detailCopyBtn');
+    var mark = function() {
+        if (!btn) return;
+        var old = btn.textContent;
+        btn.textContent = '已复制';
+        setTimeout(function() { btn.textContent = old; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(mark).catch(function() {
+            try { document.execCommand('copy'); mark(); } catch (e) {}
+        });
+    } else {
+        try { document.execCommand('copy'); mark(); } catch (e) {}
+    }
+};
+
 window.showShortageDetail = function(idx, fromCompleted) {
     if (!summaryData) return;
     var p = fromCompleted ? summaryData.completed_by_product[idx] : summaryData.shortage_by_product[idx];
@@ -1874,10 +1933,14 @@ window.showShortageDetail = function(idx, fromCompleted) {
     var sm = []; if (p.specification) sm.push(safeText(p.specification)); if (p.manufacturer) sm.push(safeText(p.manufacturer));
     if (sm.length > 0) ih += ' <span style="font-size:11px;color:#666;">('+sm.join(' | ')+')</span>';
     document.getElementById('detailProductInfo').innerHTML = ih;
+    // ★ 2026-11-12：确保"复制全部明细"按钮/文本框存在，并在每次打开时收起
+    ensureDetailCopyUI();
+    var _cpWrap = document.getElementById('detailCopyWrap');
+    if (_cpWrap) _cpWrap.style.display = 'none';
     var tbody = document.getElementById('detailTbody'); tbody.innerHTML = '';
     var sns = summaryData.overview.stores, phoneToStore = { '15305479520':'wszhyy02' };
     function gsn(rid) { var mi = phoneToStore[rid]||rid; return sns[mi]||rid; }
-    var sa = []; for (var sid in p.stores) { var s = p.stores[sid]; sa.push({ sid:sid, name:gsn(sid), stock:s.stock, transit:s.transit, demand:s.demand, report_time:s.report_time||'', reporter:s.reporter||'' }); }
+    var sa = []; for (var sid in p.stores) { var s = p.stores[sid]; sa.push({ sid:sid, name:gsn(sid), stock:s.stock, transit:s.transit, demand:s.demand, report_time:s.report_time||'', reporter:s.reporter||'', report_id:s._report_id }); }
     sa.sort(function(a,b) { return (b.report_time||'').localeCompare(a.report_time||''); });
     // v5.15.6 ★ 同步渲染：弹窗打开时立刻写已知的 transit 数字，绝不显示"查询中..."
     // s.transit 来自 p.stores[sid].transit —— loadSummary 的 setTimeout 批量 get_realtime_transit 已经填过
@@ -1922,12 +1985,13 @@ window.showShortageDetail = function(idx, fromCompleted) {
             }
             if (isNaN(tr) || tr <= 0) return;
             if (tr >= Number(s.demand)) {
-                toComplete.push({ sid: s.sid, name: s.name, transit: tr, demand: Number(s.demand) });
+                if (!s.report_id) return; // D 方案必须按 report_id 落库
+                toComplete.push({ sid: s.sid, name: s.name, transit: tr, demand: Number(s.demand), report_id: s.report_id });
             }
         });
         if (toComplete.length === 0) return;
         callEdgeFunction('mark_store_completed', {
-            items: toComplete.map(function(t) { return { product_code: p.product_code, store_id: t.sid, transit: t.transit, demand: t.demand }; }),
+            items: toComplete.map(function(t) { return { report_id: t.report_id, transit: t.transit, demand: t.demand }; }),
             operator: (user && (user.username || user.name)) || '管理员'
         }).then(function(resp) {
             if (!resp || !resp.success) { console.warn('[mark_store_completed] 失败:', resp && resp.error); return; }
@@ -1945,6 +2009,8 @@ window.showShortageDetail = function(idx, fromCompleted) {
                         return x.product_code === p.product_code && x.store_id === t.sid;
                     })) {
                         summaryData.completed_by_product.push({
+                            _report_id: t.report_id,
+                            _store_key: t.sid,
                             product_code: p.product_code,
                             store_id: t.sid,
                             product_name: p.product_name,
@@ -1997,16 +2063,10 @@ window.showShortageDetail = function(idx, fromCompleted) {
         }).catch(function(err) { console.warn('[mark_store_completed] 调用失败', err); });
     } // _doAutoTransfer 结束
 
-    // v5.15.6: 两个分支 —— 缓存全命中 → 零网络请求；部分缺失 → 补查
-    if (_emptyStores.length > 0) {
-        console.log('[showShortageDetail] ' + _emptyStores.length + ' 家缓存未命中 → 补查 get_realtime_transit');
-        refreshTransitData(p.product_code, sa).then(function(map) {
-            _doAutoTransfer(map || null);
-        });
-    } else {
-        console.log('[showShortageDetail] ✅ ' + sa.length + ' 家全缓存命中 → 零网络请求');
-        _doAutoTransfer(null); // null 表示用 sa[i].transit 缓存值，不用 Edge Function
-    }
+    // ★ 2026-11-12：按用户口径，明细弹窗的「已配送」只读列表那一列的同一份数据，
+    //   不再单独发 get_realtime_transit 请求。列表没取到就显示 "-"，保证两处永远一致。
+    console.log('[showShortageDetail] 已配送直接复用列表值（不再单独查询），未命中门店数=' + _emptyStores.length);
+    _doAutoTransfer(null); // null 表示用 sa[i].transit（列表同一份缓存值）
 };
 
 // ========== 新品审批 ==========

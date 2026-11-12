@@ -5,6 +5,8 @@
 import { serve } from "https://deno.land/std@0.192.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import sql from "https://esm.sh/mssql@9";
+// 【2026-11-12 D 方案】配送量按上报日分段，唯一来源
+import { computeD } from "../_shared/deliveryD.ts";
 // 【2026-11-08 放开锚点】所有判定核心函数直接内联，避免 Deno import 打包问题
 
 // ========== P0-2: ZHYYLS 只读断言（2026-11-07 新增）==========
@@ -921,7 +923,21 @@ async function preciseAutoDetectStatusV2(
       id: r.id, product_code: r.product_code,
       demand_quantity: Number(r.demand_quantity) || 0, created_at: r.created_at
     }));
-    const fifoRes = runFIFO(reportsForRunFIFO, purchaseByCode); // 默认 sameDayCounts=true（2026-11-08 放开锚点）
+    // ★ 2026-11-12 修复：带上已由 FIFO 自动完成的 report，先占用采购池再判定 pending
+    const fifoDoneReports: any[] = [];
+    for (let i = 0; i < activeCodes.length; i += 150) {
+      const batch = activeCodes.slice(i, i + 150);
+      const { data: doneRows } = await supabaseClient
+        .from("reports")
+        .select("id, product_code, demand_quantity, created_at")
+        .eq("order_type", "缺货订购")
+        .eq("replenish_status", "已完成")
+        .ilike("status_remark", "%采购入库满足%")
+        .gt("demand_quantity", 0)
+        .in("product_code", batch);
+      if (doneRows) fifoDoneReports.push(...doneRows);
+    }
+    const fifoRes = runFIFO(reportsForRunFIFO, purchaseByCode, true, fifoDoneReports); // 默认 sameDayCounts=true（2026-11-08 放开锚点）
     const toCompleteIds = fifoRes.toCompleteIds;
     const purchaseEnoughMap = fifoRes.purchaseEnoughMap;
     details.push(...fifoRes.details);
@@ -1248,7 +1264,10 @@ function isPurchaseEligible(
 function runFIFO(
   pendingReports: any[],
   purchaseByCode: Record<string, any[]>,
-  sameDayCounts: boolean = true   // 默认宽松
+  sameDayCounts: boolean = true,   // 默认宽松
+  // ★ 2026-11-12 修复：已由 FIFO 自动完成的 report 必须先占用采购池，
+  //   否则每次运行都把池子重置成满池，同一张入库单会被重复抵扣
+  alreadyFifoDoneReports: any[] = []
 ): {
   toCompleteIds: string[];
   details: string[];
@@ -1275,6 +1294,20 @@ function runFIFO(
     );
   }
 
+  // ★ 2026-11-12：已完成(FIFO)的 report 按商品分组，用于预扣采购池
+  const doneByCode: Record<string, any[]> = {};
+  for (const r of alreadyFifoDoneReports) {
+    const code = r.product_code;
+    if (!code) continue;
+    if (!doneByCode[code]) doneByCode[code] = [];
+    doneByCode[code].push(r);
+  }
+  for (const code of Object.keys(doneByCode)) {
+    doneByCode[code].sort((a, b) =>
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+  }
+
   const activeCodes = Object.keys(itemsByCode);
   details.push(`待检测商品: ${activeCodes.length} 个`);
 
@@ -1296,10 +1329,18 @@ function runFIFO(
 
     let passed = 0, demandSum = 0;
     let usedSame = false;
-    for (const r of myReports) {
+
+    // ★ 2026-11-12 修复：已完成(FIFO)的 report 与 pending 按上报时间合并排序，
+    //   已完成的先扣采购池，pending 只能拿剩余量，避免同一张入库单被重复使用
+    const events = ([] as any[])
+      .concat(myReports.map(r => ({ r, done: false })))
+      .concat((doneByCode[code] || []).map(r => ({ r, done: true })))
+      .sort((a, b) => new Date(a.r.created_at).getTime() - new Date(b.r.created_at).getTime());
+
+    for (const ev of events) {
+      const r = ev.r;
       const demand = Number(r.demand_quantity) || 0;
       if (demand <= 0) continue;
-      demandSum += demand;
       const myAnchor = toBjDate(r.created_at);
 
       let eligibleRemain = 0;
@@ -1307,6 +1348,20 @@ function runFIFO(
         if (isPurchaseEligible(pe.bill_date_bj, myAnchor, sameDayCounts)) eligibleRemain += pe.remain;
       }
 
+      if (ev.done) {
+        // 已完成的 FIFO report：按其当时能拿到的量预先扣减（不足则扣完可用）
+        let need = Math.min(demand, eligibleRemain);
+        for (const pe of poolEntries) {
+          if (need <= 0) break;
+          if (!isPurchaseEligible(pe.bill_date_bj, myAnchor, sameDayCounts)) continue;
+          const take = Math.min(pe.remain, need);
+          pe.remain -= take;
+          need -= take;
+        }
+        continue;
+      }
+
+      demandSum += demand;
       if (eligibleRemain >= demand) {
         // 判断是否吃到了"当天入库"（BillDate == myAnchor）
         let need = demand;
@@ -2241,10 +2296,11 @@ serve(async (req) => {
       }
 
       case "mark_store_completed": {
-        // 按 (商品编码, 门店) 粒度标记单条 report 为"已完成"
-        // 由需求明细的"已配送 >= 需求"自动判定触发
+        // v5.15.14 D 方案：按 report_id 粒度标记单条 report 为"已配送"
+        //   两阶段语义 —— 采购够=已入库(reports.已完成)，配送够=已完成(reports.已配送)
+        //   transit 由前端从 get_realtime_transit(report_ids) 的 D 值取，服务端只做终态守卫
         const { items, operator } = params as {
-          items?: Array<{ product_code: string; store_id: string; transit: number; demand: number }>;
+          items?: Array<{ report_id?: number | string; transit?: number; demand?: number }>;
           operator?: string;
         };
         if (!items || !Array.isArray(items) || items.length === 0) {
@@ -2252,36 +2308,49 @@ serve(async (req) => {
           break;
         }
         const validOperator = validateInput(operator || '管理员', "操作人", 50);
-        const updated: Array<{ product_code: string; store_id: string }> = [];
-        const failed: Array<{ product_code: string; store_id: string; error: string }> = [];
+        const updated: Array<{ report_id: number }> = [];
+        const skipped: Array<{ report_id: number | null; reason: string }> = [];
+        const failed: Array<{ report_id: number | null; error: string }> = [];
         for (const it of items) {
-          if (!it || !it.product_code || !it.store_id) continue;
-          const pc = validateInput(it.product_code, "商品编码", 50);
-          const sid = validateInput(it.store_id, "门店", 50);
-          const remark = `自动判定（已配送${Number(it.transit)||0}≥需求${Number(it.demand)||0}）`;
+          const rid = Number(it?.report_id);
+          if (!rid || rid <= 0) {
+            // 旧版客户端只传 product_code+store_id，口径不同，一律不写，避免超出本次授权写入范围
+            skipped.push({ report_id: null, reason: '缺少 report_id（客户端版本过低，请升级）' });
+            continue;
+          }
+          const transit = Number(it?.transit) || 0;
+          const demand = Number(it?.demand) || 0;
+          if (demand <= 0 || transit < demand) {
+            skipped.push({ report_id: rid, reason: `配送${transit}<需求${demand}` });
+            continue;
+          }
+          const remark = `自动判定：已配送${transit}≥需求${demand}`;
           try {
-            // 只更新该 (商品, 门店) 的 report
-            const { error } = await supabase
+            const { data: rowData, error } = await supabase
               .from("reports")
               .update({
-                replenish_status: '已完成',
+                replenish_status: '已配送',
                 status_remark: remark,
                 status_changed_at: new Date().toISOString(),
                 status_changed_by: validOperator
               })
-              .eq("product_code", pc)
-              .eq("store_id", sid)
-              .eq("order_type", "缺货订购");
+              .eq("id", rid)
+              .eq("order_type", "缺货订购")
+              .eq("replenish_status", "已完成")
+              .select("id");
             if (error) {
-              failed.push({ product_code: pc, store_id: sid, error: error.message });
+              failed.push({ report_id: rid, error: error.message });
+            } else if (!rowData || rowData.length === 0) {
+              // 被终态保护挡下（已配送/厂家断货/已关闭）或尚未到"已入库"阶段
+              skipped.push({ report_id: rid, reason: '非已完成或被终态保护' });
             } else {
-              updated.push({ product_code: pc, store_id: sid });
+              updated.push({ report_id: rid });
             }
           } catch (supaErr) {
-            failed.push({ product_code: pc, store_id: sid, error: String(supaErr) });
+            failed.push({ report_id: rid, error: String(supaErr) });
           }
         }
-        result = { success: true, updated, failed, message: `已自动转入已完成：${updated.length} 条${failed.length ? '，失败 ' + failed.length + ' 条' : ''}` };
+        result = { success: true, updated, skipped, failed, message: `已自动转入已配送：${updated.length} 条${skipped.length ? '，跳过 ' + skipped.length + ' 条' : ''}${failed.length ? '，失败 ' + failed.length + ' 条' : ''}` };
         break;
       }
 
@@ -2944,9 +3013,20 @@ serve(async (req) => {
 
           // ③ FIFO 判定（直接调用共享 runFIFO，和 preciseAutoDetectStatusV2 / scheduled-task 完全一致）
           const purchaseByCode = { [product_code]: purchaseRows };
+          // ★ 2026-11-12 修复：该商品已由 FIFO 自动完成的 report 先占用采购池
+          const { data: doneRows } = await supabase
+            .from("reports")
+            .select("id, product_code, demand_quantity, created_at")
+            .eq("product_code", product_code)
+            .eq("order_type", "缺货订购")
+            .eq("replenish_status", "已完成")
+            .ilike("status_remark", "%采购入库满足%")
+            .gt("demand_quantity", 0);
           const fifoRes = runFIFO(
             items.map((r: any) => ({ id: r.id, product_code: r.product_code, demand_quantity: Number(r.demand_quantity) || 0, created_at: r.created_at })),
-            purchaseByCode
+            purchaseByCode,
+            true,
+            doneRows || []
           ); // 默认 sameDayCounts=true（2026-11-08 放开锚点）
           const toCompleteIds = fifoRes.toCompleteIds;
           details.push(...fifoRes.details);
@@ -3059,50 +3139,65 @@ serve(async (req) => {
       }
 
       // ========== v2 配送待办列表（后台人工跟进配送） ==========
+      // v5.15.14 D 方案：按单（report）出条目，不再按 (商品,门店) 合并；
+      //   判定用 D（按上报日分段），窗口已结束且 D<需求 的只打只读标记 window_closed 并剔除
       case "get_delivery_todo": {
-        // 条件：已完成 + 仓库有库存 + 门店库存<需求
         const pool = await getPool();
         try {
           const { data: completedReports } = await supabase
             .from("reports")
-            .select("product_code, store_id, store_name, demand_quantity, product_name, specification, manufacturer, created_at")
+            .select("id, product_code, store_id, store_name, demand_quantity, product_name, specification, manufacturer, created_at")
             .eq("order_type", "缺货订购")
             .eq("replenish_status", "已完成")
             .not("product_code", "is", null);
 
           if (!completedReports || completedReports.length === 0) {
-            result = { success: true, todo: [] };
+            result = { success: true, todo: [], window_closed: 0, window_closed_ids: [] };
             break;
           }
 
-          const demandMap: Record<string, number> = {};
-          const keyInfo: Record<string, { product_code: string; store_id: string; store_name: string; product_name: string; product_spec: string; manufacturer: string; since: string }> = {};
-          for (const r of completedReports) {
-            const key = r.product_code + '||' + r.store_id;
-            demandMap[key] = (demandMap[key] || 0) + (Number(r.demand_quantity) || 0);
-            const curSince = toBjDate(r.created_at);
-            if (!keyInfo[key]) {
-              keyInfo[key] = { product_code: r.product_code, store_id: r.store_id, store_name: r.store_name, product_name: r.product_name || '', product_spec: r.specification || '', manufacturer: r.manufacturer || '', since: curSince || '2020-01-01' };
-            } else if (curSince && curSince < keyInfo[key].since) {
-              keyInfo[key].since = curSince;
-            }
-          }
-
+          // 一次算出全部已完成单的 D 值与窗口
+          const dRes = await computeD(pool, supabase, completedReports.map((r: any) => Number(r.id)));
           const codes = [...new Set(completedReports.map((r: any) => r.product_code).filter(Boolean))];
-          const { whStock, storeStock, transit } = await queryInventoryMaps(pool, codes);
+          const { whStock, storeStock } = await queryInventoryMaps(pool, codes);
+          const today = bjToday();
 
-          const todo: Array<{ product_code: string; store_id: string; store_name: string; product_name: string; product_spec: string; manufacturer: string; demand: number; wh_stock: number; store_stock: number; transit: number }> = [];
-          for (const key of Object.keys(keyInfo)) {
-            const info = keyInfo[key];
-            const demand = demandMap[key] || 0;
-            const wh = whStock[info.product_code] || 0;
-            const st = storeStock[key] || 0;
-            const tr = transit[key] || 0;
-            if (wh > 0 && (st + tr) < demand) {
-              todo.push({ product_code: info.product_code, store_id: info.store_id, store_name: info.store_name, product_name: info.product_name, product_spec: info.product_spec, manufacturer: info.manufacturer, demand, wh_stock: wh, store_stock: st, transit: tr });
+          const todo: Array<{ report_id: number; product_code: string; store_id: string; store_name: string; product_name: string; product_spec: string; manufacturer: string; demand: number; wh_stock: number; store_stock: number; transit: number; since: string; until: string | null; window_closed: boolean }> = [];
+          const windowClosedIds: number[] = [];
+          for (const r of completedReports) {
+            const w = dRes.windows[String(r.id)];
+            if (!w) continue; // 门店未映射 / 上报日缺失，无法用 D 判定
+            const demand = Number(r.demand_quantity) || 0;
+            if (demand <= 0) continue;
+            const tr = dRes.values[String(r.id)] ?? 0;
+            if (tr >= demand) continue;            // 配送已达需求（应由 upgrade_to_delivered 升为已配送）
+            // 窗口已结束（存在下一条上报日且不晚于今天）→ 只读标记，不进待办，不改状态
+            if (w.until && w.until <= today) {
+              windowClosedIds.push(Number(r.id));
+              continue;
             }
+            const wh = whStock[r.product_code] || 0;
+            if (!(wh > 0)) continue;               // 仓库无货，等采购
+            const st = storeStock[r.product_code + '||' + r.store_id] || 0;
+            if (st + tr >= demand) continue;        // 门店现有 + 已配送已够
+            todo.push({
+              report_id: Number(r.id),
+              product_code: r.product_code,
+              store_id: r.store_id,
+              store_name: r.store_name,
+              product_name: r.product_name || '',
+              product_spec: r.specification || '',
+              manufacturer: r.manufacturer || '',
+              demand,
+              wh_stock: wh,
+              store_stock: st,
+              transit: tr,
+              since: w.since,
+              until: w.until,
+              window_closed: false
+            });
           }
-          result = { success: true, todo };
+          result = { success: true, todo, window_closed: windowClosedIds.length, window_closed_ids: windowClosedIds, total_completed: completedReports.length };
         } catch (e) {
           console.error('[get_delivery_todo] 失败:', e);
           result = { success: false, error: String(e) };
@@ -5595,16 +5690,23 @@ serve(async (req) => {
             500  // 硬上限，防止爆
           );
           const OFFSET = Math.max(0, Number(_p.offset ?? reqBody?.offset) || 0);
+          // v5.15.14 分页修复：改用 id 游标。旧 offset 分页在"本页命中行被 UPDATE 移出已完成集合"后会跳行
+          const AFTER_ID = Math.max(0, Number(_p.after_id ?? reqBody?.after_id) || 0);
 
           // 1. 从 Supabase 分页拉 replenish_status='已完成' 的 reports
-          const { data: completedReports, error } = await supabase
+          //    有 after_id 时按 id 升序游标扫描（保证一轮跑完全部命中行且不跳行）
+          let reportQuery = supabase
             .from("reports")
             .select("id, product_code, store_id, store_name, demand_quantity, created_at, replenish_status, status_remark")
             .eq("replenish_status", "已完成")
             .eq("order_type", "缺货订购")
-            .gt("demand_quantity", 0)
-            .order("created_at", { ascending: false })
-            .range(OFFSET, OFFSET + MAX_RECORDS - 1);
+            .gt("demand_quantity", 0);
+          if (AFTER_ID > 0) {
+            reportQuery = reportQuery.gt("id", AFTER_ID).order("id", { ascending: true }).limit(MAX_RECORDS);
+          } else {
+            reportQuery = reportQuery.order("created_at", { ascending: false }).range(OFFSET, OFFSET + MAX_RECORDS - 1);
+          }
+          const { data: completedReports, error } = await reportQuery;
           
           if (error) { result = { success: false, error: 'Supabase查询失败: ' + error.message }; break; }
           
@@ -5614,94 +5716,28 @@ serve(async (req) => {
             break;
           }
           
-          // 2. 构建 Supabase→SQL Server 的映射
-          type UpgradeRow = { prec: number; krec: string; since: string; demand: number; report_id: string; store_name: string; product_code: string };
-          const upgradeRows: UpgradeRow[] = [];
-          
-          for (const r of (completedReports || [])) {
-            if (!r.product_code || !r.store_name) continue;
-            const krec = STORE_KREC_MAP[r.store_name];
-            if (!krec) continue;
-            const created = new Date(r.created_at);
-            const bjMs = created.getTime() + 8 * 3600 * 1000;
-            const bjDate = new Date(bjMs);
-            const since = `${bjDate.getUTCFullYear()}-${String(bjDate.getUTCMonth()+1).padStart(2,'0')}-${String(bjDate.getUTCDate()).padStart(2,'0')}`;
-            upgradeRows.push({
-              prec: 0,
-              krec: krec,
-              since: since,
-              demand: Number(r.demand_quantity) || 0,
-              report_id: r.id,
-              store_name: r.store_name,
-              product_code: r.product_code
-            });
-          }
-          
-          // 3. 查所有商品编码对应的 prec
-          const codes = [...new Set(upgradeRows.map(a => a.product_code))];
-          const precMap: Record<string, number> = {};
-          for (let i = 0; i < codes.length; i += 400) {
-            const batch = codes.slice(i, i + 500);
-            const req = pool.request();
-            const ph = batch.map((c, idx) => { req.input(`c${idx}`, sql.NVarChar(50), c); return `@c${idx}`; }).join(',');
-            const res = await req.query(`SELECT usercode, rec FROM ZHYYLS.dbo.Vptype WITH(NOLOCK) WHERE usercode IN (${ph})`);
-            (res.recordset || []).forEach((r: any) => { precMap[r.usercode] = Number(r.rec); });
-          }
-          for (const a of upgradeRows) { a.prec = precMap[a.product_code] || 0; }
-          const mappedRows = upgradeRows.filter(a => a.prec > 0);
-          
-          // 4. 分批查配送量
-          let fullRes: any[] = [];
-          const BATCH_SIZE = 400;
-          for (let i = 0; i < mappedRows.length; i += BATCH_SIZE) {
-            const batch = mappedRows.slice(i, i + BATCH_SIZE);
-            const req = pool.request();
-            const vals: string[] = [];
-            batch.forEach((a, idx) => {
-              req.input(`p${idx}`, sql.Int, a.prec);
-              req.input(`k${idx}`, sql.NVarChar(10), a.krec);
-              req.input(`s${idx}`, sql.VarChar(10), a.since);
-              req.input(`d${idx}`, sql.Int, a.demand);
-              vals.push(`(@p${idx}, @k${idx}, @s${idx}, @d${idx})`);
-            });
-            const q = `
-              CREATE TABLE #AUDIT (prec INT, krec NVARCHAR(10), since VARCHAR(10), demand INT);
-              INSERT INTO #AUDIT (prec, krec, since, demand) VALUES ${vals.join(',')};
-              SELECT a.prec, a.krec, a.since, a.demand,
-                     ISNULL(SUM(ABS(v.Qty)), 0) as delivered_qty
-              FROM #AUDIT a
-              LEFT JOIN ZHYYLS.dbo.vBuySendSumDetail v WITH(NOLOCK)
-                ON v.PRec = a.prec AND v.InKRec = a.krec AND v.OutKRec = '3'
-                AND v.BillDate >= a.since
-                AND (v.Comment IS NULL OR v.Comment NOT LIKE '%调货出库单%')
-              GROUP BY a.prec, a.krec, a.since, a.demand;
-              DROP TABLE #AUDIT;
-            `;
-            const res = await req.query(q);
-            fullRes = fullRes.concat(res.recordset || []);
-          }
-          
-          // 5. 匹配回 report，找出该升级的
-          const resultMap = new Map<string, number>();
-          for (const row of fullRes) {
-            const key = `${row.prec}|${row.krec}|${row.since}|${row.demand}`;
-            resultMap.set(key, Number(row.delivered_qty));
-          }
-          
-          const toUpgrade: string[] = [];
+          // 2. 按 D 口径（按上报日分段）计算每条 report 的配送量 —— 唯一来源 _shared/deliveryD.ts
+          //    区间 = [本条上报日, 下一条同 (商品,门店) 上报日)，最后一条到今天；富余作废不结转
+          const reportIds = (completedReports || []).map((r: any) => Number(r.id)).filter((n: number) => n > 0);
+          const dRes = await computeD(pool, supabase, reportIds);
+
+          // 3. 判定：D ≥ 需求 才升级为已配送，否则留在已入库（已完成）
+          const toUpgrade: number[] = [];
           const toStay: Array<any> = [];
-          
-          for (const a of mappedRows) {
-            const key = `${a.prec}|${a.krec}|${a.since}|${a.demand}`;
-            const delivered = resultMap.get(key) ?? 0;
-            if (delivered >= a.demand && a.demand > 0) {
-              toUpgrade.push(a.report_id);
+          let mappedCount = 0;
+          for (const r of (completedReports || [])) {
+            const w = dRes.windows[String(r.id)];
+            if (!w) continue; // 门店未映射 / 上报日缺失 → 无法统计，保持原状
+            mappedCount++;
+            const delivered = dRes.values[String(r.id)] ?? 0;
+            if (w.demand > 0 && delivered >= w.demand) {
+              toUpgrade.push(Number(r.id));
             } else {
-              toStay.push({ store: a.store_name, code: a.product_code, demand: a.demand, delivered, report_id: a.report_id });
+              toStay.push({ store: r.store_name, code: r.product_code, demand: w.demand, delivered, report_id: r.id, since: w.since, until: w.until });
             }
           }
           
-          // 6. 执行批量 UPDATE（只写 Supabase）
+          // 4. 执行批量 UPDATE（只写 Supabase，终态守卫不变）
           let upgraded = 0;
           if (toUpgrade.length > 0) {
             const UPGRADE_BATCH = 500;
@@ -5714,7 +5750,10 @@ serve(async (req) => {
                   status_changed_by: "系统自动",
                   status_remark: "自动升级为已配送（配送≥需求）"
                 })
-                .in("id", batchIds);
+                .in("id", batchIds)
+                .eq("replenish_status", "已完成")
+                .neq("replenish_status", "厂家断货")
+                .neq("replenish_status", "已关闭");
               if (uErr) {
                 result = { success: false, error: 'UPDATE失败: ' + uErr.message };
                 break;
@@ -5727,18 +5766,21 @@ serve(async (req) => {
           // has_more: 本页拉满了 MAX_RECORDS，理论上后面还有
           const has_more = total >= MAX_RECORDS;
           const next_offset = OFFSET + total;
+          const next_after_id = (completedReports || []).reduce((m, r) => Math.max(m, Number(r.id) || 0), AFTER_ID);
           result = {
             success: true,
             total_completed: total,
-            mapped: mappedRows.length,
-            skipped_no_prec: upgradeRows.length - mappedRows.length,
+            mapped: mappedCount,
+            skipped_no_window: total - mappedCount,
             to_upgrade: toUpgrade.length,
             actually_upgraded: upgraded,
+            upgraded_ids: toUpgrade,
             to_stay: toStay.length,
             sample_stay: toStay.slice(0, 5),
             // 分页控制（给循环调用方用）
             has_more,
             next_offset,
+            next_after_id,
             page_offset: OFFSET,
             page_size: MAX_RECORDS
           };
@@ -6728,6 +6770,21 @@ serve(async (req) => {
               //   新口径：每条 report 用自己的 created_at 当 anchor，FIFO 顺序扣共享剩余池
               const poolRemainingMap: Record<string, number> = {};
               const effectivePurchaseMap: Record<string, number> = {};
+
+              // ★ 2026-11-12 修复：已由 FIFO 自动完成的 report 也要参与扣减，
+              //   否则前端 gap 会拿"已经被上一条 report 用掉的入库"重复抵扣
+              const fifoDoneAll = (activeOnly ? completedSummary : reports)
+                .filter((r: any) => r.order_type === '缺货订购'
+                  && r.replenish_status === '已完成'
+                  && (r.status_remark || '').includes('采购入库满足'));
+              const fifoDoneByCode: Record<string, any[]> = {};
+              for (const r of fifoDoneAll) {
+                const c = (r.product_code || '').trim();
+                if (!c) continue;
+                if (!fifoDoneByCode[c]) fifoDoneByCode[c] = [];
+                fifoDoneByCode[c].push(r);
+              }
+
               for (const code of pendingCodes) {
                 const myReports = reports
                   .filter(r => (r.product_code || '').trim() === code
@@ -6750,7 +6807,15 @@ serve(async (req) => {
                   .sort((a, b) => a.bill_date_bj.localeCompare(b.bill_date_bj));
 
                 let satisfiedDemand = 0;   // runFIFO 口径下能满足的需求总量 = effectivePurchaseMap
-                for (const r of myReports) {
+                // ★ 2026-11-12：已完成(FIFO)的 report 先占用采购池，再判定 pending
+                const doneReports = (fifoDoneByCode[code] || []).slice()
+                  .sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+                const events = ([] as any[])
+                  .concat(myReports.map(r => ({ r, done: false })))
+                  .concat(doneReports.map(r => ({ r, done: true })))
+                  .sort((a, b) => new Date(a.r.created_at).getTime() - new Date(b.r.created_at).getTime());
+                for (const ev of events) {
+                  const r = ev.r;
                   const demand = Number(r.demand_quantity) || 0;
                   if (demand <= 0) continue;
                   const myAnchor = toBjDate(r.created_at);
@@ -6761,6 +6826,19 @@ serve(async (req) => {
                     if (isPurchaseEligible(pe.bill_date_bj, myAnchor)) {
                       eligibleRemain += pe.remain;
                     }
+                  }
+
+                  if (ev.done) {
+                    // 已完成的 FIFO report：先扣掉它占用的量
+                    let need = Math.min(demand, eligibleRemain);
+                    for (const pe of poolEntries) {
+                      if (need <= 0) break;
+                      if (!isPurchaseEligible(pe.bill_date_bj, myAnchor)) continue;
+                      const take = Math.min(pe.remain, need);
+                      pe.remain -= take;
+                      need -= take;
+                    }
+                    continue;
                   }
 
                   if (eligibleRemain >= demand) {
@@ -7085,6 +7163,20 @@ serve(async (req) => {
       // ========== 实时配送量查询（需求明细用）==========
       // v5.9.0+ 支持批量：product_codes + all_items → 一次 SQL 查全部商品
       case "get_realtime_transit": {
+        // ===== v5.15.14 D 方案：按 report_id 返回分段配送量（列表/明细/待办统一入口）=====
+        if (Array.isArray((params as any).report_ids) && (params as any).report_ids.length > 0) {
+          const ids = ((params as any).report_ids as any[]).map(n => Number(n)).filter(n => n > 0);
+          if (ids.length === 0) { result = { values: {}, windows: {} }; break; }
+          const pool = await getPool();
+          try {
+            const d = await computeD(pool, supabase, ids);
+            result = { values: d.values, windows: d.windows };
+          } catch (e) {
+            console.warn('[get_realtime_transit report_ids] 查询失败:', e);
+            result = { values: {}, windows: {}, error: String(e) };
+          } finally { releasePool(pool); }
+          break;
+        }
         const batchMode = !!(params as any).product_codes;
         if (batchMode) {
           // ===== 批量模式：一次 SQL 查所有商品的所有门店配送 =====
